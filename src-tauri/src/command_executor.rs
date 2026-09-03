@@ -77,8 +77,13 @@ pub enum Intent {
     /// Local conversational reply (greetings, thanks, etc.)
     #[serde(rename = "greeting")]
     Greeting { reply: String },
+    /// Partial intent prompt (e.g. "What should I say to mummy?")
+    #[serde(rename = "need_more_info")]
+    NeedMoreInfo { prompt: String },
     #[serde(rename = "unknown")]
     Unknown { raw: String },
+    #[serde(other)]
+    Other,
 }
 
 /// Result of executing a command.
@@ -125,12 +130,20 @@ pub async fn execute_command(intent: Intent) -> Result<CommandResult, String> {
             success: true,
             message: reply,
         }),
+        Intent::NeedMoreInfo { prompt } => Ok(CommandResult {
+            success: true,
+            message: prompt,
+        }),
         Intent::Unknown { raw } => Ok(CommandResult {
             success: false,
             message: format!(
                 "I didn't understand: {}. Could you rephrase that, sir?",
                 raw
             ),
+        }),
+        Intent::Other => Ok(CommandResult {
+            success: false,
+            message: "Couldn't do that, sir.".to_string(),
         }),
     }
 }
