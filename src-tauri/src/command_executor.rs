@@ -221,19 +221,43 @@ fn close_app(target: &str) -> Result<CommandResult, String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let output = Command::new("pkill").args(["-f", &app_name]).output();
-        match output {
-            Ok(o) if o.status.success() => {
-                tracing::info!("closed app '{}'", app_name);
-                Ok(CommandResult {
-                    success: true,
-                    message: format!("Closed {}, sir.", capitalize(&app_name)),
-                })
+        // Try display name, then the Exec binary basename (covers Flatpak
+        // `bwrap` wrappers where pkill -f misses the app name).
+        // ponytail: ceiling = name match. Upgrade = window-manager PID kill
+        // via libwnck/KWin scripting when precise targeting needed.
+        let exec_base = app_registry::lookup(target).and_then(|a| match &a.launch {
+            app_registry::LaunchMethod::DesktopExec { exec } => exec
+                .split_whitespace()
+                .next()
+                .and_then(|p| p.rsplit('/').next())
+                .map(|s| s.to_string()),
+            _ => None,
+        });
+        let mut closed = Command::new("pkill")
+            .args(["-f", &app_name])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !closed {
+            if let Some(bin) = exec_base {
+                closed = Command::new("pkill")
+                    .args(["-f", &bin])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
             }
-            _ => Ok(CommandResult {
+        }
+        if closed {
+            tracing::info!("closed app '{}'", app_name);
+            Ok(CommandResult {
+                success: true,
+                message: format!("Closed {}, sir.", capitalize(&app_name)),
+            })
+        } else {
+            Ok(CommandResult {
                 success: false,
                 message: format!("I couldn't find {} running, sir.", capitalize(&app_name)),
-            }),
+            })
         }
     }
 }
@@ -598,9 +622,13 @@ fn take_screenshot() -> Result<CommandResult, String> {
     }
     #[cfg(target_os = "linux")]
     {
-        // Try COSMIC / GNOME / Spectacle / grim / xdg-desktop-portal screenshot tools
-        let _ = Command::new("cosmic-screenshot")
+        // grim+slurp first (works COSMIC+Sway+Hyprland today), then DE tools.
+        // ponytail: ceiling = interactive pickers. Upgrade = Screenshot portal
+        // (ashpd) for silent capture when COSMIC portal supports it.
+        let _ = Command::new("sh")
+            .args(["-c", "command -v grim >/dev/null && grim -g \"$(slurp)\""])
             .spawn()
+            .or_else(|_| Command::new("cosmic-screenshot").spawn())
             .or_else(|_| Command::new("gnome-screenshot").arg("-a").spawn())
             .or_else(|_| Command::new("spectacle").arg("-r").spawn())
             .or_else(|_| Command::new("flameshot").arg("gui").spawn());
@@ -680,7 +708,9 @@ fn browser_key(keys: &str, label: &str) -> Result<CommandResult, String> {
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("xdotool").args(["key", keys]).spawn();
+        // wtype first (Wayland-native), xdotool fallback (X11/XWayland).
+        let _ = Command::new("wtype").args(["-k", keys]).spawn()
+            .or_else(|_| Command::new("xdotool").args(["key", keys]).spawn());
     }
     tracing::info!("browser key: {} ({})", keys, label);
     Ok(CommandResult {
@@ -1273,9 +1303,12 @@ fn check_installed_linux(target: &str, display_name: &str) -> Option<CommandResu
 fn find_desktop_entry(name: &str) -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let dirs = [
-        "/usr/share/applications",
-        "/usr/local/share/applications",
-        &format!("{}/.local/share/applications", home),
+        "/usr/share/applications".to_string(),
+        "/usr/local/share/applications".to_string(),
+        format!("{}/.local/share/applications", home),
+        "/var/lib/flatpak/exports/share/applications".to_string(),
+        format!("{}/.local/share/flatpak/exports/share/applications", home),
+        "/var/lib/snapd/desktop/applications".to_string(),
     ];
 
     let name_lower = name.to_lowercase();

@@ -615,6 +615,19 @@ pub fn run() {
                         let _ = main_win.hide();
                     }
                 }
+                // Linux DE keybind target (`nexus --wake`, Super+Space): cold
+                // start must show AND wake, else orb sits idle. Second-instance
+                // --wake already wakes via single-instance callback above.
+                // ponytail: ceiling = show+wake. Upgrade = portal
+                // GlobalShortcuts (ashpd) when COSMIC/GNOME support settles.
+                if std::env::args().any(|arg| arg == "--wake") {
+                    tracing::info!("startup: --wake flag — waking orb");
+                    if let Some(main_win) = app.get_webview_window("main") {
+                        let _ = main_win.show();
+                        let _ = crate::window_manager::configure_non_activating_overlay(&main_win);
+                        let _ = main_win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
+                    }
+                }
             }
 
             // Run connection diagnostics on startup.

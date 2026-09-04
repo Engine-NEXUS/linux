@@ -1478,6 +1478,11 @@ fn start_audio_capture(
     // Try the default device first, then fall back to others.
     // The Intel SST "Digital Microphones" driver sometimes returns silence
     // in WASAPI shared mode, so we need to try ALL devices.
+    //
+    // Linux: skip PipeWire/ALSA monitor sources ("...monitor") — loopback of
+    // speaker output, never mic input. Skipped unless nothing else exists.
+    // ponytail: ceiling = name heuristic. Upgrade = pw-cli node-type check
+    // when PipeWire-native enumeration lands.
     let default_device = host.default_input_device();
     let mut try_order: Vec<cpal::Device> = Vec::new();
     if let Some(ref d) = default_device {
@@ -1494,6 +1499,12 @@ fn start_audio_capture(
             try_order.push(d.clone());
         }
     }
+    #[cfg(target_os = "linux")]
+    try_order.sort_by_key(|d| {
+        d.name()
+            .map(|n| n.to_lowercase().contains("monitor"))
+            .unwrap_or(false)
+    });
 
     if try_order.is_empty() {
         return Err("no input devices available".to_string());
