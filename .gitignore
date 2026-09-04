@@ -122,3 +122,8 @@ server/nlu/model/best_model.pt
 server/nlu/model/*.pt
 server/nlu/model/*.ckpt
 server/nlu/__pycache__/
+
+# Training dataset archives
+results.zip
+nexus_real_samples/*.zip
+gen_sapi.ps1

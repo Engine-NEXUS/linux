@@ -41,7 +41,6 @@ pub fn set_meeting_state(_state: std::sync::Arc<crate::meeting_detect::MeetingSt
 
 #[cfg(not(feature = "mock-wake"))]
 mod engine {
-    use std::io::Cursor;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -173,11 +172,8 @@ mod engine {
 
     /// Load an ONNX model from a file path.
     fn load_onnx_model(path: &Path) -> anyhow::Result<ModelType> {
-        let data = std::fs::read(path)
-            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
-        let mut rdr = Cursor::new(data);
         let model = tract_onnx::onnx()
-            .model_for_read(&mut rdr)
+            .model_for_path(path)
             .map_err(|e| anyhow::anyhow!("Failed to parse ONNX {}: {}", path.display(), e))?;
         let model = model
             .into_optimized()
@@ -2088,7 +2084,6 @@ mod tests {
     /// If tract-onnx produces 0.0 for these, there's a tract-onnx compatibility bug.
     #[test]
     fn test_nexus_classifier_tract_vs_onnxruntime() {
-        use std::io::Cursor;
         use tract_onnx::prelude::*;
 
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -2102,10 +2097,8 @@ mod tests {
             return;
         }
 
-        let data = std::fs::read(&nexus_path).expect("Failed to read nexus.onnx");
-        let mut rdr = Cursor::new(data);
         let model = tract_onnx::onnx()
-            .model_for_read(&mut rdr)
+            .model_for_path(&nexus_path)
             .expect("Failed to parse ONNX");
         let model = model.into_optimized().expect("Failed to optimize");
         let model = model.into_runnable().expect("Failed to make runnable");
