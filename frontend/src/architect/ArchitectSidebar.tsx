@@ -129,73 +129,10 @@ export function ArchitectSidebar() {
       return;
     }
 
-    // Use Gemini 3.1 Pro for architecture chat with graph context
-    void (async () => {
-      try {
-        const GEMINI_KEY = "AQ.Ab8RN6IQHjANZWrQJn2AgOee37Sqln_aYlEOJUraqW1L54Lkug";
-        const GEMINI_MODEL = "gemini-3.1-pro-preview";
-        const repoName = `${phase1Data?.owner || "unknown"}/${phase1Data?.repo || "repo"}`;
-
-        // Build context from the graph data
-        let graphContext = `Repository: ${repoName}\n`;
-        graphContext += `Summary: ${phase2Data?.summary || phase1Data?.summary || "Analyzing..."}\n`;
-        if (phase1Data) {
-          graphContext += `Layers: ${phase1Data.layers.map(l => `${l.label} (${l.layer_type}, ${l.file_count} files)`).join(", ")}\n`;
-        }
-        if (phase2Data) {
-          graphContext += `Total files: ${phase2Data.total_files}, Files analyzed: ${phase2Data.files_analyzed}\n`;
-          graphContext += `Hotspots: ${phase2Data.hotspots.slice(0, 5).map(h => `${h.file} (${h.in_degree} dependents, ${h.risk})`).join("; ")}\n`;
-          graphContext += `Circular deps: ${phase2Data.circular_deps.length} chains\n`;
-          if (phase2Data.circular_deps.length > 0) {
-            graphContext += `Cycles: ${phase2Data.circular_deps.slice(0, 3).map(c => c.chain.join(" → ")).join(" | ")}\n`;
-          }
-          graphContext += `Isolated files: ${phase2Data.isolated.length}\n`;
-          graphContext += `Entry points: ${phase2Data.entry_points.join(", ")}\n`;
-        }
-        if (selectedFile) {
-          graphContext += `Selected file: ${selectedFile.file_path} (in_degree=${selectedFile.in_degree}, out_degree=${selectedFile.out_degree}, risk=${selectedFile.risk_level})\n`;
-        }
-
-        const prompt = `You are NEXUS, an AI architecture assistant analyzing the repository ${repoName}.
-You have access to a real dependency graph built from static import analysis.
-
-Graph Context:
-${graphContext}
-
-The developer asks: "${text}"
-
-Answer concisely (under 200 words). Use markdown formatting. Reference specific file paths when relevant.
-If the question is about impact or "what breaks", explain the blast radius with specific dependency paths.
-If about circular deps, explain why they're dangerous and which ones exist.
-If about hotspots, identify the highest-coupling files and why they're risky.
-If about safe refactoring, suggest low-coupling starting points.`;
-
-        const resp = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_KEY}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { maxOutputTokens: 500, temperature: 0.7 },
-            }),
-          }
-        );
-
-        if (resp.ok) {
-          const data = await resp.json();
-          const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (reply && reply.length > 10) {
-            addChatMessage({ role: "assistant", text: reply });
-            void speak("Analysis updated.");
-            return;
-          }
-        }
-
-        // Fallback to keyword-based response if Gemini fails
-        throw new Error("Gemini API failed");
-      } catch {
-        // Fallback: keyword-based response
+    // Architecture chat: deterministic summary from the local dependency graph.
+    // No external model — ponytail: route through Worker when server-side
+    // graph-aware chat lands.
+    {
         let reply = "";
         if (lower.includes("circular") || lower.includes("cycle")) {
           if (phase2Data && phase2Data.circular_deps.length > 0) {
@@ -222,8 +159,7 @@ If about safe refactoring, suggest low-coupling starting points.`;
         }
         addChatMessage({ role: "assistant", text: reply });
         void speak("Analysis updated.");
-      }
-    })();
+    }
   };
 
   return (

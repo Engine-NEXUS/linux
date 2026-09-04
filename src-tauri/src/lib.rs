@@ -512,7 +512,7 @@ pub fn run() {
 
             // Network bridge (HTTP) sends transcripts to the Cloudflare Worker.
             // No sidecar, no server, no WebSocket — fully serverless.
-            // The Worker URL is baked into the installer via NEXUS_SERVER_URL.
+            // Worker URL is hardcoded in commands::WORKER_URL.
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -537,14 +537,9 @@ pub fn run() {
             });
 
             // Check if this is first launch (no config file yet).
-            // Auto-generate a unique user ID and device ID (UUID v4) and use
-            // the server URL baked into the installer. The user never has to
+            // Auto-generate a unique user ID and device ID (UUID v4) against
+            // the hardcoded commands::WORKER_URL. The user never has to
             // manually enter these — they're system-generated.
-            //
-            // The server URL is determined at build time:
-            //   - Default: ws://127.0.0.1:41098/ws (local dev / same-machine sidecar)
-            //   - Installer override: set NEXUS_SERVER_URL env var before building
-            //     the installer to bake in the user's remote server URL.
             let store_path = app.path().app_data_dir().ok();
             let mut should_open_setup = std::env::args().any(|arg| arg == "--setup" || arg == "-s");
             if let Some(dir) = store_path {
@@ -553,8 +548,7 @@ pub fn run() {
                     should_open_setup = true;
                     let user_id = format!("user_{}", network::uuid_v4());
                     let device_id = format!("device_{}", network::uuid_v4());
-                    let server_url = option_env!("NEXUS_SERVER_URL")
-                        .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
+                    let server_url = crate::commands::WORKER_URL;
                     let default_config = serde_json::json!({
                         "serverUrl": server_url,
                         "userId": user_id,
@@ -578,8 +572,7 @@ pub fn run() {
                 let config_path = dir.join("nexus-config.json");
                 if let Ok(content) = std::fs::read_to_string(&config_path) {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        let default_url = option_env!("NEXUS_SERVER_URL")
-                            .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
+                        let default_url = crate::commands::WORKER_URL;
                         let url = json["serverUrl"].as_str().unwrap_or(default_url);
                         let url = if url.is_empty() { default_url } else { url };
                         let uid = json["userId"].as_str().unwrap_or("");
@@ -620,6 +613,54 @@ pub fn run() {
                 // --wake already wakes via single-instance callback above.
                 // ponytail: ceiling = show+wake. Upgrade = portal
                 // GlobalShortcuts (ashpd) when COSMIC/GNOME support settles.
+                //
+                // First-run hotkey: best-effort gsettings bind of Super+Space.
+                // Never fails startup; COSMIC without gsettings schema falls
+                // back to the manual Settings > Keyboard path.
+                #[cfg(target_os = "linux")]
+                {
+                    let exe = std::env::current_exe()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| "nexus".to_string());
+                    std::process::Command::new("gsettings")
+                        .args([
+                            "get",
+                            "org.gnome.settings-daemon.plugins.media-keys",
+                            "custom-keybindings",
+                        ])
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        .filter(|s| !s.contains("nexus-wake"))
+                        .and_then(|existing| {
+                            let slot = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/nexus-wake/";
+                            let updated = if existing.trim() == "@as []" || existing.trim() == "[]" {
+                                format!("['{slot}']")
+                            } else {
+                                format!("{}, '{slot}']", existing.trim_end_matches(['\n', ']']))
+                            };
+                            std::process::Command::new("gsettings")
+                                .args([
+                                    "set",
+                                    "org.gnome.settings-daemon.plugins.media-keys",
+                                    "custom-keybindings",
+                                    &updated,
+                                ])
+                                .status()
+                                .ok()
+                                .filter(|s| s.success())
+                        })
+                        .map(|_| {
+                            let slot = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/nexus-wake/";
+                            let _ = std::process::Command::new("gsettings")
+                                .args(["set", slot, "name", "NEXUS Wake"]).status();
+                            let _ = std::process::Command::new("gsettings")
+                                .args(["set", slot, "command", &format!("{exe} --wake")]).status();
+                            let _ = std::process::Command::new("gsettings")
+                                .args(["set", slot, "binding", "<Super>space"]).status();
+                        });
+                }
                 if std::env::args().any(|arg| arg == "--wake") {
                     tracing::info!("startup: --wake flag — waking orb");
                     if let Some(main_win) = app.get_webview_window("main") {

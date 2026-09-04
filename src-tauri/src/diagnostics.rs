@@ -161,7 +161,7 @@ fn check_worker(worker_url: &str) -> ServiceStatus {
         return ServiceStatus {
             name: "Cloudflare Worker".into(),
             connected: false,
-            detail: "No Worker URL configured. Set NEXUS_SERVER_URL in settings.".into(),
+            detail: "No Worker URL configured.".into(),
             latency_ms: None,
         };
     }
@@ -385,8 +385,7 @@ pub fn nexus_diagnostics(
             match std::fs::read_to_string(&config_path) {
                 Ok(content) => {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        let default_url = option_env!("NEXUS_SERVER_URL")
-                            .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
+                        let default_url = crate::commands::WORKER_URL;
                         let url = json["serverUrl"].as_str().unwrap_or(default_url);
                         let url = if url.is_empty() { default_url.to_string() } else { url.to_string() };
                         let uid = json["userId"].as_str().unwrap_or("").to_string();

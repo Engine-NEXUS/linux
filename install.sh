@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# NEXUS Agent — Fast One-Command Cross-Platform Installer & Setup
+# NEXUS Agent — Dev-local install (Linux).
+# Fast path: frontend build + cargo build + symlink + .desktop + hotkey + setup.
+# For release builds see scripts/build-prod.sh; for end users install-prod.sh.
 # ==============================================================================
 set -e
 
@@ -84,8 +86,10 @@ fi
 echo ""
 echo -e "${GREEN}═════════════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}✓ NEXUS is installed and ready!${NC}"
+"$SCRIPT_DIR/scripts/register-hotkey.sh" "$SCRIPT_DIR/src-tauri/target/release/nexus" || true
+
 echo -e "• Binary: ~/.local/bin/nexus"
-echo -e "• Global Hotkey: Ctrl+Shift+Space"
+echo -e "• Global Hotkey: Super+Space (DE keybind → nexus --wake)"
 echo -e "• Wake Word: \"NEXUS\""
 echo -e "${GREEN}═════════════════════════════════════════════════════════════${NC}"
 echo ""

@@ -27,7 +27,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb"],
     "resources": [
       "resources/oww/**/*",
       "resources/server/stt_server.py",
@@ -43,7 +43,16 @@
       "icons/128x128@2x.png"
     ],
     "linux": {
-      "appimage": { "bundleMediaFramework": true }
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1",
+          "librsvg2-2",
+          "libasound2",
+          "libssl3"
+        ]
+      }
     },
     "copyright": "© 2026 NEXUS",
     "category": "Productivity",

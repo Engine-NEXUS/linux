@@ -32,15 +32,11 @@ interface Settings {
   deviceId: string;
   ttsVoice: string;
   speechRate: number;
-  ttsProvider?: string;
-  elevenlabsApiKey?: string;
-  fishAudioApiKey?: string;
-  googleCloudApiKey?: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: true,
-  hotkey: "Ctrl+Space",
+  hotkey: "Super+Space",
   autoHideDelay: 8,
   wakeWordEnabled: true,
   wakePhrase: "NEXUS",
@@ -54,7 +50,6 @@ const DEFAULT_SETTINGS: Settings = {
   deviceId: "local-device",
   ttsVoice: "af_sky",
   speechRate: 1.15,
-  ttsProvider: "kokoro",
 };
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
@@ -207,9 +202,9 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Global hotkey</span>
-            <span className="nx-row-hint">Press this key combo to wake NEXUS</span>
+            <span className="nx-row-hint">Super+Space — DE keybind to nexus --wake (fixed)</span>
           </div>
-          <input className="nx-input" value={settings.hotkey} onChange={(e) => update("hotkey", e.target.value)} />
+          <input className="nx-input" value={settings.hotkey} disabled readOnly />
         </div>
         <div className="nx-row">
           <div className="nx-row-label">
@@ -433,14 +428,14 @@ function BackendTab({ settings, update, connected }: { settings: Settings; updat
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Server URL</span>
-            <span className="nx-row-hint">Your n8n + Ollama backend server address</span>
+            <span className="nx-row-hint">Fixed backend (hardcoded, not configurable)</span>
           </div>
           <input
             type="url"
             className="nx-input"
-            placeholder="https://your-server.com:41098"
             value={settings.serverUrl}
-            onChange={(e) => update("serverUrl", e.target.value)}
+            disabled
+            readOnly
           />
         </div>
         <div className="nx-row">

@@ -11,6 +11,10 @@ use tauri_plugin_autostart::ManagerExt;
 
 use crate::app_registry;
 
+/// Cloudflare Worker URL. Hardcoded — no env, no settings override surface.
+/// Single backend for all installs; change here + rebuild to repoint.
+pub const WORKER_URL: &str = "https://nexus-worker.chitkullakshya.workers.dev";
+
 // ─── Pending sidebar content ───────────────────────────────────────
 //
 // When the sidebar window is created on-demand, the WebView2 needs time
@@ -104,9 +108,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            server_url: option_env!("NEXUS_SERVER_URL")
-                .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
-                .to_string(),
+            server_url: WORKER_URL.to_string(),
             user_id: String::new(),
             device_id: String::new(),
         }
@@ -127,8 +129,7 @@ pub fn get_server_config<R: Runtime>(
     }
     let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let default_url = option_env!("NEXUS_SERVER_URL")
-        .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
+    let default_url = WORKER_URL;
     // Use saved URL, but fall back to default if the saved URL is empty
     // (a previous save_settings call may have written an empty string).
     let saved_url = json["serverUrl"].as_str().unwrap_or(default_url);
@@ -706,7 +707,7 @@ impl Default for NexusSettings {
     fn default() -> Self {
         Self {
             autostart: true,
-            hotkey: "Ctrl+Space".to_string(),
+            hotkey: "Super+Space".to_string(),
             auto_hide_delay: 8,
             wake_word_enabled: true,
             wake_phrase: "NEXUS".to_string(),
@@ -715,9 +716,7 @@ impl Default for NexusSettings {
             meeting_mode_auto: true,
             suppress_tts_in_meetings: true,
             local_stt_only: true,
-            server_url: option_env!("NEXUS_SERVER_URL")
-                .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
-                .to_string(),
+            server_url: WORKER_URL.to_string(),
             user_id: String::new(),
             device_id: String::new(),
             tts_voice: "af_sky".to_string(),
@@ -745,8 +744,7 @@ pub fn get_settings<R: Runtime>(
     if config_path.exists() {
         if let Ok(config) = std::fs::read_to_string(&config_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&config) {
-                let default_url = option_env!("NEXUS_SERVER_URL")
-                    .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
+                let default_url = WORKER_URL;
                 if let Some(url) = json.get("serverUrl").and_then(|v| v.as_str()) {
                     // Don't overwrite with empty string — keep default
                     settings.server_url = if url.is_empty() { default_url.to_string() } else { url.to_string() };
@@ -780,8 +778,7 @@ pub fn save_settings<R: Runtime>(
     // identity loss if settings.json is stale or nexus-config.json was
     // temporarily missing.
     let config_path = dir.join("nexus-config.json");
-    let default_url = option_env!("NEXUS_SERVER_URL")
-        .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
+    let default_url = WORKER_URL;
 
     // Read existing config to preserve identity if needed
     let existing = std::fs::read_to_string(&config_path)
@@ -1038,8 +1035,18 @@ pub fn open_mic_settings() -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        // No standard mic privacy settings on most Linux distros
-        tracing::info!("open_mic_settings: no-op on Linux");
+        // Best-effort: pavucontrol if installed, else GNOME sound settings.
+        // Never fails — frontend falls back to its own guidance text.
+        let opened = std::process::Command::new("pavucontrol")
+            .spawn()
+            .map(|_| true)
+            .unwrap_or(false);
+        if !opened {
+            let _ = std::process::Command::new("xdg-open")
+                .arg("gnome-control-center://sound")
+                .spawn();
+        }
+        tracing::info!("open_mic_settings: launched pavucontrol/sound settings");
     }
 
     Ok(())

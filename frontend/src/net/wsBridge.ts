@@ -71,10 +71,10 @@ let pendingQuery = "";
  *   Rust emits: state(thinking), ack, result, done
  */
 
-// Build-time fallback only — the real URL comes from get_server_config at runtime.
-// This is the Cloudflare Worker URL (HTTPS, not WebSocket — serverless architecture).
-const FALLBACK_URL = (import.meta.env.VITE_SERVER_URL as string) ?? "wss://nexus-worker.chitkullakshya.workers.dev/ws";
-const DEVICE_TOKEN = (import.meta.env.VITE_DEVICE_TOKEN as string) ?? "";
+// Hardcoded Worker URL — the real URL comes from get_server_config at runtime.
+// Single backend for all installs; change in src-tauri/src/commands.rs WORKER_URL.
+const FALLBACK_URL = "https://nexus-worker.chitkullakshya.workers.dev";
+const DEVICE_TOKEN = "";
 
 /**
  * Check if we're running inside the Tauri WebView (has IPC bridge).
@@ -252,7 +252,7 @@ let cachedConfig: { url: string; token: string; userId: string; deviceId: string
 
 /**
  * Load server config from Rust (reads nexus-config.json).
- * Falls back to build-time env vars if not in Tauri or if the IPC call fails.
+ * Falls back to the hardcoded Worker URL if not in Tauri or IPC fails.
  */
 export async function getServerConfig(): Promise<{ url: string; token: string; userId: string; deviceId: string }> {
   if (cachedConfig) return cachedConfig;
@@ -272,12 +272,12 @@ export async function getServerConfig(): Promise<{ url: string; token: string; u
     }
   }
 
-  // Fallback: build-time env vars
+  // Fallback: hardcoded URL + local identity (browser preview, no Tauri IPC)
   cachedConfig = {
     url: FALLBACK_URL,
     token: DEVICE_TOKEN,
-    userId: (import.meta.env.VITE_USER_ID as string) ?? "local-user",
-    deviceId: (import.meta.env.VITE_DEVICE_ID as string) ?? "local-device",
+    userId: "local-user",
+    deviceId: "local-device",
   };
   return cachedConfig;
 }
