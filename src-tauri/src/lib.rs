@@ -544,21 +544,36 @@ pub fn run() {
             let mut should_open_setup = std::env::args().any(|arg| arg == "--setup" || arg == "-s");
             if let Some(dir) = store_path {
                 let config_path = dir.join("nexus-config.json");
-                if !config_path.exists() {
-                    should_open_setup = true;
-                    let user_id = format!("user_{}", network::uuid_v4());
-                    let device_id = format!("device_{}", network::uuid_v4());
+                // Repair stale configs: an old build (or failed setup) may have
+                // written the example URL or empty identity. Rewrite those
+                // fields against the hardcoded WORKER_URL + fresh UUIDs.
+                let existing: Option<serde_json::Value> = std::fs::read_to_string(&config_path)
+                    .ok()
+                    .and_then(|c| serde_json::from_str(&c).ok());
+                let saved_url = existing.as_ref().and_then(|j| j["serverUrl"].as_str()).unwrap_or("");
+                let saved_uid = existing.as_ref().and_then(|j| j["userId"].as_str()).unwrap_or("");
+                let saved_did = existing.as_ref().and_then(|j| j["deviceId"].as_str()).unwrap_or("");
+                let stale_url = saved_url.is_empty() || saved_url.contains("example");
+                if !config_path.exists() || stale_url || saved_uid.is_empty() || saved_did.is_empty() {
+                    let fresh = !config_path.exists();
+                    if fresh {
+                        should_open_setup = true;
+                    }
                     let server_url = crate::commands::WORKER_URL;
+                    let user_id = if saved_uid.is_empty() { format!("user_{}", network::uuid_v4()) } else { saved_uid.to_string() };
+                    let device_id = if saved_did.is_empty() { format!("device_{}", network::uuid_v4()) } else { saved_did.to_string() };
+                    let url = if stale_url { server_url } else { saved_url };
                     let default_config = serde_json::json!({
-                        "serverUrl": server_url,
+                        "serverUrl": url,
                         "userId": user_id,
                         "deviceId": device_id,
                     });
                     let _ = std::fs::create_dir_all(&dir);
                     let _ = std::fs::write(&config_path, default_config.to_string());
                     tracing::info!(
-                        "auto-created config at {:?} — user={}, device={}, server={}",
-                        config_path, user_id, device_id, server_url
+                        "config {} at {:?} — user={}, device={}, server={}",
+                        if fresh { "auto-created" } else { "repaired" },
+                        config_path, user_id, device_id, url
                     );
                 }
             }
@@ -680,12 +695,19 @@ pub fn run() {
                 let (worker_url, user_id) = match network::get_session_info() {
                     Some((url, uid, _)) => (url, uid),
                     None => {
-                        // Try reading from config file
+                        // Try reading from config file (platform-aware:
+                        // APPDATA on Windows, ~/.local/share on Linux).
                         let config_path = std::env::var("APPDATA")
                             .ok()
                             .map(|d| std::path::Path::new(&d)
                                 .join("com.nexus.assistant")
-                                .join("nexus-config.json"));
+                                .join("nexus-config.json"))
+                            .or_else(|| {
+                                std::env::var("HOME").ok().map(|h| {
+                                    std::path::Path::new(&h)
+                                        .join(".local/share/com.nexus.assistant/nexus-config.json")
+                                })
+                            });
                         match config_path.and_then(|p| std::fs::read_to_string(p).ok()) {
                             Some(content) => {
                                 let server_url = extract_json_string(&content, "serverUrl")

@@ -53,7 +53,10 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .ok_or_else(|| "main window not found".to_string())?;
 
     configure_non_activating_overlay(&win)?;
-    win.show().map_err(|e| e.to_string())?;
+    // Start hidden — obliterates the startup flash where a blank native
+    // window shows for ~1s before React mounts and hides itself.
+    // Rust shows the window on every wake path (hotkey, --wake, OWW).
+    win.hide().map_err(|e| e.to_string())?;
     // Start with click-through OFF so the user can interact with the window.
     win.set_ignore_cursor_events(false).map_err(|e| e.to_string())?;
     Ok(())
