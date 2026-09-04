@@ -162,12 +162,16 @@ async fn execute_media_command(action: &str) -> Result<CommandResult, String> {
 
 /// Close an application by name. Uses taskkill on Windows, pkill on Unix.
 fn close_app(target: &str) -> Result<CommandResult, String> {
-    let app_name = app_registry::lookup(target)
+    let entry = app_registry::lookup(target);
+    let app_name = entry
+        .as_ref()
         .map(|a| a.display_name.clone())
         .unwrap_or_else(|| target.to_string());
 
-    // Extract exe filename from the registry launch path if available
-    let exe_name = app_registry::lookup(target)
+    // Windows only: exe filename for taskkill.
+    #[cfg(target_os = "windows")]
+    let exe_name = entry
+        .as_ref()
         .and_then(|a| match &a.launch {
             app_registry::LaunchMethod::Exe { path } => {
                 std::path::Path::new(path)
@@ -221,23 +225,37 @@ fn close_app(target: &str) -> Result<CommandResult, String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        // Try display name, then the Exec binary basename (covers Flatpak
-        // `bwrap` wrappers where pkill -f misses the app name).
+        // Order: `flatpak kill` (exact, Flatpak apps) → pkill Exec basename
+        // (native apps) → pkill display name (last resort).
         // ponytail: ceiling = name match. Upgrade = window-manager PID kill
-        // via libwnck/KWin scripting when precise targeting needed.
-        let exec_base = app_registry::lookup(target).and_then(|a| match &a.launch {
-            app_registry::LaunchMethod::DesktopExec { exec } => exec
-                .split_whitespace()
-                .next()
-                .and_then(|p| p.rsplit('/').next())
-                .map(|s| s.to_string()),
+        // when precise targeting needed.
+        let exec = entry.as_ref().and_then(|a| match &a.launch {
+            app_registry::LaunchMethod::DesktopExec { exec } => Some(exec.clone()),
             _ => None,
         });
-        let mut closed = Command::new("pkill")
-            .args(["-f", &app_name])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        // `flatpak run <app-id> ...` → app-id = second token.
+        let flatpak_id = exec.as_ref().and_then(|e| {
+            let mut toks = e.split_whitespace();
+            (toks.next() == Some("flatpak") && toks.next() == Some("run"))
+                .then(|| toks.next().map(|s| s.to_string()))
+                .flatten()
+        });
+        let exec_base = exec.as_ref().and_then(|e| {
+            e.split_whitespace()
+                .next()
+                .and_then(|p| p.rsplit('/').next())
+                .map(|s| s.to_string())
+        });
+        let mut closed = false;
+        if !closed {
+            if let Some(id) = flatpak_id {
+                closed = Command::new("flatpak")
+                    .args(["kill", &id])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+            }
+        }
         if !closed {
             if let Some(bin) = exec_base {
                 closed = Command::new("pkill")
@@ -246,6 +264,13 @@ fn close_app(target: &str) -> Result<CommandResult, String> {
                     .map(|o| o.status.success())
                     .unwrap_or(false);
             }
+        }
+        if !closed {
+            closed = Command::new("pkill")
+                .args(["-f", &app_name])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
         }
         if closed {
             tracing::info!("closed app '{}'", app_name);
@@ -622,13 +647,14 @@ fn take_screenshot() -> Result<CommandResult, String> {
     }
     #[cfg(target_os = "linux")]
     {
-        // grim+slurp first (works COSMIC+Sway+Hyprland today), then DE tools.
-        // ponytail: ceiling = interactive pickers. Upgrade = Screenshot portal
-        // (ashpd) for silent capture when COSMIC portal supports it.
-        let _ = Command::new("sh")
-            .args(["-c", "command -v grim >/dev/null && grim -g \"$(slurp)\""])
-            .spawn()
-            .or_else(|_| Command::new("cosmic-screenshot").spawn())
+        // cosmic-screenshot = native portal UI on COSMIC (installed here).
+        // grim+slurp covers Sway/Hyprland. GNOME/Spectacle/flameshot last.
+        // ponytail: ceiling = interactive pickers. Upgrade = silent Screenshot
+        // portal (ashpd) when scripted capture needed.
+        let _ = Command::new("cosmic-screenshot").spawn()
+            .or_else(|_| Command::new("sh")
+                .args(["-c", "command -v grim >/dev/null && grim -g \"$(slurp)\""])
+                .spawn())
             .or_else(|_| Command::new("gnome-screenshot").arg("-a").spawn())
             .or_else(|_| Command::new("spectacle").arg("-r").spawn())
             .or_else(|_| Command::new("flameshot").arg("gui").spawn());
@@ -708,9 +734,24 @@ fn browser_key(keys: &str, label: &str) -> Result<CommandResult, String> {
     }
     #[cfg(target_os = "linux")]
     {
-        // wtype first (Wayland-native), xdotool fallback (X11/XWayland).
-        let _ = Command::new("wtype").args(["-k", keys]).spawn()
-            .or_else(|_| Command::new("xdotool").args(["key", keys]).spawn());
+        // wtype speaks Wayland virtual-keyboard; xdotool = X11-only fallback.
+        // keys here = "ctrl+t" style; wtype needs "-M ctrl -k t -m ctrl".
+        let wtype_args: Option<Vec<String>> = match keys {
+            "ctrl+t" => Some(vec!["-M".into(), "ctrl".into(), "-k".into(), "t".into(), "-m".into(), "ctrl".into()]),
+            "ctrl+w" => Some(vec!["-M".into(), "ctrl".into(), "-k".into(), "w".into(), "-m".into(), "ctrl".into()]),
+            "ctrl+tab" => Some(vec!["-M".into(), "ctrl".into(), "-k".into(), "Tab".into(), "-m".into(), "ctrl".into()]),
+            "alt+left" => Some(vec!["-M".into(), "alt".into(), "-k".into(), "Left".into(), "-m".into(), "alt".into()]),
+            _ => None,
+        };
+        match wtype_args {
+            Some(args) => {
+                let _ = Command::new("wtype").args(&args).spawn()
+                    .or_else(|_| Command::new("xdotool").args(["key", keys]).spawn());
+            }
+            None => {
+                let _ = Command::new("xdotool").args(["key", keys]).spawn();
+            }
+        }
     }
     tracing::info!("browser key: {} ({})", keys, label);
     Ok(CommandResult {

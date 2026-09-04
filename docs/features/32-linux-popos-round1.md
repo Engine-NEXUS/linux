@@ -17,9 +17,9 @@ deferred — COSMIC/GNOME coverage still thin.
 | `wakeword_oww.rs` | Linux: `try_order.sort_by_key` pushes `*monitor*` devices last | PipeWire `...monitor` = speaker loopback, never mic input. Old code probed it first, wasted 5s, sometimes settled on static (RMS ~0.003). |
 | `lib.rs` | Cold-start `--wake` handler: show + `configure_non_activating_overlay` + `__NEXUS_WAKE__()` | Second-instance `--wake` already worked via single-instance callback. But DE keybind with no instance running launched a dead-idle orb. Now it wakes too. |
 | `command_executor.rs` (`find_desktop_entry`) | + Flatpak (`/var/lib/flatpak`, `~/.local/share/flatpak`) + snap dirs | Pop!_OS ships many apps as Flatpak. Old 3-dir list missed them. |
-| `command_executor.rs` (`close_app`) | Fallback: pkill Exec basename when display-name pkill fails | Flatpak apps run as `bwrap`; display-name match misses. Exec basename (`org.gimp.GIMP` → still bwrap, but native-packaged apps now close reliably). |
-| `command_executor.rs` (`take_screenshot`) | `grim -g "$(slurp)"` first, then COSMIC/GNOME/Spectacle/flameshot | grim works COSMIC+Sway+Hyprland today. Silent portal capture deferred. |
-| `command_executor.rs` (`browser_key`) | `wtype` first, `xdotool` fallback | xdotool = X11-only, dead on Wayland. wtype speaks Wayland natively. |
+| `command_executor.rs` (`close_app`) | `flatpak kill <app-id>` → pkill Exec basename → pkill display name; single `lookup` reused | `flatpak run <app-id>` parsed from Exec line for exact kill. bwrap name-match misses solved. |
+| `command_executor.rs` (`take_screenshot`) | `cosmic-screenshot` first (native portal UI, installed), then grim+slurp / GNOME / Spectacle / flameshot | Verified `cosmic-screenshot` present on Pop!_OS 24.04. grim/slurp NOT installed — doc setup step still needed for Sway/Hyprland. |
+| `command_executor.rs` (`browser_key`) | Real wtype syntax (`-M ctrl -k t -m ctrl`), xdotool fallback | Old code passed `"ctrl+t"` to `wtype -k` — invalid, wtype needs modifier flags. Verified against wtype 0.4 man page. |
 
 `cargo check` clean (14 warnings, all pre-existing dead-code).
 
