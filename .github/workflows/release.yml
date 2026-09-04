@@ -34,7 +34,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: NEXUS-ubuntu-22.04
+          name: NEXUS-ubuntu-24.04
           path: src-tauri/target/release/bundle/deb/*.deb
           if-no-files-found: error
 
