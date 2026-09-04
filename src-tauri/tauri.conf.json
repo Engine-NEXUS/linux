@@ -30,8 +30,6 @@
     "targets": "all",
     "resources": [
       "resources/oww/**/*",
-      "resources/sherpa/speaker_model.onnx",
-      "resources/espeak-ng-data/**/*",
       "resources/server/stt_server.py",
       "resources/server/nlu_server.py",
       "resources/server/nlu/requirements.txt",
@@ -42,31 +40,8 @@
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/128x128@2x.png"
     ],
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser",
-        "languages": ["English"],
-        "template": "installer/nexus-installer.nsi",
-        "headerImage": "installer/header.bmp",
-        "sidebarImage": "installer/sidebar.bmp",
-        "installerIcon": "icons/icon.ico",
-        "compression": "lzma",
-        "displayLanguageSelector": false
-      },
-      "webviewInstallMode": {
-        "type": "downloadBootstrapper"
-      }
-    },
-    "macOS": {
-      "signingIdentity": "Developer ID Application: YOUR_TEAM",
-      "providerShortName": "NEXUS",
-      "entitlements": "entitlements.plist",
-      "infoPlist": "Info.plist"
-    },
     "linux": {
       "appimage": { "bundleMediaFramework": true }
     },
