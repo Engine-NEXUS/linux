@@ -25,6 +25,5 @@ else
   cargo install tauri-cli --version "^2" --locked
   (cd src-tauri && cargo tauri build --bundles deb)
 fi
-cd ..
 echo "==> Artifacts in src-tauri/target/release/bundle/deb/"
-ls src-tauri/target/release/bundle/deb/*.deb
+ls "$ROOT_DIR/src-tauri/target/release/bundle/deb/"*.deb
