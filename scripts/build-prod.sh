@@ -14,12 +14,16 @@ npm --prefix frontend install
 npm --prefix frontend run build
 
 echo "==> Building .deb (tauri build)"
-cd src-tauri
-if ! command -v cargo-tauri &>/dev/null && ! npm --prefix ../frontend exec tauri --version &>/dev/null; then
-  echo "==> Installing tauri-cli"
+if command -v cargo-tauri &>/dev/null; then
+  TAURI_RUN=(cargo tauri build)
+elif npm --prefix frontend exec tauri --version &>/dev/null; then
+  TAURI_RUN=(npm --prefix frontend exec tauri build)
+else
+  echo "==> Installing tauri-cli (one-time, may take a few minutes)"
   cargo install tauri-cli --version "^2" --locked
+  TAURI_RUN=(cargo tauri build)
 fi
-cargo tauri build --bundles deb
+(cd src-tauri && "${TAURI_RUN[@]}" --bundles deb)
 cd ..
 echo "==> Artifacts in src-tauri/target/release/bundle/deb/"
 ls src-tauri/target/release/bundle/deb/*.deb

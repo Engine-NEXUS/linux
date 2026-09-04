@@ -22,4 +22,12 @@ command -v cargo &>/dev/null || { echo "Error: Rust/cargo required (https://rust
 
 echo "==> tauri dev (HMR on http://localhost:5173)"
 cd src-tauri
-exec cargo tauri dev
+if command -v cargo-tauri &>/dev/null; then
+  exec cargo tauri dev
+elif npm --prefix ../frontend exec tauri --version &>/dev/null; then
+  exec npm --prefix ../frontend exec tauri dev
+else
+  echo "==> Installing tauri-cli (one-time, may take a few minutes)"
+  cargo install tauri-cli --version "^2" --locked
+  exec cargo tauri dev
+fi

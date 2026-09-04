@@ -59,12 +59,15 @@ else
     CARGO_ARGS+=("--bundles" "$BUNDLES")
   fi
   
-  if ! command -v cargo-tauri &> /dev/null && ! npm --prefix ../frontend exec tauri --version &> /dev/null; then
-    echo -e "\033[0;33m==> Installing tauri-cli\033[0m"
+  if command -v cargo-tauri &> /dev/null; then
+    cargo "${CARGO_ARGS[@]}"
+  elif npm --prefix ../frontend exec tauri --version &> /dev/null; then
+    npm --prefix ../frontend exec tauri "${CARGO_ARGS[@]:1}"
+  else
+    echo -e "\033[0;33m==> Installing tauri-cli (one-time, may take a few minutes)\033[0m"
     cargo install tauri-cli --version "^2" --locked
+    cargo "${CARGO_ARGS[@]}"
   fi
-  
-  cargo "${CARGO_ARGS[@]}"
   cd ..
   echo -e "\033[0;32m==> Artifacts in src-tauri/target/release/bundle/\033[0m"
 fi
