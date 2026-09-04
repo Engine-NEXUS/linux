@@ -109,6 +109,10 @@ pub struct ParseResult {
 /// - "open <url>" (direct URL)
 pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     let text = transcript.trim().to_lowercase();
+    // faster-whisper appends sentence punctuation ("hello." / "open youtube?").
+    // Anchored intent regexes (^...$) reject it, so "hello." fell through to
+    // unknown → backend → silence. Strip once here instead of per-regex.
+    let text = text.trim_end_matches(|c: char| ".?!…,".contains(c));
     let text = normalize_whitespace(&text);
 
     if text.is_empty() {
@@ -2420,6 +2424,15 @@ mod tests {
         let result = parse_deterministic("hello");
         assert!(result.is_some());
         assert!(matches!(result.unwrap().intent, ParsedIntent::Greeting { .. }));
+    }
+
+    #[test]
+    fn test_greeting_stt_punctuation() {
+        // faster-whisper appends sentence punctuation ("Hello."). The intent
+        // must still parse — regression test for the silent-hello bug.
+        for t in ["hello.", "Hello.", "hi?", "open youtube.", "thanks!"] {
+            assert!(parse_deterministic(t).is_some(), "failed on {t:?}");
+        }
     }
 
     #[test]
