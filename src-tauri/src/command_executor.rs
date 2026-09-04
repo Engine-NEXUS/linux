@@ -1319,9 +1319,10 @@ fn check_installed_macos(target: &str, display_name: &str) -> Option<CommandResu
 
 #[cfg(target_os = "linux")]
 fn check_installed_linux(target: &str, display_name: &str) -> Option<CommandResult> {
-    if let Some(exec) = find_desktop_entry(target) {
-        let result = Command::new("sh").args(["-c", &exec]).spawn();
-        if result.is_ok() {
+    // Registry already indexes XDG + Flatpak + snap + PWA. No second scanner.
+    // ponytail: ceiling = registry lookup. No fallback scanner to add back.
+    if let Some(entry) = app_registry::lookup(target) {
+        if app_registry::launch(&entry).is_ok() {
             return Some(CommandResult {
                 success: true,
                 message: format!("Opened {}, sir.", display_name),
@@ -1340,46 +1341,6 @@ fn check_installed_linux(target: &str, display_name: &str) -> Option<CommandResu
     None
 }
 
-#[cfg(target_os = "linux")]
-fn find_desktop_entry(name: &str) -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let dirs = [
-        "/usr/share/applications".to_string(),
-        "/usr/local/share/applications".to_string(),
-        format!("{}/.local/share/applications", home),
-        "/var/lib/flatpak/exports/share/applications".to_string(),
-        format!("{}/.local/share/flatpak/exports/share/applications", home),
-        "/var/lib/snapd/desktop/applications".to_string(),
-    ];
-
-    let name_lower = name.to_lowercase();
-    let name_no_spaces = name_lower.replace(' ', "-");
-
-    for dir in &dirs {
-        let path = std::path::Path::new(dir);
-        if !path.exists() { continue; }
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_lowercase();
-                if fname.contains(&name_lower) || fname.contains(&name_no_spaces) {
-                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                        for line in content.lines() {
-                            if let Some(exec) = line.strip_prefix("Exec=") {
-                                let clean = exec
-                                    .split_whitespace()
-                                    .filter(|w| !w.starts_with('%'))
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                return Some(clean);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
 
 // ─── Tier 3: URL fallback ──────────────────────────────────────────────────
 
