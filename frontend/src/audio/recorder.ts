@@ -85,7 +85,6 @@ function processNextQueuedCommand(): void {
   // Send it — the session should still be open from the previous command.
   setLongRunningInFlight(next, processNextQueuedCommand);
   // The orb is already hidden from the previous command's "On it sir".
-  // Re-show the loading indicator for this queued command.
   void sendTranscript(next).then(() => {
     console.log(`[NEXUS] queue: sent "${next}" to worker`);
   }).catch((e) => {

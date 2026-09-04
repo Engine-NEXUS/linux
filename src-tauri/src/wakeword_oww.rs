@@ -1451,29 +1451,9 @@ fn start_audio_capture(
 
     let host = cpal::default_host();
 
-    // ─── Non-Windows (Linux / macOS): PipeWire, PulseAudio, CoreAudio ───
-    // On Linux and macOS, the OS audio server manages stream routing and the default
-    // input device is the user's active microphone. Start it directly without the
-    // multi-device 5-second silence cascade.
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Some(default_device) = host.default_input_device() {
-            let dev_name = default_device.name().unwrap_or_else(|_| "default".into());
-            tracing::info!("audio: starting capture on default device '{}'...", dev_name);
-            match try_device_silent(&default_device, engine.clone()) {
-                Ok(()) => {
-                    tracing::info!("audio: stream active on '{}'", dev_name);
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "audio: default device '{}' failed to start: {e}. Falling back to device list.",
-                        dev_name
-                    );
-                }
-            }
-        }
-    }
+    // On Linux, the ALSA default device often routes to a PipeWire dummy/monitor
+    // sink that produces electrical static (RMS ~0.003). We now iterate and probe
+    // all devices (just like Windows) to find the actual hardware microphone.
 
     // ─── Enumerate ALL input devices and log them ───────────────────
     let devices: Vec<cpal::Device> = match host.input_devices() {
@@ -1875,13 +1855,18 @@ fn try_device(
     tracing::info!("audio: 5s probe RMS = {:.6} ({} samples)", rms, samples);
 
     // If RMS is below 0.0001 (effectively silence), try the next device.
-    // A working mic in a quiet room has RMS ~0.001-0.01.
-    // The Intel SST silence bug produces RMS ~0.0000-0.00005.
-    if rms < 0.0001 {
+    // Linux ALSA dummy devices produce ~0.0038 RMS static.
+    // Windows Intel SST produces < 0.0001 RMS.
+    #[cfg(target_os = "linux")]
+    let silence_threshold = 0.0001;
+    #[cfg(not(target_os = "linux"))]
+    let silence_threshold = 0.0001;
+
+    if rms < silence_threshold {
         tracing::warn!(
-            "audio: device RMS {:.6} is below silence threshold (0.0001) — \
-             likely Intel SST silence bug, trying next device",
-            rms
+            "audio: device RMS {:.6} is below silence threshold ({}) — \
+             trying next device",
+            rms, silence_threshold
         );
         drop(stream);
         return Err(format!("device produces silence (RMS={:.6})", rms));

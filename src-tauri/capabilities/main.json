@@ -18,8 +18,6 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:app:allow-version",
-    "global-shortcut:allow-register",
-    "global-shortcut:allow-unregister",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",

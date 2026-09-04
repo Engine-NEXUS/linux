@@ -181,7 +181,7 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     cleanup_webview2_profile();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             tracing::info!("single-instance: secondary launch attempt with args: {:?}", args);
             // Handle deep-link redirects on Windows/Linux (passed as CLI arg)
@@ -231,8 +231,12 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_store::Builder::default().build());
+
+    #[cfg(not(target_os = "linux"))]
+    let mut builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
+
+    builder
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,

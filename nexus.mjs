@@ -24,7 +24,7 @@ import { execSync, spawnSync } from "node:child_process";
 // We control all arguments (no user input) — the warning is a false positive
 // for our use case of launching .cmd shims like npm.cmd on Windows.
 process.removeAllListeners("warning");
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, arch } from "node:os";
@@ -302,10 +302,12 @@ function checkFasterWhisper() {
   } else {
     warn("faster-whisper not installed — installing now...");
     try {
-      execSync(`${IS_WIN ? "python" : "python3"} -m pip install faster-whisper fastapi uvicorn python-multipart`, {
+      let pipCmd = `${IS_WIN ? "python" : "python3"} -m pip install faster-whisper fastapi uvicorn python-multipart`;
+      if (IS_LINUX) pipCmd += " --break-system-packages";
+      execSync(pipCmd, {
         stdio: "inherit",
         encoding: "utf-8",
-        shell: IS_WIN,
+        shell: IS_WIN || IS_LINUX,
       });
       ok("faster-whisper installed successfully");
     } catch {
@@ -356,7 +358,9 @@ function cmdSetup() {
   info("Installing NLU server Python dependencies...");
   const nluReq = join(ROOT, "server", "nlu", "requirements.txt");
   if (existsSync(nluReq)) {
-    run(pythonCmd(), ["-m", "pip", "install", "-r", nluReq],
+    const pipArgs = ["-m", "pip", "install", "-r", nluReq];
+    if (IS_LINUX) pipArgs.push("--break-system-packages");
+    run(pythonCmd(), pipArgs,
       { allowFail: true, hint: "If pip fails, create a venv: python -m venv .venv && activate it" });
   }
 
@@ -487,7 +491,7 @@ function killRunningNexus() {
     }
   } else {
     try {
-      execSync("pkill -f nexus", { stdio: "pipe", encoding: "utf-8" });
+      execSync("pkill -x nexus", { stdio: "pipe", encoding: "utf-8" });
       warn("Killed running nexus process");
     } catch {
       // No nexus process running — good
@@ -504,8 +508,23 @@ function cmdBuild() {
   run("npm", ["--prefix", "frontend", "run", "build"]);
 
   info("Building Rust release binary (custom-protocol)...");
-  const cargoEnv = {};
-  if (IS_WIN && process.env.LIBCLANG_PATH) cargoEnv.LIBCLANG_PATH = process.env.LIBCLANG_PATH;
+  const cargoEnv = { ...process.env };
+  if (IS_WIN && process.env.LIBCLANG_PATH) {
+    cargoEnv.LIBCLANG_PATH = process.env.LIBCLANG_PATH;
+  }
+  if (IS_LINUX && !process.env.LIBCLANG_PATH) {
+    // Auto-detect LLVM on Linux (e.g. Pop!_OS / Ubuntu) for bindgen
+    const glob = readdirSync("/usr/lib").filter(f => f.startsWith("llvm-"));
+    if (glob.length > 0) {
+      glob.sort().reverse(); // get highest version
+      const p = join("/usr/lib", glob[0], "lib");
+      if (existsSync(join(p, "libclang.so"))) {
+        cargoEnv.LIBCLANG_PATH = p;
+        info(`Auto-detected LIBCLANG_PATH: ${p}`);
+      }
+    }
+  }
+
   run("cargo", ["build", "--release", "--features", "custom-protocol"],
     { cwd: join(ROOT, "src-tauri"), env: cargoEnv,
       hint: "Make sure LIBCLANG_PATH is set (Windows) or LLVM is installed" });
@@ -558,11 +577,11 @@ function cmdRun() {
     }
     // Fall back to direct launch if run.ps1 doesn't exist
     info(`Launching NEXUS: ${binPath}`);
-    run(binPath, [], { stdio: "ignore" });
+    run(binPath, [], { stdio: "inherit" });
   } else {
     // Unix: launch directly (no run.ps1 equivalent)
     info(`Launching NEXUS: ${binPath}`);
-    run(binPath, [], { stdio: "ignore" });
+    run(binPath, [], { stdio: "inherit" });
   }
 }
 

@@ -10,27 +10,32 @@ const WIN: &str = "main";
 
 /// Position the orb at bottom-center, just above the taskbar/dock/panel.
 pub fn position_orb<R: Runtime>(win: &WebviewWindow<R>) -> Result<(), String> {
-    use tauri::PhysicalPosition;
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let scale = monitor.scale_factor();
-        let screen = monitor.size();
-        let orb = 200i32; // matches tauri.conf.json
-        let phys_orb = (orb as f64 * scale) as i32;
-
-        let x = (screen.width as i32 - phys_orb) / 2;
-        #[cfg(target_os = "macos")]
-        let dock_offset = (70.0 * scale) as i32;
-        #[cfg(target_os = "windows")]
-        let dock_offset = (48.0 * scale) as i32;
-        #[cfg(target_os = "linux")]
-        let dock_offset = (36.0 * scale) as i32;
-
-        let gap = (12.0 * scale) as i32;
-        let y = screen.height as i32 - phys_orb - dock_offset - gap;
-
-        let _ = win.set_position(PhysicalPosition::new(x, y));
-        tracing::debug!("orb positioned at ({x}, {y}) [scale={scale}]");
+    #[cfg(target_os = "linux")]
+    {
+        // On Wayland, programmatic positioning is ignored and often returns (0, 0).
+        // Nudging it up by 16px pushes the window to (0, -16), hiding it off-screen
+        // or under the GNOME top bar. We must let the window manager place it.
+        return Ok(());
     }
+
+    use tauri_plugin_positioner::{Position, WindowExt};
+    
+    // 1. Ask tauri-plugin-positioner to place it exactly at BottomCenter of the work area
+    // (This automatically accounts for side-docks and top-panels on Linux/macOS)
+    if let Err(e) = win.move_window(Position::BottomCenter) {
+        tracing::error!("failed to position orb: {e}");
+    }
+
+    // 2. Nudge it up slightly so it floats above the taskbar (instead of being flush)
+    if let Ok(pos) = win.outer_position() {
+        if let Ok(Some(monitor)) = win.current_monitor() {
+            let scale = monitor.scale_factor();
+            let gap = (16.0 * scale) as i32;
+            let _ = win.set_position(tauri::PhysicalPosition::new(pos.x, pos.y - gap));
+            tracing::debug!("orb positioned via positioner at ({}, {}) [scale={}]", pos.x, pos.y - gap, scale);
+        }
+    }
+    
     Ok(())
 }
 
@@ -48,6 +53,7 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .ok_or_else(|| "main window not found".to_string())?;
 
     configure_non_activating_overlay(&win)?;
+    win.show().map_err(|e| e.to_string())?;
     // Start with click-through OFF so the user can interact with the window.
     win.set_ignore_cursor_events(false).map_err(|e| e.to_string())?;
     Ok(())

@@ -3,7 +3,6 @@
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-#[cfg(feature = "wakeword-sherpa")]
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, Runtime};
@@ -145,7 +144,6 @@ pub fn get_server_config<R: Runtime>(
 // Speaker enrollment uses sherpa-onnx for embedding extraction. When using the
 // default wakeword-oww engine, verification is not yet wired (see AGENTS.md),
 // so these commands are compiled out to avoid pulling in sherpa-onnx C++ deps.
-
 // ─── Meeting / privacy mode commands ─────────────────────────────────
 
 /// IPC: Check whether TTS should be suppressed right now.
@@ -653,7 +651,6 @@ pub async fn hide_loading_indicator<R: Runtime>(
 ) -> Result<(), String> {
     Ok(())
 }
-
 // ─── Settings window + persistence ───────────────────────────────────
 
 /// IPC: Open the settings window.
@@ -1062,7 +1059,7 @@ pub fn clear_transcript() -> Result<(), String> {
 #[tauri::command]
 pub fn refresh_app_registry() -> Result<String, String> {
     tracing::info!("manual app registry refresh requested");
-    app_registry::force_refresh();
+    crate::app_registry::force_refresh();
     Ok("App registry refreshed".to_string())
 }
 

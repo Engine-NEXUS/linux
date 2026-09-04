@@ -68,6 +68,10 @@ branches, forming the basis of PR #7 (merge of both branches into `main`).
 | 25 | Rich Repo Analysis Dashboard | [25-rich-repo-analysis-dashboard.md](25-rich-repo-analysis-dashboard.md) | GLM-4.7-flash (free) + GitHub languages API + pie charts (languages/frameworks) + databases + features + top bar heading |
 | 26 | Wake-Word Training Guide | [26-wake-word-training-guide.md](26-wake-word-training-guide.md) | How to train a custom openWakeWord ONNX model for "nexus" with TTS samples + negative samples |
 | 27 | Loading Indicator Overlay | [27-loading-indicator-overlay.md](27-loading-indicator-overlay.md) | Transparent click-through Lottie animation at top-right corner, shown during Worker processing after "On it sir" |
+| 28 | Linux Wayland Compatibility | [28-linux-wayland-compatibility.md](28-linux-wayland-compatibility.md) | Layer-shell, PipeWire, ashpd shortcuts, .desktop parsing, manylinux |
+| 29 | Overlay Architecture Analysis | [29-overlay-architecture-analysis.md](29-overlay-architecture-analysis.md) | Multi-window vs single-overlay vs native vs hybrid Raycast model |
+| 30 | Computer-Use Vision-Action Loop | [30-computer-use-vision-action-loop.md](30-computer-use-vision-action-loop.md) | Astra-style screenshot→action loop, grounding, harness, gates (research only) |
+| 31 | JARVIS-like Assistants Research | [31-jarvis-like-assistants-research.md](31-jarvis-like-assistants-research.md) | Open-source clones, wearables, computer-control patterns, steal list |
 
 ### Research System (2026-09-01)
 
