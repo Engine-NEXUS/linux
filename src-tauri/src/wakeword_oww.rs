@@ -1384,8 +1384,24 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         })
         .ok();
 
-    // Main loop: handle wake-word detections
+    // Main loop: handle wake-word detections.
+    // Cooldown: the closed-loop coupling between cpal KWS input and the
+    // WebKitGTK mic (PipeWire) makes the model fire continuously once the
+    // room gets loud (~0.9 prob on any speech). Without a cooldown, each
+    // detection re-triggers show()+eval() every ~1s — the orb flaps between
+    // show (Rust) and 8s-no-speech-timeout hide (frontend) forever, and the
+    // frontend never hears because startListening bails on "already
+    // listening". The frontend ignores dupes while listening anyway, so
+    // skipping evals here loses nothing.
+    let mut last_wake = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(30))
+        .unwrap_or_else(std::time::Instant::now);
     while rx.recv().is_ok() {
+        if last_wake.elapsed() < std::time::Duration::from_secs(10) {
+            tracing::debug!("wake-word: within 10s cooldown — skipping duplicate wake");
+            continue;
+        }
+        last_wake = std::time::Instant::now();
         tracing::info!("wake-word: NEXUS detected → triggering wake");
 
         // Ensure the STT server is running before the frontend starts recording
@@ -1399,7 +1415,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
             let _ = win.show();
             let _ = crate::window_manager::configure_non_activating_overlay(&win);
             let _ = win.set_ignore_cursor_events(false);
-            let _ = win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
+            if let Err(e) = win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()") {
+                tracing::warn!("wake-word: __NEXUS_WAKE__ eval failed (page not ready?): {e}");
+            }
         }
     }
     Ok(())
@@ -1499,11 +1517,13 @@ fn start_audio_capture(
             try_order.push(d.clone());
         }
     }
-    #[cfg(target_os = "linux")]
+    // PipeWire "Monitor of ..." loopbacks report as real inputs but only
+    // carry speaker output — probing them first costs 5s each and they
+    // can false-trigger the KWS on TTS playback. Try real mics first.
     try_order.sort_by_key(|d| {
-        d.name()
-            .map(|n| n.to_lowercase().contains("monitor"))
-            .unwrap_or(false)
+        let n = d.name().unwrap_or_default().to_lowercase();
+        // 0 = real mic (probe first), 1 = output loopback (probe last)
+        (n.contains("monitor") || n == "easyeffects_sink" || n == "spotify") as u8
     });
 
     if try_order.is_empty() {

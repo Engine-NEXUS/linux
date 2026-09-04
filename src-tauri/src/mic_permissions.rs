@@ -22,6 +22,8 @@
 
 #[cfg(target_os = "windows")]
 use tauri::Manager;
+#[cfg(target_os = "linux")]
+use tauri::Manager;
 use tauri::Runtime;
 
 /// Origins that are allowed to use the mic/camera without prompting.
@@ -36,6 +38,21 @@ const ALLOWED_ORIGIN_PREFIXES: &[&str] = &[
 
 /// Call once from the Tauri setup hook, after the windows exist.
 pub fn init<R: Runtime>(_app: &tauri::App<R>) {
+    #[cfg(target_os = "linux")]
+    {
+        for label in ["main", "setup"] {
+            let Some(win) = _app.get_webview_window(label) else {
+                continue;
+            };
+            let label_owned = label.to_string();
+            let res = win.with_webview(move |webview| {
+                register_media_permission_handler_linux(&webview, &label_owned);
+            });
+            if let Err(e) = res {
+                tracing::warn!("permissions: failed to hook '{label}' webview: {e}");
+            }
+        }
+    }
     #[cfg(target_os = "windows")]
     {
         for label in ["main", "setup"] {
@@ -58,6 +75,35 @@ pub fn init<R: Runtime>(_app: &tauri::App<R>) {
             }
         }
     }
+}
+
+/// Auto-allow mic/camera permission requests on Linux (WebKitGTK).
+/// Without this, WebKitGTK denies getUserMedia and the orb never hears —
+/// `main.tsx` startListening resets to idle with no voice. Only allows
+/// NEXUS's own origins (tauri.localhost, localhost, ipc); foreign origins
+/// fall through to the default (deny) decision.
+#[cfg(target_os = "linux")]
+fn register_media_permission_handler_linux(
+    webview: &tauri::webview::PlatformWebview,
+    label: &str,
+) {
+    use webkit2gtk::{WebViewExt, PermissionRequestExt};
+
+    let label_owned: String = label.to_string();
+    let wv: webkit2gtk::WebView = webview.inner();
+    wv.connect_permission_request(move |w, req| {
+        let origin = w.uri().map(|u| u.to_string()).unwrap_or_default();
+        let own = ALLOWED_ORIGIN_PREFIXES.iter().any(|p| origin.starts_with(p));
+        if own {
+            req.allow();
+            tracing::info!("permissions: mic/camera auto-allowed on '{label_owned}' ({origin})");
+        } else {
+            tracing::warn!("permissions: denied foreign origin '{origin}' on '{label_owned}'");
+        }
+        // true = we handled the decision, stop other handlers.
+        true
+    });
+    tracing::info!("permissions: mic/camera auto-allow registered on '{label}'");
 }
 
 /// Register the PermissionRequested handler on the WebView2 instance.

@@ -106,6 +106,9 @@ windows-core = "0.61"
 # Linux-specific: D-Bus / MPRIS media control & native notifications via zbus
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
+# WebKitGTK permission handler (auto-approve mic so getUserMedia never
+# prompts/denies). Version follows wry's webkit2gtk pin.
+webkit2gtk = { version = "2", features = ["v2_40"] }
 
 [features]
 default = ["wakeword-oww"]
