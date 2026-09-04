@@ -20,12 +20,15 @@ command -v node &>/dev/null || { echo "Error: Node.js 18+ required."; exit 1; }
 command -v cargo &>/dev/null || { echo "Error: Rust/cargo required (https://rustup.rs)."; exit 1; }
 [ -d frontend/node_modules ] || { echo "==> npm install"; npm --prefix frontend install; }
 
+TAURI_BIN="$ROOT_DIR/frontend/node_modules/.bin/tauri"
 echo "==> tauri dev (HMR on http://localhost:5173)"
 cd src-tauri
 if command -v cargo-tauri &>/dev/null; then
   exec cargo tauri dev
-elif npm --prefix ../frontend exec tauri --version &>/dev/null; then
-  exec npm --prefix ../frontend exec tauri dev
+elif [ -x "$TAURI_BIN" ] && "$TAURI_BIN" --version &>/dev/null; then
+  # Direct binary path — `npm exec` would shift cwd and break the
+  # relative `../frontend` paths in tauri.conf.json beforeDevCommand.
+  exec "$TAURI_BIN" dev
 else
   echo "==> Installing tauri-cli (one-time, may take a few minutes)"
   cargo install tauri-cli --version "^2" --locked

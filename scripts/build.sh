@@ -59,10 +59,11 @@ else
     CARGO_ARGS+=("--bundles" "$BUNDLES")
   fi
   
+  TAURI_BIN="$ROOT_DIR/frontend/node_modules/.bin/tauri"
   if command -v cargo-tauri &> /dev/null; then
     cargo "${CARGO_ARGS[@]}"
-  elif npm --prefix ../frontend exec tauri --version &> /dev/null; then
-    npm --prefix ../frontend exec tauri "${CARGO_ARGS[@]:1}"
+  elif [ -x "$TAURI_BIN" ] && "$TAURI_BIN" --version &> /dev/null; then
+    "$TAURI_BIN" "${CARGO_ARGS[@]:1}"
   else
     echo -e "\033[0;33m==> Installing tauri-cli (one-time, may take a few minutes)\033[0m"
     cargo install tauri-cli --version "^2" --locked
