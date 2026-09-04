@@ -1096,6 +1096,29 @@ unsafe impl Sync for SendStream {}
 static CPAL_STREAM: once_cell::sync::Lazy<parking_lot::RwLock<Option<SendStream>>> =
     once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(None));
 
+/// Last stream-error log time (millis since epoch). Flood guard: once the
+/// ALSA duplex handle dies, cpal fires the error callback per tick
+/// (hundreds/sec). Log the first, then at most one per 5s.
+#[cfg(not(feature = "mock-wake"))]
+static LAST_STREAM_ERR_LOG_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Throttled stream-error log for the cpal error callback (runs on RT thread).
+#[cfg(not(feature = "mock-wake"))]
+fn log_stream_err_throttled(err: cpal::StreamError) {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_STREAM_ERR_LOG_MS.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < 5000 {
+        return;
+    }
+    LAST_STREAM_ERR_LOG_MS.store(now, Ordering::Relaxed);
+    tracing::error!("audio stream error: {err}");
+}
+
 /// Global engine reference — needed by the silence-recovery thread to
 /// restart the audio stream without going through the full init path.
 #[cfg(not(feature = "mock-wake"))]
@@ -1627,7 +1650,7 @@ fn try_device_silent(
     let out_buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<f32>::with_capacity(2560)));
     let engine_cb = engine;
     let wake_tx = WAKE_TX.get().cloned();
-    let err_cb = |err| tracing::error!("audio stream error: {err}");
+    let err_cb = log_stream_err_throttled;
 
     let build_result = match sample_format {
         cpal::SampleFormat::I16 => device.build_input_stream::<i16, _, _>(
@@ -1739,7 +1762,7 @@ fn try_device(
     let sum_sq = std::sync::Arc::new(AtomicU64::new(0)); // sum of squares * 1e9 (fixed-point)
     let total_samples = std::sync::Arc::new(AtomicU64::new(0));
 
-    let err_cb = |err| tracing::error!("audio stream error: {err}");
+    let err_cb = log_stream_err_throttled;
 
     let build_result = match sample_format {
         cpal::SampleFormat::I16 => device.build_input_stream::<i16, _, _>(

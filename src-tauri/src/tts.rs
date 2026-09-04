@@ -231,6 +231,23 @@ async fn pregenerate_cache(
 /// to stop the current audio immediately.
 static TTS_GENERATION: AtomicUsize = AtomicUsize::new(0);
 
+/// Single shared output handle, opened once for the life of the app.
+/// Opening + dropping OutputStream per speak tears down the shared ALSA
+/// duplex handle on Linux and kills the wake-word input stream with
+/// `alsa::poll() returned POLLERR`. Leaked stream lives as long as process.
+fn tts_output_handle() -> Result<rodio::OutputStreamHandle, String> {
+    static HANDLE: std::sync::OnceLock<rodio::OutputStreamHandle> =
+        std::sync::OnceLock::new();
+    if let Some(h) = HANDLE.get() {
+        return Ok(h.clone());
+    }
+    let (stream, handle) = OutputStream::try_default()
+        .map_err(|e| format!("Failed to get audio output stream: {e}"))?;
+    std::mem::forget(stream);
+    let _ = HANDLE.set(handle.clone());
+    Ok(handle)
+}
+
 /// IPC: Stop any currently-playing TTS audio.
 #[tauri::command]
 pub fn stop_tts() -> Result<(), String> {
@@ -296,8 +313,8 @@ pub async fn speak_text(
     // 5. Play audio using spawn_blocking so the tokio runtime can still
     //    process other commands (like stop_tts) while audio plays.
     let play_result = tokio::task::spawn_blocking(move || {
-        match OutputStream::try_default() {
-            Ok((_stream, handle)) => {
+        match tts_output_handle() {
+            Ok(handle) => {
                 match Sink::try_new(&handle) {
                     Ok(sink) => {
                         // Piper output sample rate is dynamic (typically 22050 Hz)
@@ -410,8 +427,8 @@ pub async fn speak_cached(
 
     // 4. Play audio from cached samples
     let play_result = tokio::task::spawn_blocking(move || {
-        match OutputStream::try_default() {
-            Ok((_stream, handle)) => {
+        match tts_output_handle() {
+            Ok(handle) => {
                 match Sink::try_new(&handle) {
                     Ok(sink) => {
                         let source = SamplesBuffer::new(1, sample_rate, audio);
