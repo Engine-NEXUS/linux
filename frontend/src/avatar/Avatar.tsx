@@ -104,13 +104,10 @@ export function Avatar() {
     };
     anim.addEventListener("complete", onComplete);
 
-    // Apply current state/visible immediately after creation.
+    // Apply current state immediately after creation.
     // Handles the race condition where hotkey fires before animation loads.
-    const { state: curState, visible: curVisible } = useAssistant.getState();
+    const { state: curState } = useAssistant.getState();
     applyState(anim, curState);
-    if (!curVisible) {
-      anim.pause();
-    }
 
     return () => {
       anim.removeEventListener("complete", onComplete);
@@ -125,19 +122,11 @@ export function Avatar() {
     applyState(animRef.current, state);
   }, [state]);
 
-  // Play/pause animation based on visibility.
-  // When hiding, delay the pause so the Lottie stays alive during the
-  // 0.5s slide-down animation — a frozen frame sliding down looks dead.
+  // Fullscreen stage: the orb is always on-screen (roaming when idle),
+  // so the Lottie always plays. No play/pause on visibility — visibility
+  // only switches animation segments via applyState above.
   useEffect(() => {
-    if (!animRef.current) return;
-    if (visible) {
-      animRef.current.play();
-    } else {
-      const t = setTimeout(() => {
-        animRef.current?.pause();
-      }, 500);
-      return () => clearTimeout(t);
-    }
+    animRef.current?.play();
   }, [visible]);
 
   return (

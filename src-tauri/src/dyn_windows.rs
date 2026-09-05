@@ -32,13 +32,20 @@ pub struct WindowConfig {
 }
 
 impl WindowConfig {
+    /// Fullscreen transparent stage — the orb roams inside it (frontend
+    /// transform). The native window never moves (Wayland forbids client
+    /// positioning), so fullscreen + click-through is the only portable
+    /// free-move approach. Maximized (not exclusive fullscreen) keeps the
+    /// taskbar/panel visible and stays on the primary monitor.
+    /// ponytail: single-monitor stage; multi-monitor roam needs one stage
+    /// per monitor via `current_monitors()` + per-monitor windows.
     pub fn main() -> Self {
         Self {
             label: "main", title: "NEXUS", url: "index.html",
-            width: 200., height: 200., min_width: Some(200.), min_height: Some(200.),
+            width: 200., height: 200., min_width: None, min_height: None,
             resizable: false, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: false,
-            focus: false, center: true, hidden_title: true,
+            focus: false, center: false, hidden_title: true,
         }
     }
 
@@ -127,6 +134,12 @@ pub fn get_or_create_window<R: Runtime>(
 
     if config.center {
         builder = builder.center();
+    }
+
+    // Fullscreen stage for the orb ("main"): maximized transparent window
+    // covering the work area. The orb roams inside via frontend transform.
+    if config.label == "main" {
+        builder = builder.maximized(true);
     }
 
     // Note: hidden_title and drag_drop_enabled are not available on the
