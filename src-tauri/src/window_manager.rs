@@ -29,10 +29,22 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         .ok_or_else(|| "main window not found".to_string())?;
 
     configure_non_activating_overlay(&win)?;
-    // Fullscreen stage: start click-through ON so the invisible stage never
-    // eats clicks. The frontend flips it OFF when the orb is hovered/held.
-    win.set_ignore_cursor_events(true).map_err(|e| e.to_string())?;
+    // NOTE: no set_ignore_cursor_events(true) here. tao aborts on
+    // ignore=true while the GTK window is unrealized (window.window()
+    // is None until first show — event_loop.rs:457 unwrap). A hidden
+    // window eats no clicks anyway. First show/hide applies the state.
     Ok(())
+}
+
+/// `set_ignore_cursor_events(true)` aborts inside tao when the GTK window
+/// is not yet realized (`window.window()` is None until first show).
+/// A hidden window eats no clicks anyway, so ignore=true on a hidden
+/// window is a no-op. ignore=false always applies.
+fn set_ignore_safe<R: Runtime>(win: &WebviewWindow<R>, ignore: bool) {
+    if ignore && !win.is_visible().unwrap_or(false) {
+        return;
+    }
+    let _ = win.set_ignore_cursor_events(ignore);
 }
 
 /// IPC: `invoke('set_click_through', { ignore: bool })`.
@@ -44,7 +56,7 @@ pub fn set_click_through<R: Runtime>(
     let win = app
         .get_webview_window(WIN)
         .ok_or_else(|| "main window not found".to_string())?;
-    win.set_ignore_cursor_events(ignore).map_err(|e| e.to_string())?;
+    set_ignore_safe(&win, ignore);
     if !ignore {
         let _ = win.set_always_on_top(true);
     }
@@ -71,7 +83,7 @@ pub fn show_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         .ok_or_else(|| "main window not found".to_string())?;
     win.show().map_err(|e| e.to_string())?;
     configure_non_activating_overlay(&win)?;
-    win.set_ignore_cursor_events(false).map_err(|e| e.to_string())?;
+    set_ignore_safe(&win, false);
     Ok(())
 }
 
@@ -85,6 +97,6 @@ pub fn hide_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let win = app
         .get_webview_window(WIN)
         .ok_or_else(|| "main window not found".to_string())?;
-    win.set_ignore_cursor_events(true).map_err(|e| e.to_string())?;
+    set_ignore_safe(&win, true);
     Ok(())
 }
