@@ -126,7 +126,7 @@ pub async fn synthesize(
 
     tracing::info!(
         "tts-piper: synthesized '{}' ({} samples, {}Hz)",
-        &text[..text.len().min(50)],
+        crate::tts::truncate_for_log(text, 50),
         samples.len(),
         sample_rate
     );

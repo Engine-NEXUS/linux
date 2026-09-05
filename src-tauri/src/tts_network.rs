@@ -125,6 +125,19 @@ pub fn set_network_down() {
     }
 }
 
+/// Record a successful Edge TTS synthesis (called when cloud synthesis works).
+/// Clears a stale down-flag so the next call tries Edge first again, and
+/// starts the 10-minute Piper-unload hysteresis timer.
+pub fn set_network_up() {
+    let was_up = NETWORK_UP.load(Ordering::Relaxed);
+    if !was_up {
+        NETWORK_UP.store(true, Ordering::Relaxed);
+        let mut recovered = NETWORK_RECOVERED_AT.lock().unwrap();
+        *recovered = Some(Instant::now());
+        tracing::info!("[tts_net] Edge TTS succeeded — marking network as up");
+    }
+}
+
 /// Check if Piper is currently loaded.
 pub fn is_piper_loaded() -> bool {
     PIPER_LOADED.load(Ordering::Relaxed)
@@ -193,8 +206,23 @@ pub fn start_network_monitor() {
 mod tests {
     use super::*;
 
+    /// These tests mutate shared process-wide statics (NETWORK_UP,
+    /// PIPER_LOADED, NETWORK_RECOVERED_AT). Rust runs tests in parallel
+    /// threads, so each test takes this lock first — otherwise they flake
+    /// by observing each other's state.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn reset_state() {
+        NETWORK_UP.store(true, Ordering::Relaxed);
+        mark_piper_unloaded();
+        *NETWORK_RECOVERED_AT.lock().unwrap() = None;
+        *LAST_NETWORK_CHECK.lock().unwrap() = None;
+    }
+
     #[test]
     fn test_defaults() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
         // Network should default to up (optimistic)
         assert!(is_network_up());
         // Piper should default to not loaded
@@ -203,6 +231,8 @@ mod tests {
 
     #[test]
     fn test_piper_loaded_flag() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
         mark_piper_loaded();
         assert!(is_piper_loaded());
         mark_piper_unloaded();
@@ -211,14 +241,17 @@ mod tests {
 
     #[test]
     fn test_should_unload_piper_when_network_down() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
         NETWORK_UP.store(false, Ordering::Relaxed);
         mark_piper_loaded();
         assert!(!should_unload_piper());
-        NETWORK_UP.store(true, Ordering::Relaxed);
     }
 
     #[test]
     fn test_should_unload_piper_when_not_loaded() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
         NETWORK_UP.store(true, Ordering::Relaxed);
         mark_piper_unloaded();
         assert!(!should_unload_piper());
@@ -226,6 +259,8 @@ mod tests {
 
     #[test]
     fn test_should_unload_piper_when_recently_recovered() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
         NETWORK_UP.store(true, Ordering::Relaxed);
         mark_piper_loaded();
         // Set recovery to now — should NOT unload (less than 10 min)
@@ -242,7 +277,22 @@ mod tests {
     }
 
     #[test]
+    fn test_network_up_down_roundtrip() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
+        // Regression: a lying probe used to pin the flag down while the
+        // network worked. A successful synthesis must clear a stale down.
+        NETWORK_UP.store(false, Ordering::Relaxed);
+        set_network_up();
+        assert!(is_network_up());
+        set_network_down();
+        assert!(!is_network_up());
+    }
+
+    #[test]
     fn test_should_unload_piper_after_10_min() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_state();
         NETWORK_UP.store(true, Ordering::Relaxed);
         mark_piper_loaded();
         // Set recovery to 11 minutes ago — should unload

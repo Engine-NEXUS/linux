@@ -43,7 +43,7 @@ pub async fn synthesize_to_mp3(
 
     tracing::info!(
         "tts-edge: synthesized '{}' ({} bytes MP3, voice={})",
-        &text[..text.len().min(50)],
+        crate::tts::truncate_for_log(text, 50),
         result.audio.len(),
         voice
     );
@@ -95,15 +95,22 @@ pub async fn is_available() -> bool {
         Err(_) => return false,
     };
 
-    // Try to fetch the voice list from edge-tts endpoint
-    // If this succeeds, edge-tts is available
+    // Connectivity test — check if Microsoft speech or web endpoint is reachable
     match client
-        .get("https://speech.platform.bing.com/consumer/speech/synthesize/read-aloud/voices/list")
+        .get("https://www.bing.com")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
         .send()
         .await
     {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
+        Ok(resp) => {
+            let status = resp.status();
+            tracing::debug!("tts_edge is_available status: {}", status);
+            status.is_success() || status.is_redirection()
+        }
+        Err(e) => {
+            tracing::warn!("tts_edge is_available failed: {}", e);
+            false
+        }
     }
 }
 
@@ -115,6 +122,17 @@ mod tests {
     fn test_edge_tts_module_loads() {
         // Just verify the module compiles and links
         let _ = std::hint::black_box(());
+    }
+
+    /// Char-safe log truncation: the exact 2026-09-19 crash string
+    /// (byte 50 inside 'の') must truncate without panicking.
+    #[test]
+    fn test_truncate_for_log_multibyte() {
+        let jp = "治療が短くなっていると感じているのですね。具体的にどのような変化が起きていますか？まずは担当医に状況を伝えて相談することをおすすめします。";
+        let out = crate::tts::truncate_for_log(jp, 50);
+        assert_eq!(out.chars().count(), 50);
+        assert!(jp.starts_with(&out));
+        assert_eq!(crate::tts::truncate_for_log("short", 50), "short");
     }
 
     /// Test that Edge TTS succeeds with a valid Microsoft voice ID.

@@ -36,6 +36,17 @@ pub struct CachedAudio {
     pub sample_rate: u32,
 }
 
+/// Truncate text to at most `max_chars` CHARACTERS for log lines.
+/// Byte-slicing (`&text[..n]`) panics on multibyte UTF-8 (measured
+/// 2026-09-19: byte 50 inside 'の' → panic → `panic=abort` → whole app
+/// dead). This can never panic by construction.
+pub fn truncate_for_log(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    text.chars().take(max_chars).collect()
+}
+
 impl TtsState {
     pub fn new() -> Self {
         let piper_engine = crate::tts_piper::new_engine();
@@ -158,13 +169,22 @@ pub async fn speak_text(
     let voice_id = voice.unwrap_or_else(|| edge_voice.clone());
     let tts_volume_pct = read_tts_volume(&app);
 
-    // Try to synthesize using the 3-tier fallback chain
-    let (audio, sample_rate) = match synthesize_with_fallback(&text, &voice_id, &state).await {
-        Ok(result) => result,
-        Err(e) => {
-            tracing::error!("tts: all TTS engines failed: {}", e);
-            meeting.set_tts_playing(false);
-            return Err(e);
+    // Fast path: exact-match cache (<5ms, no network, no synthesis).
+    // Acks like "Ok sir." were pre-generated at boot — replay them instead
+    // of re-synthesizing (which previously paid a probe + cold-engine cost).
+    // Falls through to synthesis on miss.
+    let (audio, sample_rate) = if let Some(hit) = state.cache.lock().await.get(&text).cloned() {
+        tracing::info!("tts: cache hit for '{}'", text);
+        (hit.samples, hit.sample_rate)
+    } else {
+        // Try to synthesize using the 2-tier fallback chain
+        match synthesize_with_fallback(&text, &voice_id, &state).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!("tts: all TTS engines failed: {}", e);
+                meeting.set_tts_playing(false);
+                return Err(e);
+            }
         }
     };
 
@@ -340,24 +360,43 @@ async fn synthesize_with_fallback(
 
     // Check network state — if network is down, skip Edge TTS entirely
     // and go straight to Piper (saves ~1-2s of waiting for Edge to fail).
-    let network_up = crate::tts_network::check_network_now().await;
-
-    if network_up {
-        // Tier 1: edge-tts (cloud, ~200ms, best quality, 0 MB RAM)
-        match crate::tts_edge::synthesize_to_pcm(text, voice).await {
-            Ok((samples, sr)) => {
+    //
+    // NOTE: this is the CACHED flag only (maintained by the background
+    // monitor + synthesis outcomes below). We used to run a live HTTPS
+    // probe here on every call — it lied (reported down while Groq worked)
+    // and added up to 5s before synthesis even started. The Edge attempt
+    // itself, raced with a timeout, is the only honest connectivity check.
+    if !crate::tts_network::is_network_up() {
+        tracing::info!("tts: network down (cached) — using Piper directly (skipping Edge TTS)");
+    } else {
+        // Tier 1: edge-tts (cloud, ~200ms, best quality, 0 MB RAM),
+        // raced with a timeout so a hanging endpoint can't stall speech.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            crate::tts_edge::synthesize_to_pcm(text, voice),
+        )
+        .await
+        {
+            Ok(Ok((samples, sr))) => {
                 tracing::info!("tts: edge-tts synthesis OK (cloud)");
+                crate::tts_network::set_network_up();
                 return Ok((samples, sr));
             }
-            Err(e) => {
-                tracing::warn!("tts: edge-tts failed ({}), trying Piper fallback", e);
-                // Edge TTS failed even though network check passed —
-                // could be a transient error. Mark network as down.
+            Err(_elapsed) => {
+                // Timeout = genuine transport failure → mark down so the
+                // next call skips Edge (saves 8s per call while offline).
+                tracing::warn!("tts: edge-tts timed out, trying Piper fallback");
                 crate::tts_network::set_network_down();
             }
+            Ok(Err(e)) => {
+                // Content/API rejection (bad voice, unsupported script, 4xx)
+                // is NOT a network outage — a single bad sentence must not
+                // poison the global flag (measured 2026-09-19: Japanese text
+                // → English voice rejection → "network down" → forced Piper
+                // → panic). Fall through to Piper for THIS call only.
+                tracing::warn!("tts: edge-tts rejected ({e}), trying Piper fallback (network flag untouched)");
+            }
         }
-    } else {
-        tracing::info!("tts: network down — using Piper directly (skipping Edge TTS)");
     }
 
     // Tier 2: Piper (local, ~40ms, good quality, ~80 MB RAM)
