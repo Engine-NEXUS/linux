@@ -64,6 +64,13 @@ pub enum Subsystem {
     /// Handles merge/approve/close PR, collaborators, org members, branches,
     /// releases, workflows. Token fetched from Worker, execution in Rust.
     GitHub,
+    /// MCP sub-center — external services via Model Context Protocol.
+    /// Handles Swiggy (food/grocery), Amazon (product search), WhatsApp
+    /// (messaging). Each MCP server is called via JSON-RPC over HTTP.
+    Mcp,
+    /// Command Center — compound multi-step tasks ("X then Y").
+    /// Plans steps, routes each to a sub-center, merges results.
+    CommandCenter,
     /// No subsystem — the command was unparseable or empty.
     None,
 }
@@ -199,6 +206,11 @@ fn install_new_request(subsystem: Subsystem) -> (String, Arc<AtomicBool>) {
 }
 
 /// Check if a request is cancelled.
+/// Public wrapper for `is_cancelled` — used by command_center step execution.
+pub(crate) fn is_cancelled_pub(cancel_flag: &Arc<AtomicBool>) -> bool {
+    is_cancelled(cancel_flag)
+}
+
 fn is_cancelled(cancel_flag: &Arc<AtomicBool>) -> bool {
     cancel_flag.load(Ordering::Relaxed)
 }
@@ -239,6 +251,12 @@ async fn parse_with_ml(transcript: &str) -> Option<crate::intent_parser::ParseRe
                 // from garbage transcripts or returns literal placeholders
                 // like "owner/repo". Sanitize before routing.
                 sanitize_ml_intent(&mut result);
+                // Capped window-opens must NOT route: fall through to NLU,
+                // not to the Architect window. (The 0.5 gate below already
+                // exists for brain; the cap forces it to trigger.)
+                if cap_ml_window_open(&mut result) {
+                    tracing::info!("orchestrator: capped ML Architect → NLU fallback");
+                }
                 if result.confidence >= 0.5 {
                     return Some(result);
                 }
@@ -257,10 +275,41 @@ async fn parse_with_ml(transcript: &str) -> Option<crate::intent_parser::ParseRe
             result.intent, result.confidence
         );
         sanitize_ml_intent(&mut result);
+        // Capped window-opens must NOT route: fall to Unknown (retry prompt),
+        // not to the Architect window. Other intents keep legacy behavior.
+        if cap_ml_window_open(&mut result) {
+            return None;
+        }
         return Some(result);
     }
 
     None
+}
+
+/// Cap ML-only window-opening intents. Returns true when capped.
+///
+/// Qwen/BERT are overconfident on out-of-distribution garbage transcripts
+/// (measured 2026-09-19: 'You feel it, no?' → OpenArchitect @0.99 from a
+/// ~1s noise capture → Architect window opened uninvited). Opening windows
+/// is a visible side effect, so ML-sourced Architect requires the same
+/// caution as a destructive op: cap below the 0.5 accept line → falls to
+/// Unknown/NLU → retry prompt. Deterministic 'open architect' / 'architect'
+/// phrases never pass through here (parse_with_ml only runs on
+/// deterministic miss), so real requests keep working.
+fn cap_ml_window_open(result: &mut crate::intent_parser::ParseResult) -> bool {
+    use crate::intent_parser::ParsedIntent;
+    if matches!(result.intent, ParsedIntent::OpenArchitect)
+        && !result.source.starts_with("deterministic")
+    {
+        tracing::warn!(
+            "orchestrator: ML-only OpenArchitect (source={}, conf={:.2}) capped — garbage-transcript guard",
+            result.source,
+            result.confidence
+        );
+        result.confidence = result.confidence.min(0.4);
+        return true;
+    }
+    false
 }
 
 /// Sanitize ML-classified intent: validate repo names, reject garbage.
@@ -357,6 +406,26 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // GitHub sub-command system — typed operations via octocrab
         ParsedIntent::GitHubCommand { .. } => Subsystem::GitHub,
 
+        // MCP sub-center — external services via Model Context Protocol
+        ParsedIntent::OrderFood { .. }
+        | ParsedIntent::SearchProduct { .. }
+        | ParsedIntent::SendWhatsAppMessage { .. } => Subsystem::Mcp,
+
+        // Clarification prompt — spoken locally, never touches the Worker.
+        // Partial MCP commands land here instead of Unknown so the user is
+        // asked for the missing slot rather than getting a guess/refusal.
+        ParsedIntent::NeedMoreInfo { .. } => Subsystem::LocalCommand,
+
+        // Screen control intents are handled explicitly in
+        // process_transcript (run_screen_click/read/tab); tracked as local.
+        ParsedIntent::ScreenClick { .. }
+        | ParsedIntent::ScreenRead { .. }
+        | ParsedIntent::BrowserTab { .. } => Subsystem::LocalCommand,
+
+        // Ghostwriter room entry — handled explicitly in process_transcript
+        // (session start + sidebar card), tracked as a local request.
+        ParsedIntent::EnterGhostwriter { .. } => Subsystem::LocalCommand,
+
         // Everything else goes to the Worker
         ParsedIntent::AnalyseRepo { .. }
         | ParsedIntent::AnalysePr { .. }
@@ -376,7 +445,11 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
 fn is_long_running(subsystem: &Subsystem) -> bool {
     matches!(
         subsystem,
-        Subsystem::WorkerBackend | Subsystem::Architect | Subsystem::GitHub
+        Subsystem::WorkerBackend
+            | Subsystem::Architect
+            | Subsystem::GitHub
+            | Subsystem::Mcp
+            | Subsystem::CommandCenter
     )
 }
 
@@ -422,21 +495,27 @@ pub async fn process_transcript<R: Runtime>(
     // by the Qwen brain are actually used for routing, not just observed.
     let parse_result = parse_deterministic(&transcript);
 
-    // If deterministic missed, try brain (admin-only) then NLU before falling
-    // back to Unknown. This is the same pipeline as parse_transcript (Tauri
-    // command) — the orchestrator no longer bypasses the ML classifiers.
+    // If deterministic missed:
+    // When online: route directly to cloud backend / 9Router (0 MB local RAM).
+    // When offline: fall back to local ML sidecar (BERT-Mini / brain on-demand).
     let parse_result = if parse_result.is_some() {
         parse_result
     } else {
-        tracing::info!("orchestrator: deterministic missed, trying brain/NLU");
-        let ml_result = parse_with_ml(&transcript).await;
-        if let Some(ref r) = ml_result {
-            tracing::info!(
-                "orchestrator: ML classified as {:?} (confidence={}, source={})",
-                r.intent, r.confidence, r.source
-            );
+        let is_online = crate::tts_network::check_network().await;
+        if !is_online {
+            tracing::info!("orchestrator: deterministic missed & offline, trying local ML fallback");
+            let ml_result = parse_with_ml(&transcript).await;
+            if let Some(ref r) = ml_result {
+                tracing::info!(
+                    "orchestrator: ML classified as {:?} (confidence={}, source={})",
+                    r.intent, r.confidence, r.source
+                );
+            }
+            ml_result
+        } else {
+            tracing::info!("orchestrator: deterministic missed & online, routing directly to cloud backend (saves RAM)");
+            None
         }
-        ml_result
     };
 
     let intent = parse_result
@@ -447,6 +526,62 @@ pub async fn process_transcript<R: Runtime>(
         });
 
     tracing::info!("orchestrator: parsed intent: {:?}", intent);
+
+    // ─── Ghostwriter room entry ─────────────────────────────────────
+    // Explicit entry bypasses everything else: start session + card + reply.
+    if let ParsedIntent::EnterGhostwriter { contact } = &intent {
+        return run_ghostwriter_enter(app, contact.clone()).await;
+    }
+
+    // ─── Screen control (ordinal click / read-back / tab switch) ────
+    // Executes inline (UIA grounding is local, ~50-500ms) with spoken
+    // results. Nothing here touches the network.
+    match &intent {
+        ParsedIntent::ScreenClick { ordinal } => {
+            return run_screen_click(app, *ordinal).await;
+        }
+        ParsedIntent::ScreenRead { ordinal } => {
+            return run_screen_read(app, *ordinal).await;
+        }
+        ParsedIntent::BrowserTab { index } => {
+            return run_browser_tab(app, *index).await;
+        }
+        _ => {}
+    }
+
+    // ─── Ghostwriter session intercept ──────────────────────────────
+    // Mic-hot rule: while a session is live, EVERY transcript routes to the
+    // room (dictation or allowlisted commands) instead of the normal
+    // pipeline. No wake word needed between turns; a timed-out session
+    // resumes with its draft intact on re-entry.
+    if crate::ghostwriter::is_active() {
+        return run_ghostwriter_turn(app, transcript).await;
+    }
+
+    // ─── Command Center: compound task fast path ───────────────────────
+    // If the transcript is compound ("X then Y"), build a task plan and
+    // execute via the command center instead of normal single-intent
+    // routing. This must run BEFORE routing because a compound transcript
+    // won't parse as a single intent anyway (the deterministic parser
+    // would return Unknown or a wrong partial match).
+    let request_id_probe = new_request_id();
+    if let Some(plan) =
+        crate::command_center::build_plan_with_brain(&transcript, &request_id_probe).await
+    {
+        tracing::info!(
+            "orchestrator: compound task detected — {} steps, using command center",
+            plan.steps.len()
+        );
+        // Install a real request so cancellation works
+        let (request_id, cancel_flag) = install_new_request(Subsystem::CommandCenter);
+        // Re-tag the plan with the real request_id
+        let plan = crate::command_center::TaskPlan {
+            task_id: request_id.clone(),
+            ..plan
+        };
+        return run_command_center(app, plan, transcript, dialog_context, request_id, cancel_flag)
+            .await;
+    }
 
     // 1b. Brain monitor — watches every transcript in the background.
     // Non-blocking: spawns a tokio task, never delays the main pipeline.
@@ -512,6 +647,34 @@ pub async fn process_transcript<R: Runtime>(
             // Local commands are instant — no ack, no loading indicator.
             // The frontend handles these directly (open app, media, etc).
             // We just emit done immediately.
+
+            // Clarification prompts (partial MCP commands) are spoken as a
+            // Result event — same channel the frontend already speaks — so
+            // the user hears the question instead of a Worker guess.
+            if let ParsedIntent::NeedMoreInfo { prompt } = &intent {
+                emit(
+                    &app,
+                    &OrchestratorEvent::Result {
+                        text: prompt.clone(),
+                        request_id: request_id.clone(),
+                        analysis: None,
+                        dialog_state: None,
+                    },
+                );
+                emit(
+                    &app,
+                    &OrchestratorEvent::Done {
+                        request_id: request_id.clone(),
+                    },
+                );
+                clear_active_request(&request_id);
+
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem,
+                    handled_locally: true,
+                });
+            }
 
             // Report execution success to the brain monitor (admin-only)
             #[cfg(feature = "admin-brain")]
@@ -584,20 +747,84 @@ pub async fn process_transcript<R: Runtime>(
                         let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
                         crate::brain_monitor::report_execution_success(&transcript, &intent_name);
                     }
-                    // Emit result
+
+                    let is_analysis_intent = matches!(
+                        &intent,
+                        ParsedIntent::AnalysePr { .. }
+                            | ParsedIntent::AnalyseRepo { .. }
+                            | ParsedIntent::AnalyseLatestPr { .. }
+                            | ParsedIntent::CheckBranch { .. }
+                    );
+                    let has_structured_analysis = analysis.as_ref().map_or(false, |a| !a.is_null());
+                    let is_long_markdown = text.len() > 300 || text.contains("\n#") || text.contains("\n##");
+
+                    let (spoken_text, show_sidebar) = if is_analysis_intent || has_structured_analysis || is_long_markdown {
+                        let spoken = match &intent {
+                            ParsedIntent::AnalysePr { pr_number, repo, .. } => {
+                                format!("Here is the analysis for PR #{} in {}, sir.", pr_number, repo)
+                            }
+                            ParsedIntent::AnalyseRepo { repo, .. } => {
+                                format!("Here is the analysis for {}, sir.", repo)
+                            }
+                            ParsedIntent::AnalyseLatestPr { repo, .. } => {
+                                format!("Here is the analysis for the latest PR in {}, sir.", repo)
+                            }
+                            ParsedIntent::CheckBranch { repo, .. } => {
+                                format!("Here is the branch check for {}, sir.", repo)
+                            }
+                            _ => "Here is the response in the sidebar, sir.".to_string(),
+                        };
+                        (spoken, true)
+                    } else {
+                        (text.clone(), false)
+                    };
+
+                    let sidebar_text = text.clone();
+                    let sidebar_analysis = analysis.clone();
+
+                    // Emit result with concise spoken text for TTS
                     emit(
                         &app,
                         &OrchestratorEvent::Result {
-                            text,
+                            text: spoken_text,
                             request_id: request_id.clone(),
-                            analysis,
+                            analysis: analysis.clone(),
                             dialog_state,
                         },
                     );
-                    // Note: "done" is emitted by the frontend after TTS finishes
-                    // (same as the old network.rs behavior — emitting done here
-                    // would cause stopTts() to cancel the response before the
-                    // user hears it).
+
+                    // Show sidebar for analysis/reports
+                    if show_sidebar {
+                        let app_clone = app.clone();
+                        let transcript_clone = transcript.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(ref a) = sidebar_analysis {
+                                if !a.is_null() {
+                                    if let Err(e) = crate::commands::show_sidebar_with_analysis(
+                                        app_clone,
+                                        transcript_clone,
+                                        sidebar_text,
+                                        a.clone(),
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!("orchestrator: sidebar analysis failed: {}", e);
+                                    }
+                                    return;
+                                }
+                            }
+                            if let Err(e) = crate::commands::show_sidebar_with_content(
+                                app_clone,
+                                transcript_clone,
+                                sidebar_text,
+                            )
+                            .await
+                            {
+                                tracing::warn!("orchestrator: sidebar show failed: {}", e);
+                            }
+                        });
+                    }
+
                     clear_active_request(&request_id);
 
                     Ok(ProcessResult {
@@ -802,9 +1029,20 @@ pub async fn process_transcript<R: Runtime>(
                         &OrchestratorEvent::Confirm {
                             prompt: prompt.clone(),
                             request_id: request_id.clone(),
-                            command: cmd_json,
+                            command: cmd_json.clone(),
                         },
                     );
+                    let confirm_payload = serde_json::json!({
+                        "requestId": request_id.clone(),
+                        "prompt": prompt.clone(),
+                        "command": cmd_json,
+                    });
+                    let _ = crate::commands::show_sidebar_with_confirmation(
+                        app.clone(),
+                        "GitHub Confirmation".to_string(),
+                        prompt.clone(),
+                        confirm_payload,
+                    ).await;
                 }
                 crate::github_cmd::GitHubResult::MergeConflict {
                     pr_number,
@@ -946,6 +1184,125 @@ pub async fn process_transcript<R: Runtime>(
             })
         }
 
+        Subsystem::Mcp => {
+            // MCP sub-center — external services via Model Context Protocol.
+            let is_write_intent = matches!(
+                intent,
+                ParsedIntent::SendWhatsAppMessage { .. }
+            );
+
+            // Only emit generic long-running Ack/Loading if this is a read operation
+            // that executes directly without an immediate confirmation prompt.
+            if !is_write_intent {
+                let ack = pick_ack();
+                emit(
+                    &app,
+                    &OrchestratorEvent::Ack {
+                        text: ack.to_string(),
+                        request_id: request_id.clone(),
+                    },
+                );
+                emit(
+                    &app,
+                    &OrchestratorEvent::Loading {
+                        visible: true,
+                        request_id: request_id.clone(),
+                    },
+                );
+                show_loading(&app);
+            }
+
+            let mcp_outcome = dispatch_to_mcp(&app, &intent, &transcript, &request_id).await;
+
+            if !is_write_intent {
+                emit(
+                    &app,
+                    &OrchestratorEvent::Loading {
+                        visible: false,
+                        request_id: request_id.clone(),
+                    },
+                );
+                hide_loading(&app);
+            }
+
+            match mcp_outcome {
+                Ok(Some(text)) => {
+                    emit(
+                        &app,
+                        &OrchestratorEvent::Result {
+                            text,
+                            request_id: request_id.clone(),
+                            analysis: None,
+                            dialog_state: None,
+                        },
+                    );
+                    emit(
+                        &app,
+                        &OrchestratorEvent::Done {
+                            request_id: request_id.clone(),
+                        },
+                    );
+                    clear_active_request(&request_id);
+                    Ok(ProcessResult {
+                        request_id,
+                        subsystem,
+                        handled_locally: false,
+                    })
+                }
+                Ok(None) => {
+                    // Confirmation gate active — OrchestratorEvent::Confirm was emitted
+                    // with the prompt question. Do NOT emit Result or Done so TTS speaks
+                    // the confirmation question cleanly without cancellation.
+                    Ok(ProcessResult {
+                        request_id,
+                        subsystem,
+                        handled_locally: false,
+                    })
+                }
+                Err(e) => {
+                    emit(
+                        &app,
+                        &OrchestratorEvent::Error {
+                            message: e.clone(),
+                            request_id: request_id.clone(),
+                        },
+                    );
+                    emit(
+                        &app,
+                        &OrchestratorEvent::Done {
+                            request_id: request_id.clone(),
+                        },
+                    );
+                    clear_active_request(&request_id);
+                    // Best-of combine: voice spoke the guidance; open the
+                    // fix-it card alongside (first failure per session).
+                    // The stashed retry fires when the server connects.
+                    if let Some(server) = server_for_mcp_intent(&intent) {
+                        open_mcp_connect_card(&app, server, &transcript).await;
+                    }
+                    Err(e)
+                }
+            }
+        }
+
+        Subsystem::CommandCenter => {
+            // Unreachable — compound tasks return early via
+            // run_command_center() before this match. Keep as a safety
+            // fallback: treat like WorkerBackend.
+            emit(
+                &app,
+                &OrchestratorEvent::Done {
+                    request_id: request_id.clone(),
+                },
+            );
+            clear_active_request(&request_id);
+            Ok(ProcessResult {
+                request_id,
+                subsystem,
+                handled_locally: true,
+            })
+        }
+
         Subsystem::None => {
             emit(
                 &app,
@@ -985,13 +1342,69 @@ pub fn signal_done(request_id: &str) {
 /// This reuses the existing `network::send_transcript` HTTP logic but
 /// routes the response through the orchestrator's event channel instead
 /// of the old "assistant:server" channel.
+///
+/// **9Router optimization:** For general questions, 9Router tries free
+/// cloud providers (Cerebras → Groq → Gemini) directly from the device,
+/// bypassing the Worker for 3-7x lower latency (~242ms vs ~2s). The
+/// Worker is the fallback if 9Router fails or the task requires Worker
+/// infrastructure (PR analysis, GitHub token, search).
 async fn dispatch_to_worker<R: Runtime>(
-    _app: AppHandle<R>,
+    app: AppHandle<R>,
     transcript: String,
     dialog_context: Option<serde_json::Value>,
     request_id: String,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<(String, Option<serde_json::Value>, Option<serde_json::Value>), String> {
+    // ─── 9Router fast path ──────────────────────────────────────────────
+    // Try local → free cloud providers first. This bypasses the Worker
+    // entirely for general questions, cutting latency from ~2s to ~242ms.
+    if crate::router::can_route(&transcript) {
+        let keys = crate::router::read_provider_keys(&app);
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("9router http client: {e}"))?;
+
+        tracing::info!(
+            "9router: trying fast path for request {} (transcript: {:?})",
+            request_id,
+            crate::router::truncate_pub(&transcript, 60),
+        );
+
+        match crate::router::route_question(
+            &transcript,
+            dialog_context.as_ref(),
+            &keys,
+            &client,
+        )
+        .await
+        {
+            Some(resp) => {
+                tracing::info!(
+                    "9router: fast path succeeded via {} in {}ms",
+                    resp.provider.name(),
+                    resp.latency_ms
+                );
+                // 9Router answered — return directly, skip Worker entirely.
+                return Ok((resp.text, None, None));
+            }
+            None => {
+                tracing::info!(
+                    "9router: fast path failed for {}, falling back to Worker",
+                    request_id
+                );
+                // Fall through to Worker
+            }
+        }
+    }
+
+    // Check if cancelled before Worker call
+    if is_cancelled(&cancel_flag) {
+        return Err("cancelled".into());
+    }
+
+    // ─── Worker fallback path (original logic) ──────────────────────────
     // Get session info
     let session_info = network::get_session_info()
         .ok_or("no session open — call open_session first")?;
@@ -1068,6 +1481,895 @@ async fn dispatch_to_worker<R: Runtime>(
     let dialog_state = data.get("dialog_state").cloned();
 
     Ok((reply_text, analysis, dialog_state))
+}
+
+/// Public wrapper for `dispatch_to_worker` — used by command_center steps.
+pub(crate) async fn dispatch_to_worker_pub<R: Runtime>(
+    app: AppHandle<R>,
+    transcript: String,
+    dialog_context: Option<serde_json::Value>,
+    request_id: String,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<(String, Option<serde_json::Value>, Option<serde_json::Value>), String> {
+    dispatch_to_worker(app, transcript, dialog_context, request_id, cancel_flag).await
+}
+
+// ─── MCP sub-center dispatch ───────────────────────────────────────────
+
+/// Dispatch an MCP intent to the appropriate MCP server.
+///
+/// Maps intents to (server, tool, params):
+///   OrderFood            → SwiggyFood / search_restaurants
+///   SearchProduct        → Amazon / amazon_search
+///   SendWhatsAppMessage  → WhatsApp / send_message (confirmation gated)
+///
+/// Read operations execute directly. Write/destructive operations emit a
+/// Confirm event and return a pending message — the actual call happens
+/// after the user confirms via `orchestrator_mcp_confirm`.
+async fn dispatch_to_mcp<R: Runtime>(
+    app: &AppHandle<R>,
+    intent: &ParsedIntent,
+    transcript: &str,
+    request_id: &str,
+) -> Result<Option<String>, String> {
+    use crate::mcp_client::{call_tool, extract_text, McpServer};
+
+    // Resolve the intent → (server, tool, params)
+    let (server, tool, params): (McpServer, &str, serde_json::Value) = match intent {
+        ParsedIntent::OrderFood { query, restaurant } => {
+            let q = if let Some(r) = restaurant {
+                format!("{} from {}", query, r)
+            } else if !query.is_empty() {
+                query.clone()
+            } else {
+                transcript.to_string()
+            };
+            (
+                McpServer::SwiggyFood,
+                "search_restaurants",
+                serde_json::json!({ "query": q }),
+            )
+        }
+        ParsedIntent::SearchProduct { query } => (
+            McpServer::Amazon,
+            "amazon_search",
+            serde_json::json!({ "query": query, "max_results": 5 }),
+        ),
+        ParsedIntent::SendWhatsAppMessage { contact, message } => (
+            McpServer::WhatsApp,
+            "send_message",
+            serde_json::json!({ "recipient": contact, "message": message }),
+        ),
+        _ => return Err(format!("no MCP mapping for intent")),
+    };
+
+    // Pre-flight credential check — BEFORE the confirm gate. Asking the
+    // user to approve a write the system can't execute is worse than
+    // useless; missing credentials speak guidance immediately.
+    // Resolve the bearer token from the auth vault (one login per service
+    // group, with refresh).
+    let pre_status = server
+        .vault_key()
+        .map(crate::auth_vault::token_status);
+    let mut vault_token: Option<String> =
+        crate::auth_vault::resolve_server_token(server).await;
+    if server.vault_key().is_some() && vault_token.is_none() {
+        // Distinguish expired (had a login, it died) from missing (never
+        // connected) so the spoken guidance is exact.
+        if pre_status == Some("expired") {
+            let what = match server {
+                crate::mcp_client::McpServer::SwiggyFood
+                | crate::mcp_client::McpServer::SwiggyInstamart
+                | crate::mcp_client::McpServer::SwiggyDineout => "Swiggy",
+                crate::mcp_client::McpServer::WhatsApp => "WhatsApp",
+                crate::mcp_client::McpServer::Amazon => "Amazon",
+            };
+            return Err(format!(
+                "Your {what} login expired, sir — reconnect it in Settings, Connections tab."
+            ));
+        }
+        return Err(mcp_error_guidance(server, "HTTP 401: no credential"));
+    }
+
+    // Confirmation gate for write/destructive operations.
+    if server.requires_confirmation(tool) {
+        let prompt = if server.is_destructive(tool) {
+            format!(
+                "This will perform an irreversible action on {}. Tool: {}. Proceed?",
+                server.name(),
+                tool
+            )
+        } else {
+            match intent {
+                ParsedIntent::SendWhatsAppMessage { contact, message } => {
+                    format!("Send WhatsApp message to {}: \"{}\"?", contact, message)
+                }
+                _ => format!("Execute {} on {}?", tool, server.name()),
+            }
+        };
+
+        let pending = serde_json::json!({
+            "kind": "mcp",
+            "server": server.name(),
+            "tool": tool,
+            "params": params.clone(),
+            "transcript": transcript,
+        });
+
+        emit(
+            app,
+            &OrchestratorEvent::Confirm {
+                prompt: prompt.clone(),
+                request_id: request_id.to_string(),
+                command: pending.clone(),
+            },
+        );
+
+        let confirm_payload = serde_json::json!({
+            "requestId": request_id,
+            "prompt": prompt,
+            "command": pending,
+        });
+        let _ = crate::commands::show_sidebar_with_confirmation(
+            app.clone(),
+            "Action Confirmation".to_string(),
+            prompt.clone(),
+            confirm_payload,
+        ).await;
+
+        // The actual call happens in orchestrator_mcp_confirm after the
+        // user approves. Return Ok(None) to indicate confirmation is pending.
+        return Ok(None);
+    }
+
+    // Read operations — execute directly.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("mcp http client: {e}"))?;
+
+    tracing::info!(
+        "orchestrator: mcp dispatch server={} tool={} request_id={}",
+        server.name(),
+        tool,
+        request_id
+    );
+
+    // Resolve the bearer token from the auth vault (one login per service
+    // group, with refresh). Falls back to anonymous when the service isn't
+    // connected — the failure arm below speaks the reconnect path.
+    // (Pre-flight runs above; this re-resolves fresh for the actual call.)
+    vault_token = crate::auth_vault::resolve_server_token(server).await;
+    let mut result = call_tool(server, tool, params.clone(), &client, vault_token.as_deref()).await;
+
+    // 401 clear-and-retry: the token may have died between resolve and use
+    // (revoked server-side). Evict, mint fresh once, retry once — then
+    // guidance. Never replays the same dead token.
+    if !result.ok {
+        let first_err = result.error.clone().unwrap_or_default();
+        if is_auth_failure(&first_err) {
+            if let Some(key) = server.vault_key() {
+                crate::auth_vault::clear_token(key);
+                tracing::info!(
+                    "orchestrator: mcp {} auth failed — cleared stale token, retrying once",
+                    server.name()
+                );
+                vault_token = crate::auth_vault::resolve_server_token(server).await;
+                result = call_tool(
+                    server,
+                    tool,
+                    params.clone(),
+                    &client,
+                    vault_token.as_deref(),
+                )
+                .await;
+            }
+        }
+    }
+
+    if !result.ok {
+        let err = result
+            .error
+            .clone()
+            .unwrap_or_else(|| "unknown MCP error".to_string());
+        tracing::warn!("orchestrator: mcp {} failed: {}", server.name(), err);
+        // Stash for auto-retry: when the Connect card's monitor sees the
+        // server turn Ready, it replays this exact call (Composio
+        // WAIT_FOR_CONNECTIONS shape — no re-speaking, no re-confirm).
+        stash_mcp_retry(server, tool, &params);
+        return Err(mcp_error_guidance(server, &err));
+    }
+
+    Ok(Some(extract_text(&result)))
+}
+
+/// Narrow auth-failure detector for retry/clear decisions.
+/// Deliberately strict (status codes + explicit phrases) — the old
+/// substring "auth" also matched "author"/"authentic" in tool output.
+fn is_auth_failure(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("401")
+        || lower.contains("unauthorized")
+        || lower.contains("invalid_token")
+        || lower.contains("authentication required")
+        || lower.contains("login required")
+        || lower.contains("token expired")
+        || lower.contains("invalid token")
+}
+
+/// Turn an MCP transport/auth failure into an actionable spoken message.
+/// Raw errors ("HTTP 401", "connection refused") mean nothing by voice —
+/// every failure must tell the user WHICH connection to fix and WHERE.
+/// Backend rule: never report a dead MCP without its reconnect path.
+fn mcp_error_guidance(server: crate::mcp_client::McpServer, err: &str) -> String {
+    use crate::mcp_client::McpServer as S;
+    let lower = err.to_lowercase();
+    let needs_login = is_auth_failure(err);
+    let unreachable = lower.contains("refused")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("dns")
+        || lower.contains("unreachable")
+        || lower.contains("failed to resolve");
+    if needs_login {
+        let what = match server {
+            S::SwiggyFood | S::SwiggyInstamart | S::SwiggyDineout => {
+                "Swiggy — reconnect it"
+            }
+            S::WhatsApp => "WhatsApp — re-scan the bridge QR",
+            S::Amazon => "Amazon — reconnect the bridge session",
+        };
+        return format!("{what} in Settings, Connections tab, sir, then try again.");
+    }
+    if unreachable && server.url().contains("127.0.0.1") {
+        // Auto-start assist: name the EXACT binary and first-run steps, not
+        // "start it". The user should be able to fix this from the spoken
+        // sentence alone. (Catalog: docs/mcp/02-server-catalog.md)
+        let what = match server {
+            S::WhatsApp => "WhatsApp bridge isn't running, sir — run the mcp-whatsapp program on this PC, scan the QR it shows with WhatsApp on your phone, then press Recheck in Connections.",
+            S::Amazon => "Amazon bridge isn't running, sir — start the Amazon bridge program on this PC, sign in when its browser window opens, then press Recheck in Connections.",
+            _ => return format!(
+                "The {} isn't running, sir — start it on this PC, then press Recheck in Connections.",
+                server.name()
+            ),
+        };
+        return what.to_string();
+    }
+    if lower.contains("circuit open") {
+        return format!(
+            "The {} connection is cooling down after repeated failures, sir — press Recheck in Connections to retry now.",
+            server.name()
+        );
+    }
+    format!("{} failed, sir: {}", server.name(), err)
+}
+
+// ─── MCP Connect card (best-of combine) ─────────────────────────────────
+// Industry pattern (Composio/Claude/Cursor): a failed connector opens a
+// fix-it card where the user already is, with status + numbered steps +
+// the auth action inline — and the interrupted task auto-resumes on
+// completion. Voice still speaks first; the card opens alongside, once
+// per server per session (no window spam).
+
+/// Servers whose Connect card was already opened this session.
+static SHOWN_CONNECT_CARDS: once_cell::sync::Lazy<
+    Arc<Mutex<std::collections::HashSet<String>>>,
+> = once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(std::collections::HashSet::new())));
+
+/// A failed MCP call stashed for auto-retry when its server connects.
+#[derive(Debug, Clone)]
+struct McpRetry {
+    server: crate::mcp_client::McpServer,
+    tool: String,
+    params: serde_json::Value,
+}
+
+static PENDING_MCP_RETRY: once_cell::sync::Lazy<Arc<Mutex<Option<McpRetry>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(None)));
+
+fn stash_mcp_retry(
+    server: crate::mcp_client::McpServer,
+    tool: &str,
+    params: &serde_json::Value,
+) {
+    let mut guard = PENDING_MCP_RETRY.lock().unwrap();
+    *guard = Some(McpRetry {
+        server,
+        tool: tool.to_string(),
+        params: params.clone(),
+    });
+}
+
+fn take_mcp_retry() -> Option<McpRetry> {
+    PENDING_MCP_RETRY.lock().unwrap().take()
+}
+
+/// Map an MCP-routed intent to its server (mirrors dispatch_to_mcp).
+fn server_for_mcp_intent(intent: &ParsedIntent) -> Option<crate::mcp_client::McpServer> {
+    use crate::mcp_client::McpServer as S;
+    match intent {
+        ParsedIntent::OrderFood { .. } => Some(S::SwiggyFood),
+        ParsedIntent::SearchProduct { .. } => Some(S::Amazon),
+        ParsedIntent::SendWhatsAppMessage { .. } => Some(S::WhatsApp),
+        _ => None,
+    }
+}
+
+/// Render a Connect card as sidebar markdown: status, numbered steps,
+/// QR image (data-URI passes the markdown sanitizer straight through),
+/// pairing link (opens externally via openExternal), safety notes.
+fn connect_card_markdown(
+    card: &crate::mcp_client::McpConnectCard,
+    transcript: &str,
+) -> String {
+    use crate::mcp_client::McpConnectState as St;
+    let title = match card.server.as_str() {
+        "swiggy-food" | "swiggy-instamart" | "swiggy-dineout" => "Swiggy",
+        "whatsapp" => "WhatsApp",
+        "amazon" => "Amazon",
+        _ => card.server.as_str(),
+    };
+    let state_line = match card.state {
+        St::Down => "Not running",
+        St::AuthRequired => "Needs login",
+        St::Ready => "Connected",
+        St::Unknown => "Status unknown",
+    };
+    let mut md = format!("## Connect {title}\n\n**Status:** {state_line} — {note}\n\n", note = card.note);
+    if card.server == "whatsapp" {
+        md.push_str(&format!("_Request: \"{transcript}\" — held, not lost._\n\n"));
+    }
+    for (i, step) in card.steps.iter().enumerate() {
+        md.push_str(&format!("{}. {}\n", i + 1, step));
+    }
+    md.push('\n');
+    if let Some(img) = &card.qr_image_uri {
+        md.push_str(&format!("![Scan with WhatsApp → Settings → Linked Devices]({img})\n\n"));
+    } else if let Some(code) = &card.qr_code_text {
+        md.push_str(&format!("Pairing code: `{code}`\n\n"));
+    }
+    if let Some(url) = &card.pair_url {
+        md.push_str(&format!("[Open pairing page in browser]({url})\n\n"));
+    }
+    if card.server == "whatsapp" {
+        md.push_str("> Unofficial bridge (WhatsApp ToS risk) — a secondary number is safer.\n>\n> Session rotates roughly every 20 days; a fresh QR appears here automatically.\n\n");
+    }
+    if card.server.starts_with("swiggy") {
+        md.push_str("> Localhost dev is free; production needs Swiggy Builders-Club approval.\n\n");
+    }
+    md.push_str("_NEXUS watches in the background and confirms the moment it connects._\n");
+    md
+}
+
+/// Open the Connect card for a failed server (first failure per session
+/// only) and start the ready-monitor that auto-retries the stashed call.
+pub(crate) async fn open_mcp_connect_card<R: Runtime>(
+    app: &AppHandle<R>,
+    server: crate::mcp_client::McpServer,
+    transcript: &str,
+) {
+    let first = {
+        let mut shown = SHOWN_CONNECT_CARDS.lock().unwrap();
+        shown.insert(server.name().to_string())
+    };
+    if !first {
+        return;
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("connect card: http client failed: {e}");
+            return;
+        }
+    };
+    let card = crate::mcp_client::connect_card_for(server, &client).await;
+    let md = connect_card_markdown(&card, transcript);
+    if let Err(e) = crate::commands::show_sidebar_with_content(
+        app.clone(),
+        format!("Connect {}", card.server),
+        md,
+    )
+    .await
+    {
+        tracing::warn!("connect card: sidebar failed: {e}");
+        return;
+    }
+    spawn_ready_monitor(app.clone(), server, transcript.to_string());
+}
+
+/// Background watch: poll connect state; while the card is open, keep its
+/// content fresh (WhatsApp's QR rotates every 20-30s — a stale QR can't
+/// scan, so re-render whenever the payload changes), and when the server
+/// turns Ready, render the Connected card + retry the stashed call once
+/// and speak the outcome (Composio WAIT_FOR_CONNECTIONS shape). Gives up
+/// silently after ~10 min — the card stays open with manual Recheck.
+/// Never speaks over a newer turn: if another request is active, the
+/// retry is dropped.
+fn spawn_ready_monitor<R: Runtime>(
+    app: AppHandle<R>,
+    server: crate::mcp_client::McpServer,
+    transcript: String,
+) {
+    tauri::async_runtime::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let mut last_qr: Option<String> = None;
+        for _ in 0..120 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let card = crate::mcp_client::connect_card_for(server, &client).await;
+            if card.state != crate::mcp_client::McpConnectState::Ready {
+                // Fresh QR while the card is open: WhatsApp rotates the
+                // pairing QR every 20-30s; a static card would show an
+                // expired code (Novu deletes/re-renders its card for the
+                // same reason). Re-render only when the payload changed so
+                // we don't spam the sidebar.
+                let current_qr = card
+                    .qr_image_uri
+                    .clone()
+                    .or_else(|| card.qr_code_text.clone());
+                if current_qr.is_some() && current_qr != last_qr {
+                    last_qr = current_qr;
+                    let md = connect_card_markdown(&card, &transcript);
+                    let _ = crate::commands::show_sidebar_with_content(
+                        app.clone(),
+                        format!("Connect {}", card.server),
+                        md,
+                    )
+                    .await;
+                }
+                continue;
+            }
+            // Ready: render the truth on the card (never show stale
+            // "needs login" content after success — the truthfulness
+            // failure Claude's tracker documented).
+            let ready_md = connect_card_markdown(&card, &transcript);
+            let _ = crate::commands::show_sidebar_with_content(
+                app.clone(),
+                format!("Connect {}", card.server),
+                ready_md,
+            )
+            .await;
+            // Another turn started meanwhile: drop the retry, stay silent.
+            if ACTIVE_REQUEST.lock().unwrap().is_some() {
+                take_mcp_retry();
+                return;
+            }
+            let retry = match take_mcp_retry() {
+                Some(r) if r.server == server => r,
+                other => {
+                    // Wrong server (or nothing stashed): just announce.
+                    if other.is_some() {
+                        let mut guard = PENDING_MCP_RETRY.lock().unwrap();
+                        *guard = other;
+                    }
+                    let rid = new_request_id();
+                    emit(
+                        &app,
+                        &OrchestratorEvent::Result {
+                            text: format!(
+                                "{} is connected, sir.",
+                                display_server_name(server)
+                            ),
+                            request_id: rid,
+                            analysis: None,
+                            dialog_state: None,
+                        },
+                    );
+                    return;
+                }
+            };
+            // Retry the original call once with a fresh token.
+            let call_client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let vault_token =
+                crate::auth_vault::resolve_server_token(server).await;
+            let result = crate::mcp_client::call_tool(
+                server,
+                &retry.tool,
+                retry.params,
+                &call_client,
+                vault_token.as_deref(),
+            )
+            .await;
+            let rid = new_request_id();
+            let text = if result.ok {
+                let body = crate::mcp_client::extract_text(&result);
+                format!(
+                    "{} is connected, sir. {}",
+                    display_server_name(server),
+                    body
+                )
+            } else {
+                format!(
+                    "{} is reachable now, sir, but the retry failed: {}. The setup card is still open.",
+                    display_server_name(server),
+                    result.error.unwrap_or_default()
+                )
+            };
+            emit(
+                &app,
+                &OrchestratorEvent::Result {
+                    text,
+                    request_id: rid,
+                    analysis: None,
+                    dialog_state: None,
+                },
+            );
+            return;
+        }
+    });
+}
+
+fn display_server_name(server: crate::mcp_client::McpServer) -> &'static str {
+    match server {
+        crate::mcp_client::McpServer::SwiggyFood
+        | crate::mcp_client::McpServer::SwiggyInstamart
+        | crate::mcp_client::McpServer::SwiggyDineout => "Swiggy",
+        crate::mcp_client::McpServer::WhatsApp => "WhatsApp",
+        crate::mcp_client::McpServer::Amazon => "Amazon",
+    }
+}
+
+/// Public wrapper for `dispatch_to_mcp` — used by command_center steps.
+pub(crate) async fn dispatch_to_mcp_pub<R: Runtime>(
+    app: &AppHandle<R>,
+    intent: &ParsedIntent,
+    transcript: &str,
+    request_id: &str,
+) -> Result<Option<String>, String> {
+    dispatch_to_mcp(app, intent, transcript, request_id).await
+}
+
+/// Render the Ghostwriter sidebar card: target header + draft bubble +
+/// command hint. Same 400px overlay; blur + scrim already live.
+async fn show_ghostwriter_card<R: Runtime>(app: &AppHandle<R>) {
+    let (contact, draft) = crate::ghostwriter::card_state()
+        .unwrap_or((None, String::new()));
+    let to_line = contact
+        .map(|c| format!("To: {c}"))
+        .unwrap_or_else(|| "To: — (say \"this is for …\")".to_string());
+    let body = if draft.trim().is_empty() {
+        "(blank page — speak, and I'll write)".to_string()
+    } else {
+        draft
+    };
+    let text = format!(
+        "✒️ Ghostwriter\n{to_line}\n\n> {body}\n\n—",
+    );
+    let _ = crate::commands::show_sidebar_with_content(
+        app.clone(),
+        "ghostwriter".to_string(),
+        text,
+    )
+    .await;
+}
+
+/// Click the Nth on-screen actionable (Windows UIA grounding).
+async fn run_screen_click<R: Runtime>(
+    app: AppHandle<R>,
+    ordinal: u32,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    #[cfg(target_os = "windows")]
+    {
+        let els = crate::screen::list_actionables();
+        match crate::screen::pick_ordinal(&els, ordinal) {
+            Some(el) => {
+                let name = el.name.clone();
+                match crate::screen::click_element(el) {
+                    Ok(()) => speak_line(&app, format!("Clicked {name}, sir."), &request_id),
+                    Err(e) => speak_line(&app, format!("Couldn't click, sir: {e}"), &request_id),
+                }
+            }
+            None => speak_line(
+                &app,
+                format!("I only see {} clickable things, sir.", els.len()),
+                &request_id,
+            ),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = ordinal;
+        speak_line(&app, "Screen clicking needs Windows, sir.".to_string(), &request_id);
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Read back the Nth on-screen actionable (no click).
+async fn run_screen_read<R: Runtime>(
+    app: AppHandle<R>,
+    ordinal: u32,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    #[cfg(target_os = "windows")]
+    {
+        let els = crate::screen::list_actionables();
+        match crate::screen::pick_ordinal(&els, ordinal) {
+            Some(el) => speak_line(
+                &app,
+                format!("{} {} says {}, sir.", ordinal_word(ordinal), el.kind, el.name),
+                &request_id,
+            ),
+            None => speak_line(
+                &app,
+                format!("I only see {} clickable things, sir.", els.len()),
+                &request_id,
+            ),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = ordinal;
+        speak_line(&app, "Screen reading needs Windows, sir.".to_string(), &request_id);
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+fn ordinal_word(n: u32) -> String {
+    match n {
+        1 => "1st".to_string(),
+        2 => "2nd".to_string(),
+        3 => "3rd".to_string(),
+        _ => format!("{n}th"),
+    }
+}
+
+/// Switch browser tab via hotkey (cross-platform, instant).
+async fn run_browser_tab<R: Runtime>(
+    app: AppHandle<R>,
+    index: u32,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    match crate::screen::switch_browser_tab(index) {
+        Ok(msg) => speak_line(&app, msg, &request_id),
+        Err(e) => speak_line(&app, format!("Couldn't switch tabs, sir: {e}"), &request_id),
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Speak a short line (Result event channel the frontend already speaks).
+fn speak_line<R: Runtime>(app: &AppHandle<R>, text: String, request_id: &str) {    emit(
+        app,
+        &OrchestratorEvent::Result {
+            text,
+            request_id: request_id.to_string(),
+            analysis: None,
+            dialog_state: None,
+        },
+    );
+    emit(
+        app,
+        &OrchestratorEvent::Done {
+            request_id: request_id.to_string(),
+        },
+    );
+}
+
+/// Enter the Ghostwriter room: start session + card + spoken reply.
+async fn run_ghostwriter_enter<R: Runtime>(
+    app: AppHandle<R>,
+    contact: Option<String>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let reply = crate::ghostwriter::enter(contact);
+    show_ghostwriter_card(&app).await;
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// One in-session turn: dictate, command, send-ready, or exit.
+async fn run_ghostwriter_turn<R: Runtime>(
+    app: AppHandle<R>,
+    transcript: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    match crate::ghostwriter::handle_turn(&transcript) {
+        crate::ghostwriter::TurnOutcome::Dictated(_) => {
+            // Ink is visible on the card — no speech (never read the draft
+            // unasked; "read it back" exists for that).
+            show_ghostwriter_card(&app).await;
+        }
+        crate::ghostwriter::TurnOutcome::Replied(reply) => {
+            show_ghostwriter_card(&app).await;
+            speak_line(&app, reply, &request_id);
+        }
+        crate::ghostwriter::TurnOutcome::SendReady { contact, message } => {
+            let intent = ParsedIntent::SendWhatsAppMessage { contact, message };
+            match dispatch_to_mcp(&app, &intent, &transcript, &request_id).await {
+                Ok(out) => {
+                    // Sent (or awaiting orb confirmation) — clear the ink,
+                    // stay in the room for the next dictation.
+                    {
+                        // Reset draft but keep the room + contact.
+                        crate::ghostwriter::enter(
+                            crate::ghostwriter::card_state().and_then(|(c, _)| c),
+                        );
+                        // enter() preserves the draft — clear it explicitly.
+                        // (clear_draft below is a tiny helper on the module.)
+                        crate::ghostwriter::clear_draft();
+                    }
+                    show_ghostwriter_card(&app).await;
+                    if let Some(msg) = out {
+                        speak_line(&app, msg, &request_id);
+                    }
+                }
+                Err(e) => {
+                    show_ghostwriter_card(&app).await;
+                    speak_line(
+                        &app,
+                        format!("Couldn't send, sir: {e}"),
+                        &request_id,
+                    );
+                }
+            }
+        }
+        crate::ghostwriter::TurnOutcome::Exited(reply) => {
+            let _ = crate::commands::hide_sidebar(app.clone());
+            speak_line(&app, reply, &request_id);
+        }
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+// ─── Command Center (multi-step compound tasks) ────────────────────────
+
+/// Run a compound task through the command center.
+///
+/// Called from `process_transcript` when `build_plan` detects a compound
+/// command. Emits ack + loading, executes the plan, emits merged result.
+async fn run_command_center<R: Runtime>(
+    app: AppHandle<R>,
+    plan: crate::command_center::TaskPlan,
+    transcript: String,
+    dialog_context: Option<serde_json::Value>,
+    request_id: String,
+    cancel_flag: Arc<AtomicBool>,
+) -> Result<ProcessResult, String> {
+    let ack = pick_ack();
+    emit(
+        &app,
+        &OrchestratorEvent::Ack {
+            text: ack.to_string(),
+            request_id: request_id.clone(),
+        },
+    );
+    emit(
+        &app,
+        &OrchestratorEvent::Loading {
+            visible: true,
+            request_id: request_id.clone(),
+        },
+    );
+    show_loading(&app);
+
+    let outcome = crate::command_center::execute_plan(
+        &app,
+        plan,
+        &request_id,
+        &cancel_flag,
+        dialog_context,
+    )
+    .await;
+
+    emit(
+        &app,
+        &OrchestratorEvent::Loading {
+            visible: false,
+            request_id: request_id.clone(),
+        },
+    );
+    hide_loading(&app);
+
+    tracing::info!(
+        "command_center: request {} done — {:?} — {} steps, {} ok, {} failed, awaiting={}",
+        request_id,
+        crate::router::truncate_pub(&transcript, 60),
+        outcome.summary.total_steps,
+        outcome.summary.completed,
+        outcome.summary.failed,
+        outcome.awaiting_confirmation,
+    );
+
+    if outcome.awaiting_confirmation {
+        // A step emitted a Confirm event — the pending compound is stashed
+        // and orchestrator_mcp_confirm will resume it. Emit Done (no Result —
+        // the Confirm event already spoke the prompt).
+        emit(
+            &app,
+            &OrchestratorEvent::Done {
+                request_id: request_id.clone(),
+            },
+        );
+        // Keep the active request installed — the confirm command reuses
+        // this request_id for the resumed steps.
+        return Ok(ProcessResult {
+            request_id,
+            subsystem: Subsystem::CommandCenter,
+            handled_locally: false,
+        });
+    }
+
+    // Emit merged result
+    emit(
+        &app,
+        &OrchestratorEvent::Result {
+            text: outcome.text,
+            request_id: request_id.clone(),
+            analysis: None,
+            dialog_state: None,
+        },
+    );
+    emit(
+        &app,
+        &OrchestratorEvent::Done {
+            request_id: request_id.clone(),
+        },
+    );
+    clear_active_request(&request_id);
+
+    // Report execution to the brain monitor (admin-only)
+    #[cfg(feature = "admin-brain")]
+    {
+        let ok = outcome.summary.failed == 0;
+        if ok {
+            crate::brain_monitor::report_execution_success(&transcript, "compound_task");
+        } else {
+            crate::brain_monitor::report_execution_failure(
+                &transcript,
+                "compound_task",
+                "one or more steps failed",
+            );
+        }
+    }
+
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::CommandCenter,
+        handled_locally: false,
+    })
 }
 
 // ─── Tauri commands ────────────────────────────────────────────────────
@@ -1171,9 +2473,20 @@ pub async fn orchestrator_github_execute<R: Runtime>(
                 &OrchestratorEvent::Confirm {
                     prompt: prompt.clone(),
                     request_id: request_id.clone(),
-                    command: cmd_json,
+                    command: cmd_json.clone(),
                 },
             );
+            let confirm_payload = serde_json::json!({
+                "requestId": request_id.clone(),
+                "prompt": prompt.clone(),
+                "command": cmd_json,
+            });
+            let _ = crate::commands::show_sidebar_with_confirmation(
+                app.clone(),
+                "GitHub Confirmation".to_string(),
+                prompt.clone(),
+                confirm_payload,
+            ).await;
         }
         crate::github_cmd::GitHubResult::MergeConflict {
             pr_number,
@@ -1259,6 +2572,212 @@ pub async fn orchestrator_github_clear_token() -> Result<(), String> {
     Ok(())
 }
 
+// ─── MCP sub-center Tauri commands ─────────────────────────────────────
+
+/// Confirm or cancel a pending MCP write/destructive operation.
+///
+/// When `dispatch_to_mcp` encounters a write/destructive tool (send message,
+/// place order, book table), it emits a Confirm event carrying a pending
+/// payload `{server, tool, params, transcript}`. The frontend shows the
+/// prompt; on user approval it calls this command with `confirmed=true`
+/// and the same pending payload.
+#[tauri::command]
+pub async fn orchestrator_mcp_confirm<R: Runtime>(
+    app: AppHandle<R>,
+    request_id: String,
+    confirmed: bool,
+    pending: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::mcp_client::{call_tool, extract_text, McpServer};
+
+    if !confirmed {
+        emit(
+            &app,
+            &OrchestratorEvent::Result {
+                text: "Cancelled, sir.".to_string(),
+                request_id: request_id.clone(),
+                analysis: None,
+                dialog_state: None,
+            },
+        );
+        emit(
+            &app,
+            &OrchestratorEvent::Done {
+                request_id: request_id.clone(),
+            },
+        );
+        return Ok(serde_json::json!({ "cancelled": true }));
+    }
+
+    // Reconstruct the pending call
+    let server_name = pending["server"]
+        .as_str()
+        .ok_or("invalid pending payload: missing server")?;
+    let tool = pending["tool"]
+        .as_str()
+        .ok_or("invalid pending payload: missing tool")?;
+    let params = pending["params"].clone();
+
+    let server = match server_name {
+        "swiggy-food" => McpServer::SwiggyFood,
+        "swiggy-instamart" => McpServer::SwiggyInstamart,
+        "swiggy-dineout" => McpServer::SwiggyDineout,
+        "whatsapp" => McpServer::WhatsApp,
+        "amazon" => McpServer::Amazon,
+        other => return Err(format!("unknown MCP server: {}", other)),
+    };
+
+    emit(
+        &app,
+        &OrchestratorEvent::Loading {
+            visible: true,
+            request_id: request_id.clone(),
+        },
+    );
+    show_loading(&app);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("mcp http client: {e}"))?;
+
+    // Same vault resolution as the pre-confirm path — without this,
+    // confirmed writes went out anonymous and died with 401 even when
+    // the service was connected.
+    let mut vault_token: Option<String> =
+        crate::auth_vault::resolve_server_token(server).await;
+    let mut result =
+        call_tool(server, tool, params.clone(), &client, vault_token.as_deref()).await;
+
+    // 401 clear-and-retry (mirrors the dispatch path): evict the dead
+    // token, mint fresh once, retry once. The user already confirmed —
+    // retrying the call (not the confirmation) is safe.
+    if !result.ok {
+        let first_err = result.error.clone().unwrap_or_default();
+        if is_auth_failure(&first_err) {
+            if let Some(key) = server.vault_key() {
+                crate::auth_vault::clear_token(key);
+                vault_token = crate::auth_vault::resolve_server_token(server).await;
+                result = call_tool(
+                    server,
+                    tool,
+                    params.clone(),
+                    &client,
+                    vault_token.as_deref(),
+                )
+                .await;
+            }
+        }
+    }
+
+    emit(
+        &app,
+        &OrchestratorEvent::Loading {
+            visible: false,
+            request_id: request_id.clone(),
+        },
+    );
+    hide_loading(&app);
+
+    if !result.ok {
+        let err = result
+            .error
+            .clone()
+            .unwrap_or_else(|| "unknown MCP error".to_string());
+        let spoken = mcp_error_guidance(server, &err);
+        let retry_transcript = pending["transcript"].as_str().unwrap_or("");
+        stash_mcp_retry(server, tool, &params);
+        open_mcp_connect_card(&app, server, retry_transcript).await;
+        emit(
+            &app,
+            &OrchestratorEvent::Error {
+                message: spoken.clone(),
+                request_id: request_id.clone(),
+            },
+        );
+        emit(
+            &app,
+            &OrchestratorEvent::Done {
+                request_id: request_id.clone(),
+            },
+        );
+        return Err(spoken);
+    }
+
+    let text = extract_text(&result);
+
+    // If this confirmed step was part of a compound task, resume the
+    // remaining steps and emit the merged result instead.
+    if let Some(pending) = crate::command_center::take_pending_compound(&request_id) {
+        tracing::info!(
+            "command_center: resuming compound for {} — {} remaining steps",
+            request_id,
+            pending.remaining_steps.len()
+        );
+
+        // Fresh cancel flag for the resumed steps — the original was
+        // consumed by the compound's execute_plan.
+        let resume_flag = Arc::new(AtomicBool::new(false));
+
+        let outcome = crate::command_center::resume_compound(
+            &app,
+            pending,
+            text,
+            resume_flag,
+        )
+        .await;
+
+        emit(
+            &app,
+            &OrchestratorEvent::Result {
+                text: outcome.text,
+                request_id: request_id.clone(),
+                analysis: None,
+                dialog_state: None,
+            },
+        );
+        emit(
+            &app,
+            &OrchestratorEvent::Done {
+                request_id: request_id.clone(),
+            },
+        );
+        clear_active_request(&request_id);
+
+        return Ok(serde_json::json!({
+            "ok": true,
+            "server": server.name(),
+            "tool": tool,
+            "latency_ms": result.latency_ms,
+            "compound_resumed": true,
+        }));
+    }
+
+    emit(
+        &app,
+        &OrchestratorEvent::Result {
+            text,
+            request_id: request_id.clone(),
+            analysis: None,
+            dialog_state: None,
+        },
+    );
+    emit(
+        &app,
+        &OrchestratorEvent::Done {
+            request_id: request_id.clone(),
+        },
+    );
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "server": server.name(),
+        "tool": tool,
+        "latency_ms": result.latency_ms,
+    }))
+}
+
 // ─── Loading indicator control (owned by orchestrator) ─────────────────
 
 /// Show the loading indicator window at the top-right corner.
@@ -1267,35 +2786,36 @@ pub async fn orchestrator_github_clear_token() -> Result<(), String> {
 /// directly instead of going through the frontend IPC. This ensures the
 /// loading state is owned by the central system, not scattered across
 /// frontend components.
+///
+/// Runs INLINE (no spawn): creation completes before dispatch starts, so
+/// the paired `hide_loading` destroy can never land before the create
+/// finishes and wedge a fresh spinner on screen with no hide in flight.
 pub fn show_loading<R: Runtime>(app: &AppHandle<R>) {
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = crate::dyn_windows::get_or_create_window(
-            &app_clone,
-            crate::dyn_windows::WindowConfig::loading_indicator(),
-        ) {
-            tracing::warn!("orchestrator: failed to create loading window: {}", e);
-            return;
-        }
+    if let Err(e) = crate::dyn_windows::get_or_create_window(
+        app,
+        crate::dyn_windows::WindowConfig::loading_indicator(),
+    ) {
+        tracing::warn!("orchestrator: failed to create loading window: {}", e);
+        return;
+    }
 
-        // Position at top-right corner
-        if let Some(win) = app_clone.get_webview_window("loading-indicator") {
-            if let Ok(Some(monitor)) = win.current_monitor() {
-                let scale = monitor.scale_factor();
-                let screen = monitor.size();
-                let win_size = 80i32;
-                let phys_win = (win_size as f64 * scale) as i32;
-                let inset_x = (7.0 * scale) as i32;
-                let inset_y = (9.0 * scale) as i32;
-                let x = screen.width as i32 - phys_win - inset_x;
-                let y = inset_y;
-                let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-            }
-            let _ = win.set_ignore_cursor_events(true);
-            let _ = win.show();
-            tracing::info!("orchestrator: loading indicator shown");
+    // Position at top-right corner
+    if let Some(win) = app.get_webview_window("loading-indicator") {
+        if let Ok(Some(monitor)) = win.current_monitor() {
+            let scale = monitor.scale_factor();
+            let screen = monitor.size();
+            let win_size = 80i32;
+            let phys_win = (win_size as f64 * scale) as i32;
+            let inset_x = (7.0 * scale) as i32;
+            let inset_y = (9.0 * scale) as i32;
+            let x = screen.width as i32 - phys_win - inset_x;
+            let y = inset_y;
+            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
         }
-    });
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.show();
+        tracing::info!("orchestrator: loading indicator shown");
+    }
 }
 
 /// Hide/destroy the loading indicator window.
@@ -1353,6 +2873,36 @@ mod tests {
     #[test]
     fn test_route_architect() {
         assert_eq!(route_intent(&ParsedIntent::OpenArchitect), Subsystem::Architect);
+    }
+
+    /// Garbage-transcript guard: ML-only OpenArchitect (e.g. Qwen 0.99 on
+    /// 'You feel it, no?' from a 1s noise capture) is capped below the
+    /// accept line; deterministic and non-Architect results pass through.
+    #[test]
+    fn test_cap_ml_window_open() {
+        use crate::intent_parser::ParseResult;
+        let mut r = ParseResult {
+            intent: ParsedIntent::OpenArchitect,
+            confidence: 0.99,
+            source: "brain".to_string(),
+        };
+        assert!(cap_ml_window_open(&mut r));
+        assert!(r.confidence < 0.5);
+        let mut r2 = ParseResult {
+            intent: ParsedIntent::OpenArchitect,
+            confidence: 1.0,
+            source: "deterministic".to_string(),
+        };
+        assert!(!cap_ml_window_open(&mut r2));
+        assert_eq!(r2.confidence, 1.0);
+        let mut r3 = ParseResult {
+            intent: ParsedIntent::OpenApp {
+                target: "chrome".to_string(),
+            },
+            confidence: 0.99,
+            source: "brain".to_string(),
+        };
+        assert!(!cap_ml_window_open(&mut r3));
     }
 
     #[test]
@@ -1540,6 +3090,133 @@ mod tests {
         assert!(result.is_none());
         // Empty transcript → Unknown → WorkerBackend (but process_transcript
         // rejects empty transcripts before routing)
+    }
+
+    // ─── MCP routing tests ───
+
+    #[test]
+    fn test_route_order_food() {
+        let result = parse_deterministic("order pizza from dominos");
+        assert!(result.is_some());
+        let intent = result.unwrap().intent;
+        assert_eq!(route_intent(&intent), Subsystem::Mcp);
+    }
+
+    #[test]
+    fn test_route_search_product() {
+        let result = parse_deterministic("search for sony headphones on amazon");
+        assert!(result.is_some());
+        let intent = result.unwrap().intent;
+        assert_eq!(route_intent(&intent), Subsystem::Mcp);
+    }
+
+    #[test]
+    fn test_route_send_whatsapp_message() {
+        let result = parse_deterministic("send mom a whatsapp message saying hi");
+        assert!(result.is_some());
+        let intent = result.unwrap().intent;
+        assert_eq!(route_intent(&intent), Subsystem::Mcp);
+    }
+
+    #[test]
+    fn test_mcp_is_long_running() {
+        assert!(is_long_running(&Subsystem::Mcp));
+    }
+
+    #[test]
+    fn test_is_auth_failure_narrow() {
+        assert!(is_auth_failure("HTTP 401: invalid_token"));
+        assert!(is_auth_failure("Unauthorized"));
+        assert!(is_auth_failure("token expired, reconnect"));
+        // Must NOT match ordinary words containing "auth".
+        assert!(!is_auth_failure("author not found"));
+        assert!(!is_auth_failure("authentic restaurant list"));
+        assert!(!is_auth_failure("connection refused"));
+    }
+
+    #[test]
+    fn test_mcp_guidance_points_at_connections() {
+        let g = mcp_error_guidance(
+            crate::mcp_client::McpServer::SwiggyFood,
+            "HTTP 401",
+        );
+        assert!(g.contains("Connections"), "guidance must name where: {g}");
+        let g2 = mcp_error_guidance(
+            crate::mcp_client::McpServer::WhatsApp,
+            "connection refused",
+        );
+        assert!(
+            g2.contains("bridge") && g2.contains("Recheck"),
+            "bridge guidance: {g2}"
+        );
+        // Assist names the exact program + first-run step (QR scan).
+        assert!(
+            g2.contains("mcp-whatsapp") && g2.contains("QR"),
+            "bridge assist must be actionable: {g2}"
+        );
+        let g3 = mcp_error_guidance(
+            crate::mcp_client::McpServer::WhatsApp,
+            "circuit open for whatsapp (42s left) — bridge failing repeatedly",
+        );
+        assert!(
+            g3.contains("cooling down") && g3.contains("Recheck"),
+            "breaker guidance: {g3}"
+        );
+    }
+
+    #[test]
+    fn test_server_for_mcp_intent() {
+        use crate::mcp_client::McpServer as S;
+        let food = ParsedIntent::OrderFood {
+            query: "biryani".into(),
+            restaurant: None,
+        };
+        assert_eq!(server_for_mcp_intent(&food), Some(S::SwiggyFood));
+        let prod = ParsedIntent::SearchProduct { query: "x".into() };
+        assert_eq!(server_for_mcp_intent(&prod), Some(S::Amazon));
+        let wa = ParsedIntent::SendWhatsAppMessage {
+            contact: "mummy".into(),
+            message: "hi".into(),
+        };
+        assert_eq!(server_for_mcp_intent(&wa), Some(S::WhatsApp));
+        let greet = ParsedIntent::Greeting {
+            reply: "hi".into(),
+        };
+        assert_eq!(server_for_mcp_intent(&greet), None);
+    }
+
+    #[test]
+    fn test_connect_card_markdown_has_fix_action() {
+        let card = crate::mcp_client::McpConnectCard {
+            server: "whatsapp".to_string(),
+            state: crate::mcp_client::McpConnectState::AuthRequired,
+            note: "bridge up, phone not paired".to_string(),
+            steps: vec!["Scan this QR.".to_string()],
+            qr_image_uri: Some("data:image/png;base64,AAA".to_string()),
+            qr_code_text: None,
+            pair_url: Some("http://127.0.0.1:8765/pair".to_string()),
+        };
+        let md = connect_card_markdown(&card, "send hi to mummy");
+        assert!(md.contains("Scan this QR."));
+        assert!(md.contains("data:image/png;base64,AAA"));
+        assert!(md.contains("http://127.0.0.1:8765/pair"));
+        assert!(md.contains("20 days"), "rotation warning required");
+        assert!(md.contains("ToS"), "burner warning required");
+    }
+
+    #[test]
+    fn test_mcp_retry_stash_take_roundtrip() {
+        // take on empty is None (no stale retry from other tests).
+        take_mcp_retry();
+        stash_mcp_retry(
+            crate::mcp_client::McpServer::Amazon,
+            "amazon_search",
+            &serde_json::json!({"query": "x"}),
+        );
+        let r = take_mcp_retry().expect("stashed retry must come back");
+        assert_eq!(r.server, crate::mcp_client::McpServer::Amazon);
+        assert_eq!(r.tool, "amazon_search");
+        assert!(take_mcp_retry().is_none(), "take must drain");
     }
 
     // ─── Barge-in / cancellation tests ───

@@ -211,8 +211,31 @@ fn check_worker(worker_url: &str) -> ServiceStatus {
 }
 
 /// Check GitHub and Google OAuth status via the Worker.
-fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus) {
-    if worker_url.is_empty() || user_id.is_empty() {
+/// Whether the /oauth/status body marks a provider expired.
+/// Shape: {"providers": {"google": {"connected": true, "expired": true}}}.
+/// Scans only inside that provider's block so one provider's flag can't
+/// leak into the other's status.
+fn provider_expired(body: &str, provider: &str) -> bool {
+    let key = format!("\"{provider}\"");
+    let start = match body.find(key.as_str()) {
+        Some(i) => i + key.len(),
+        None => return false,
+    };
+    let rest = &body[start..];
+    // End of this provider's block: next provider key or end of object.
+    let mut end = rest.len();
+    for other in ["\"github\"", "\"google\""] {
+        if other != key.as_str() {
+            if let Some(i) = rest.find(other) {
+                end = end.min(i);
+            }
+        }
+    }
+    let block = &rest[..end];
+    block.contains("\"expired\":true") || block.contains("\"expired\": true")
+}
+
+fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus) {    if worker_url.is_empty() || user_id.is_empty() {
         return (
             ServiceStatus {
                 name: "GitHub".into(),
@@ -246,11 +269,18 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
             let google_connected = body.contains("\"google\"")
                 && (body.contains("\"connected\":true")
                     || body.contains("\"connected\": true"));
+            // The server reports per-provider "expired" (expired AND no
+            // refresh token = reconnect needed). A revoked token previously
+            // showed as plain "connected" — read the flag per provider.
+            let google_expired = provider_expired(&body, "google");
+            let github_expired = provider_expired(&body, "github");
 
             let github = ServiceStatus {
                 name: "GitHub".into(),
-                connected: github_connected,
-                detail: if github_connected {
+                connected: github_connected && !github_expired,
+                detail: if github_expired {
+                    "GitHub token expired — reconnect in setup".into()
+                } else if github_connected {
                     "GitHub OAuth connected".into()
                 } else {
                     "GitHub OAuth not connected — run setup wizard".into()
@@ -260,8 +290,10 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
 
             let google = ServiceStatus {
                 name: "Google".into(),
-                connected: google_connected,
-                detail: if google_connected {
+                connected: google_connected && !google_expired,
+                detail: if google_expired {
+                    "Google token expired — reconnect in setup".into()
+                } else if google_connected {
                     "Google OAuth connected".into()
                 } else {
                     "Google OAuth not connected — run setup wizard".into()
@@ -426,4 +458,23 @@ pub fn nexus_diagnostics(
 
     let report = run_diagnostics(&worker_url, &user_id);
     serde_json::to_value(&report).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_expired_scoped_per_provider() {
+        let body = r#"{"user_id":"u","providers":{"google":{"connected":true,"expired":true},"github":{"connected":true,"expired":false}}}"#;
+        assert!(provider_expired(body, "google"));
+        assert!(!provider_expired(body, "github"));
+    }
+
+    #[test]
+    fn test_provider_expired_absent_means_healthy() {
+        let body = r#"{"user_id":"u","providers":{"google":{"connected":true}}}"#;
+        assert!(!provider_expired(body, "google"));
+        assert!(!provider_expired(body, "unknown"));
+    }
 }
