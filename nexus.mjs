@@ -24,7 +24,7 @@ import { execSync, spawnSync } from "node:child_process";
 // We control all arguments (no user input) — the warning is a false positive
 // for our use case of launching .cmd shims like npm.cmd on Windows.
 process.removeAllListeners("warning");
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, copyFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, arch } from "node:os";
@@ -360,12 +360,15 @@ function cmdSetup() {
       { allowFail: true, hint: "If pip fails, create a venv: python -m venv .venv && activate it" });
   }
 
-  // 6. Verify NLU model is present
-  const nluModel = join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx");
-  if (existsSync(nluModel)) {
-    ok("NLU model found (committed in repo)");
+  // 6. Verify NLU model is present (either in server/nlu/model/ or resources/)
+  const nluModelLocal = join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx");
+  const nluModelResources = join(ROOT, "src-tauri", "resources", "server", "nlu", "model", "nexus_nlu.onnx");
+  if (existsSync(nluModelLocal)) {
+    ok("NLU model found (local training output)");
+  } else if (existsSync(nluModelResources)) {
+    ok("NLU model found (committed in resources)");
   } else {
-    warn("NLU model not found — NLU server will fail. Run: cd server/nlu && python train.py");
+    warn("NLU model not found — NLU server will fail. Run: cd server/nlu && python train.py && python export_onnx.py");
   }
 
   // 7. Verify faster-whisper is installed (STT server dependency)
@@ -495,18 +498,70 @@ function killRunningNexus() {
   }
 }
 
+/// Sync the NLU model from server/nlu/model/ to src-tauri/resources/server/nlu/model/.
+/// This ensures the installer always bundles the latest trained ONNX model,
+/// labels.json, and tokenizer. Called before every build.
+/// If the source model doesn't exist (fresh clone, no training done yet),
+/// the existing resources copy is kept (it's committed to git).
+function syncNluModel() {
+  const srcDir = join(ROOT, "server", "nlu", "model");
+  const dstDir = join(ROOT, "src-tauri", "resources", "server", "nlu", "model");
+
+  // Files to sync (only if they exist in source)
+  const files = [
+    "nexus_nlu.onnx",
+    "nexus_nlu.onnx.data",
+    "labels.json",
+  ];
+
+  let synced = 0;
+  for (const file of files) {
+    const src = join(srcDir, file);
+    const dst = join(dstDir, file);
+    if (existsSync(src)) {
+      copyFileSync(src, dst);
+      synced++;
+    }
+  }
+
+  // Sync tokenizer dir
+  const srcTok = join(srcDir, "tokenizer");
+  const dstTok = join(dstDir, "tokenizer");
+  if (existsSync(srcTok)) {
+    mkdirSync(dstTok, { recursive: true });
+    for (const f of readdirSync(srcTok)) {
+      copyFileSync(join(srcTok, f), join(dstTok, f));
+      synced++;
+    }
+  }
+
+  if (synced > 0) {
+    ok(`NLU model synced to resources (${synced} file(s))`);
+  } else {
+    info("NLU model: using existing resources copy (no local training output found)");
+  }
+}
+
 function cmdBuild() {
   // Kill any running instance first — cargo can't replace a running binary
   killRunningNexus();
+
+  // Sync the NLU model from server/nlu/model/ to src-tauri/resources/server/nlu/model/
+  // This ensures the installer always bundles the latest trained model.
+  // The NLU server reads from resources/ in production (no server/ dir in installed builds).
+  syncNluModel();
 
   info("Building frontend (Vite)...");
   run("npm", ["--prefix", "frontend", "install"], { allowFail: true, stdio: "ignore" });
   run("npm", ["--prefix", "frontend", "run", "build"]);
 
-  info("Building Rust release binary (custom-protocol)...");
+  info("Building Rust release binary (custom-protocol + admin-brain)...");
   const cargoEnv = {};
   if (IS_WIN && process.env.LIBCLANG_PATH) cargoEnv.LIBCLANG_PATH = process.env.LIBCLANG_PATH;
-  run("cargo", ["build", "--release", "--features", "custom-protocol"],
+  // admin-brain: enables the Qwen brain (admin-only, runtime-gated by admin.json).
+  // The brain code is compiled in but does nothing unless admin.json has is_admin=true.
+  // Normal users never have admin.json, so the brain is dormant in their builds.
+  run("cargo", ["build", "--release", "--features", "custom-protocol,admin-brain"],
     { cwd: join(ROOT, "src-tauri"), env: cargoEnv,
       hint: "Make sure LIBCLANG_PATH is set (Windows) or LLVM is installed" });
 
@@ -595,8 +650,10 @@ function cmdCheck() {
     return existsSync(join(ROOT, "src-tauri", "target", "release", `nexus${ext}`));
   });
 
-  // NLU
-  check("NLU model present", () => existsSync(join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx")));
+  // NLU — check either local training output or committed resources copy
+  const nluModelLocal = join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx");
+  const nluModelResources = join(ROOT, "src-tauri", "resources", "server", "nlu", "model", "nexus_nlu.onnx");
+  check("NLU model present", () => existsSync(nluModelLocal) || existsSync(nluModelResources));
   check("NLU requirements.txt", () => existsSync(join(ROOT, "server", "nlu", "requirements.txt")));
 
   // Worker
@@ -645,6 +702,117 @@ function cmdWorker() {
   run("npx", ["wrangler", "deploy"], { cwd: workerDir });
 }
 
+/// Train or retrain the BERT-Mini NLU model.
+/// Runs the full pipeline: clean dataset → generate examples → merge →
+/// train → export ONNX → sync to resources.
+/// Contributors just run: nexus train
+function cmdTrain() {
+  const trainScript = join(ROOT, "server", "nlu", "train_all.py");
+  if (!existsSync(trainScript)) {
+    err("Training script not found: " + trainScript);
+    err("Ensure you have the latest code: git pull");
+    process.exit(1);
+  }
+
+  // Check Python is available
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+
+  // Check training dependencies (torch, transformers)
+  info("Checking training dependencies (PyTorch, Transformers)...");
+  const depCheck = spawnSync(py, ["-c", "import torch; import transformers; print('ok')"], {
+    encoding: "utf-8",
+  });
+  if (depCheck.stdout?.trim() !== "ok") {
+    info("Installing training dependencies...");
+    const reqPath = join(ROOT, "server", "nlu", "requirements-train.txt");
+    if (existsSync(reqPath)) {
+      run(py, ["-m", "pip", "install", "-r", reqPath], {
+        allowFail: true,
+        hint: "If pip fails, create a venv: python -m venv .venv && activate it",
+      });
+    } else {
+      warn("requirements-train.txt not found — install manually: pip install torch transformers onnx");
+    }
+  } else {
+    ok("Training dependencies OK");
+  }
+
+  // Run the unified training pipeline
+  info("Starting NLU training pipeline...");
+  const args = [trainScript];
+  // Pass through --clean-only or --skip-train if provided
+  const extraArgs = process.argv.slice(3);
+  args.push(...extraArgs);
+
+  run(py, args, { cwd: join(ROOT, "server", "nlu") });
+
+  console.log(`\n${C.bold}${C.green}═════════════════════════════════════════════════════════════${C.reset}`);
+  ok("NLU training complete!");
+  console.log(`${C.green}  The new model is synced to src-tauri/resources/.${C.reset}`);
+  console.log(`${C.green}  Run '${IS_WIN ? "nexus" : "./nexus"} build' to bundle it into the installer.${C.reset}`);
+  console.log(`${C.bold}${C.green}═════════════════════════════════════════════════════════════${C.reset}\n`);
+}
+
+function cmdAudit() {
+  const auditScript = join(ROOT, "server", "nlu", "audit_nlu.py");
+  if (!existsSync(auditScript)) {
+    err("NLU audit script not found: " + auditScript);
+    process.exit(1);
+  }
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+  const extraArgs = process.argv.slice(3);
+  info("Auditing NLU dataset and ONNX model...");
+  run(py, [auditScript, ...extraArgs], { cwd: ROOT });
+}
+
+/// Collect real voice samples for NLU training.
+/// Prompts you with phrases to speak, records your voice, transcribes via STT,
+/// and saves the real transcripts as training data for BERT-Mini.
+/// Contributors run: nexus collect
+function cmdCollect() {
+  const collectScript = join(ROOT, "scripts", "collect_nlu_samples.py");
+  if (!existsSync(collectScript)) {
+    err("Collection script not found: " + collectScript);
+    err("Ensure you have the latest code: git pull");
+    process.exit(1);
+  }
+
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+
+  // Check audio recording deps
+  info("Checking audio recording dependencies (sounddevice, numpy, scipy)...");
+  const depCheck = spawnSync(py, ["-c", "import sounddevice; import numpy; import scipy; print('ok')"], {
+    encoding: "utf-8",
+  });
+  if (depCheck.stdout?.trim() !== "ok") {
+    info("Installing audio recording dependencies...");
+    run(py, ["-m", "pip", "install", "sounddevice", "numpy", "scipy"], {
+      allowFail: true,
+      hint: "If pip fails, create a venv: python -m venv .venv && activate it",
+    });
+  } else {
+    ok("Audio recording dependencies OK");
+  }
+
+  // Pass through all extra args to the Python script
+  const extraArgs = process.argv.slice(3);
+  info("Starting voice sample collector...");
+  info("Make sure NEXUS is running (for STT) or GROQ_API_KEY is set.");
+  run(py, [collectScript, ...extraArgs], { cwd: ROOT });
+}
+
 function cmdHelp() {
   console.log(`
 ${C.bold}NEXUS — Unified Cross-Platform Developer Command${C.reset}
@@ -662,6 +830,9 @@ ${C.cyan}Commands:${C.reset}
   ${C.green}check${C.reset}    Run diagnostics (tools, frontend, Rust, NLU, Worker)
   ${C.green}clean${C.reset}    Remove build artifacts (target/, dist/)
   ${C.green}worker${C.reset}   Deploy the Cloudflare Worker (optional, self-host backend)
+  ${C.green}train${C.reset}    Retrain the BERT-Mini NLU model (clean → generate → train → export)
+  ${C.green}audit${C.reset}    Audit NLU data/model quality, coverage, leakage, slots, and OOS behavior
+  ${C.green}collect${C.reset}  Collect real voice samples for NLU training (speak phrases → transcribe → save)
   ${C.green}help${C.reset}     Show this help
 
 ${C.cyan}Examples:${C.reset}
@@ -669,6 +840,9 @@ ${C.cyan}Examples:${C.reset}
   ${IS_WIN ? "nexus" : "./nexus"} start       # launch the built app
   ${IS_WIN ? "nexus" : "./nexus"} dev         # develop with hot reload
   ${IS_WIN ? "nexus" : "./nexus"} build       # rebuild after changes
+  ${IS_WIN ? "nexus" : "./nexus"} train       # retrain the NLU model with new data
+  ${IS_WIN ? "nexus" : "./nexus"} audit       # audit the current NLU dataset and ONNX model
+  ${IS_WIN ? "nexus" : "./nexus"} collect     # speak phrases → save real voice samples for training
 
 ${C.cyan}Environment:${C.reset}
   NEXUS_SERVER_URL   Cloudflare Worker URL (default: baked at build time)
@@ -697,6 +871,9 @@ switch (command) {
   case "check":   cmdCheck(); break;
   case "clean":   cmdClean(); break;
   case "worker":  cmdWorker(); break;
+  case "train":   cmdTrain(); break;
+  case "audit":   cmdAudit(); break;
+  case "collect": cmdCollect(); break;
   case "help":
   case "--help":
   case "-h":

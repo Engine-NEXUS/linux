@@ -186,6 +186,13 @@ export function setLocalAckGiven(): void {
   localAckGiven = true;
 }
 
+/** Check if a local ack has already been given for this query.
+ *  Used by orchestrator.ts to suppress duplicate ack from the Rust
+ *  orchestrator's Ack event. */
+export function isLocalAckGiven(): boolean {
+  return localAckGiven;
+}
+
 /** Reset the local ack flag — called when a new query starts or when
  *  the result arrives. Also resets the analysis-announced guard. */
 function resetLocalAck(): void {
@@ -232,8 +239,11 @@ let longRunningInFlight = false;
 let lastSentTranscript = "";
 let longRunningTimeout: ReturnType<typeof setTimeout> | null = null;
 
-/** Called by wsBridge when a result arrives — clears in-flight + fires callback. */
-function clearLongRunningInFlight(): void {
+/** Called by wsBridge when a result arrives — clears in-flight + fires callback.
+ *  Also called by orchestrator.ts when an orchestrator event (result/done/error)
+ *  arrives, so the long-running in-flight flag is cleared regardless of which
+ *  path handled the request. */
+export function clearLongRunningInFlight(): void {
   if (longRunningTimeout) {
     clearTimeout(longRunningTimeout);
     longRunningTimeout = null;

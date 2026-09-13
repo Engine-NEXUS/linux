@@ -1,34 +1,35 @@
 """
-Minimal faster-whisper STT server for NEXUS.
+Moonshine STT server for NEXUS — local fallback when Groq cloud is unavailable.
 
 This server runs LOCALLY on the user's device (127.0.0.1:39217).
-Audio is sent from the NEXUS client to this local server, transcribed,
-and only the resulting TEXT is sent to the remote NEXUS server.
-Audio NEVER leaves the device.
+Audio is sent from the NEXUS Rust client to this local server, transcribed,
+and only the resulting TEXT is returned.
 
-For devices without a GPU, use:
-  WHISPER_DEVICE=cpu WHISPER_COMPUTE=int8
-  WHISPER_MODEL=tiny.en   (fastest, ~0.5s transcription, ~150MB RAM)
+Architecture:
+  Primary:   Groq Whisper Large v3 Turbo (cloud, ~247ms, free tier)
+  Fallback:  Moonshine Small Streaming (local, ~165ms CPU, 7.84% WER)
+
+Moonshine is used instead of faster-whisper because:
+  - Moonshine Small Streaming (123M params) has 7.84% WER vs Whisper tiny.en's ~18%
+  - Moonshine is 10-100x faster than Whisper for real-time speech
+  - Moonshine uses ONNX Runtime (same as our wake word engine)
+  - Moonshine is designed for voice command recognition (low latency, streaming)
 
 Requirements:
-  pip install faster-whisper fastapi uvicorn python-multipart
+  pip install moonshine-voice fastapi uvicorn python-multipart
 
 Run locally on the device:
   uvicorn stt_server:app --host 127.0.0.1 --port 39217
 
 Environment:
-  WHISPER_MODEL    ΓÇö model name (default: tiny.en)
-  WHISPER_DEVICE   ΓÇö "cuda" or "cpu" (default: cpu)
-  WHISPER_COMPUTE  ΓÇö compute type (default: int8)
+  MOONSHINE_MODEL  — model architecture name (default: small_streaming)
+                     Options: tiny_streaming, small_streaming, medium_streaming
+  MOONSHINE_LANG   — language code (default: en)
 
-Models (CPU):
-  - tiny.en:  ~40MB, fastest (~0.5s), good accuracy for commands (recommended)
-  - base.en:  ~75MB, slower (~1.5s), slightly better accuracy
-  - small.en: ~250MB, slow (~3s), best accuracy
-
-Models (GPU):
-  - large-v3:           ~1.5GB VRAM with int8_float16
-  - distil-large-v3:    ~750MB VRAM, faster, slightly lower accuracy
+Models (CPU, ONNX Runtime):
+  - tiny_streaming:   34M params,  12.00% WER, ~69ms on Linux x86
+  - small_streaming:  123M params,  7.84% WER, ~165ms on Linux x86  (default)
+  - medium_streaming: 245M params,  6.65% WER, ~269ms on Linux x86
 """
 
 from __future__ import annotations
@@ -36,113 +37,103 @@ from __future__ import annotations
 import os
 import logging
 import time
+import io
+import struct
+import wave
 
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
-from faster_whisper import WhisperModel
 
 log = logging.getLogger("NEXUS.stt")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-# Default to tiny.en ΓÇö fastest model (~0.5s transcription on CPU).
-# The .en variant is English-only, which is faster and smaller than multilingual.
-# STT corrections in recorder.ts + Worker fuzzy matching handle mishearings.
-MODEL_NAME = os.getenv("WHISPER_MODEL", "tiny.en")
-DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
-COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE", "int8")
+# ─── Model Configuration ───────────────────────────────────────────────────
 
-# Hotwords ΓÇö biases the Whisper decoder toward known app/brand names so that
-# mispronunciations like "gamail" are more likely to be transcribed as "gmail".
-# This is faster-whisper's built-in hotword feature (PR #731, merged May 2024).
-# It adds the hotwords as a prompt to every transcription window, unlike
-# initial_prompt which only affects the first window.
-#
-# DYNAMIC HOTWORDS: In addition to the built-in list, the server reads a
-# hotwords file (default: %APPDATA%\com.nexus.assistant\stt_hotwords.txt on
-# Windows, ~/.config/nexus/stt_hotwords.txt on Linux/Mac). NEXUS writes the
-# user's GitHub repo names to this file so Whisper recognises them correctly.
-# The file is re-read on every transcription request (hot-reload, no restart).
-_DEFAULT_HOTWORDS = [
-    # Web apps / services
-    "gmail", "youtube", "github", "google", "chrome", "brave", "firefox",
-    "twitter", "instagram", "facebook", "reddit", "linkedin", "whatsapp",
-    "netflix", "amazon", "wikipedia", "twitch", "spotify", "discord",
-    "slack", "notion", "figma", "chatgpt", "claude", "gemini",
-    # Google suite
-    "drive", "docs", "sheets", "slides", "maps", "calendar", "translate",
-    "photos", "meet", "chat",
-    # Native apps
-    "notepad", "calculator", "explorer", "terminal", "powershell",
-    "paint", "settings", "outlook", "word", "excel", "powerpoint",
-    "vscode", "code", "steam", "zoom", "teams", "skype", "telegram",
-    # Action words
-    "open", "launch", "start", "search", "find", "close",
-    # Analysis commands (improves recognition of NEXUS commands)
-    "analyse", "analyze", "analysis", "review", "pull request", "PR",
-    "branch", "commit", "merge", "diff",
-    # Architecture mapper commands — comprehensive coverage
-    "architecture", "architect", "mapper", "codebase", "dependency",
-    "dependencies", "diagram", "graph", "viewer", "explorer",
-    "architecture mapper", "architect mapper", "architecture map",
-    "codebase mapper", "dependency mapper", "architecture diagram",
-    # Known user repos (add more via stt_hotwords.txt)
-    "servx", "NEXUS", "ULTRON", "zync", "ledger ai", "ledger-ai",
-]
+# Default to small_streaming — best balance of accuracy (7.84% WER) and speed
+# (~165ms on CPU). For maximum accuracy, set MOONSHINE_MODEL=medium_streaming
+# (6.65% WER, ~269ms, ~300-600MB RAM).
+MODEL_ARCH_NAME = os.getenv("MOONSHINE_MODEL", "small_streaming")
+LANGUAGE = os.getenv("MOONSHINE_LANG", "en")
 
-# Path to the dynamic hotwords file ΓÇö NEXUS writes repo names here.
-import platform
-if platform.system() == "Windows":
-    _appdata = os.getenv("APPDATA", "")
-    HOTWORDS_FILE = os.path.join(_appdata, "com.nexus.assistant", "stt_hotwords.txt")
-else:
-    HOTWORDS_FILE = os.path.expanduser("~/.config/nexus/stt_hotwords.txt")
+# Map model name strings to ModelArch enum values
+_MODEL_ARCH_MAP = {
+    "tiny_streaming": None,    # Will be set after import
+    "small_streaming": None,
+    "medium_streaming": None,
+    "tiny": None,
+    "base": None,
+}
+
+app = FastAPI(title="NEXUS STT (Moonshine)", version="0.3.0")
+
+# ─── Model Loading ─────────────────────────────────────────────────────────
+
+_transcriber = None
+_model_path = None
+_model_arch = None
+_model_arch_name = MODEL_ARCH_NAME
 
 
-def _load_hotwords() -> str:
-    """Load hotwords from the built-in list + the dynamic hotwords file."""
-    words = list(_DEFAULT_HOTWORDS)
-    # Override with env var if set (for testing)
-    env_hotwords = os.getenv("WHISPER_HOTWORDS")
-    if env_hotwords:
-        return env_hotwords
-    # Read the dynamic hotwords file (hot-reload on every request)
-    try:
-        if os.path.exists(HOTWORDS_FILE):
-            with open(HOTWORDS_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    w = line.strip()
-                    if w and w not in words:
-                        words.append(w)
-    except Exception:
-        pass
-    return " ".join(words)
+def _load_model():
+    """Load the Moonshine model. Called eagerly at startup."""
+    global _transcriber, _model_path, _model_arch, _model_arch_name
 
-app = FastAPI(title="NEXUS STT", version="0.2.0")
+    from moonshine_voice import Transcriber, ModelArch, get_model_for_language
 
-# EAGER model loading ΓÇö load at startup so the first transcription is fast.
-# The previous lazy loading caused a 10-15s delay on the first command.
-log.info("loading whisper model=%s device=%s compute=%s", MODEL_NAME, DEVICE, COMPUTE_TYPE)
-_load_start = time.monotonic()
-_model: WhisperModel = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE_TYPE)
-log.info(
-    "whisper model loaded in %.1fs ΓÇö ready for transcription",
-    time.monotonic() - _load_start,
-)
+    # Map string names to ModelArch enum
+    arch_map = {
+        "tiny_streaming": ModelArch.TINY_STREAMING,
+        "small_streaming": ModelArch.SMALL_STREAMING,
+        "medium_streaming": ModelArch.MEDIUM_STREAMING,
+        "tiny": ModelArch.TINY,
+        "base": ModelArch.BASE,
+    }
+
+    model_arch_enum = arch_map.get(MODEL_ARCH_NAME.lower())
+    if model_arch_enum is None:
+        log.warning(
+            "Unknown MOONSHINE_MODEL='%s', defaulting to small_streaming",
+            MODEL_ARCH_NAME,
+        )
+        model_arch_enum = ModelArch.SMALL_STREAMING
+        _model_arch_name = "small_streaming"
+
+    # Download model files if not cached (first run)
+    log.info("loading moonshine model=%s language=%s", _model_arch_name, LANGUAGE)
+    _load_start = time.monotonic()
+
+    model_path, default_arch = get_model_for_language(LANGUAGE)
+
+    _transcriber = Transcriber(
+        model_path=model_path,
+        model_arch=model_arch_enum,
+    )
+
+    log.info(
+        "moonshine model loaded in %.1fs — ready for transcription",
+        time.monotonic() - _load_start,
+    )
+    _model_path = model_path
+    _model_arch = model_arch_enum
 
 
-def _get_model() -> WhisperModel:
-    return _model
+def _get_transcriber():
+    """Get the loaded transcriber instance."""
+    if _transcriber is None:
+        _load_model()
+    return _transcriber
+
+
+# ─── Endpoints ─────────────────────────────────────────────────────────────
 
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    hw = _load_hotwords()
     return JSONResponse({
         "ok": True,
-        "model": MODEL_NAME,
-        "device": DEVICE,
-        "hotwords": hw[:80] + "..." if len(hw) > 80 else hw,
-        "hotwords_file": HOTWORDS_FILE,
+        "model": f"moonshine-{_model_arch_name}",
+        "language": LANGUAGE,
+        "engine": "moonshine-voice (ONNX Runtime)",
     })
 
 
@@ -150,19 +141,14 @@ async def health() -> JSONResponse:
 async def transcribe(audio: UploadFile = File(...)) -> JSONResponse:
     """Transcribe raw audio bytes. Returns {"text": "transcript"}.
 
-    Accepts WAV, MP3, FLAC, or any format supported by PyAV.
-    Raw 16-bit PCM is also accepted ΓÇö we wrap it in a WAV header so
-    PyAV/faster-whisper can decode it.
+    Accepts WAV (16kHz, mono, 16-bit PCM) or raw 16-bit LE mono PCM.
     """
-    import io
-    import struct
     audio_bytes = await audio.read()
     if not audio_bytes:
         return JSONResponse({"text": ""}, status_code=400)
 
     # Check if the bytes start with a RIFF/WAV header. If not, assume raw
-    # 16-bit LE mono PCM at 16kHz and wrap it in a WAV header so PyAV can
-    # decode it.
+    # 16-bit LE mono PCM at 16kHz and wrap it in a WAV header.
     is_wav = len(audio_bytes) >= 12 and audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE"
     if not is_wav:
         sample_rate = 16000
@@ -188,63 +174,90 @@ async def transcribe(audio: UploadFile = File(...)) -> JSONResponse:
         audio_bytes = header + audio_bytes
         log.info("wrapped raw PCM (%d bytes) in WAV header", data_len)
 
-    audio_file = io.BytesIO(audio_bytes)
-    audio_file.name = "audio.wav"  # hint for PyAV format detection
+    # Parse WAV to extract raw float samples for Moonshine
+    try:
+        audio_data, sample_rate = _wav_to_float_samples(audio_bytes)
+    except Exception as e:
+        log.error("WAV parsing failed: %s", e)
+        return JSONResponse({"text": "", "error": str(e)}, status_code=500)
 
-    model = _get_model()
+    if len(audio_data) == 0:
+        return JSONResponse({"text": ""})
+
+    # Transcribe using Moonshine
+    transcriber = _get_transcriber()
     _transcribe_start = time.monotonic()
     try:
-        # Reload hotwords on every request (hot-reload from file)
-        hotwords = _load_hotwords()
-        # initial_prompt gives the model context about expected vocabulary.
-        # This is especially important for tiny.en (39M params) which struggles
-        # with hotwords alone. The prompt biases the decoder toward recognised
-        # words like "servx", "analyse", "PR" without forcing them.
-        initial_prompt = (
-            "The user is giving voice commands to a desktop assistant called NEXUS. "
-            "Common commands include: open architecture mapper, open the architecture mapper, "
-            "show architecture, show me the architecture, launch architecture mapper, "
-            "open architect, open codebase mapper, open dependency mapper, "
-            "open architecture diagram, open architecture graph, "
-            "analyse PR 5 in servx, review PR 3 in servx, "
-            "analyse PR 24 in ledger ai, open gmail, "
-            "search youtube, close notepad, open architect mapper. "
-            "Recognised names: servx, NEXUS, ULTRON, ledger ai, ledger-ai, github, gmail, "
-            "architecture, architect, mapper, codebase, dependency, diagram, graph."
+        transcript = transcriber.transcribe_without_streaming(
+            audio_data=audio_data,
+            sample_rate=sample_rate,
         )
-        segments, _info = model.transcribe(
-            audio_file,
-            language="en",
-            hotwords=hotwords,
-            initial_prompt=initial_prompt,
-            # Use VAD but with gentle parameters ΓÇö default VAD is too aggressive
-            # on short command clips (<2s) and discards them entirely.
-            # min_silence_duration_ms=1500 matches the frontend VAD timing.
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=1500,
-                speech_pad_ms=250,
-                threshold=0.3,
-            ),
-            # Greedy decoding ΓÇö much faster than beam search (beam_size=5).
-            # For short voice commands, the accuracy difference is negligible.
-            beam_size=1,
-        )
-        text = " ".join(seg.text for seg in segments).strip()
+        # Join all transcript lines
+        text = " ".join(line.text for line in transcript.lines).strip()
     except Exception as e:
         log.error("transcription failed: %s", e)
         return JSONResponse({"text": "", "error": str(e)}, status_code=500)
 
     _elapsed = time.monotonic() - _transcribe_start
     log.info(
-        "transcribed %d bytes ΓåÆ %d chars in %.2fs",
-        len(audio_bytes), len(text), _elapsed,
+        "transcribed %d samples → %d chars in %.2fs: '%s'",
+        len(audio_data), len(text), _elapsed, text,
     )
     return JSONResponse({"text": text})
 
 
+def _wav_to_float_samples(wav_bytes: bytes):
+    """Parse WAV bytes and return (float_samples, sample_rate).
+
+    Converts 16-bit signed PCM to float32 in range [-1.0, 1.0].
+    """
+    wf = wave.open(io.BytesIO(wav_bytes), "rb")
+    sample_rate = wf.getframerate()
+    n_channels = wf.getnchannels()
+    sample_width = wf.getsampwidth()
+    n_frames = wf.getnframes()
+    raw = wf.readframes(n_frames)
+    wf.close()
+
+    if sample_width == 2:
+        # 16-bit signed PCM → float32
+        import array
+        samples = array.array("h", raw)
+        if n_channels > 1:
+            # Downmix to mono by averaging channels
+            mono = []
+            for i in range(0, len(samples), n_channels):
+                chunk = samples[i:i + n_channels]
+                mono.append(sum(chunk) // n_channels)
+            samples = array.array("h", mono)
+        float_samples = [s / 32768.0 for s in samples]
+    elif sample_width == 4:
+        # 32-bit signed PCM → float32
+        import array
+        samples = array.array("i", raw)
+        if n_channels > 1:
+            mono = []
+            for i in range(0, len(samples), n_channels):
+                chunk = samples[i:i + n_channels]
+                mono.append(sum(chunk) // n_channels)
+            samples = array.array("i", mono)
+        float_samples = [s / 2147483648.0 for s in samples]
+    else:
+        raise ValueError(f"Unsupported sample width: {sample_width} bytes")
+
+    return float_samples, sample_rate
+
+
+# ─── Startup ───────────────────────────────────────────────────────────────
+
+
+@app.on_event("startup")
+async def _startup():
+    """Eagerly load the model at startup so the first transcription is fast."""
+    _load_model()
+
+
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.environ.get("NEXUS_STT_PORT", "39217"))
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")

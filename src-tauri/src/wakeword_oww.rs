@@ -446,8 +446,8 @@ mod engine {
             tracing::info!(
                 "openWakeWord KWS engine initialized \
                  (wake word: NEXUS, 80ms sliding window, threshold: {}, \
-                 silence gate: RMS < 0.0005 = skip, AGC: target RMS 0.03, \
-                 detection: max-based)",
+                 silence gate: RMS < 0.002 = skip, AGC: target RMS 0.03, max gain 20x, \
+                 detection: max-based, post-TTS mute: 2000ms, grace: 10s after restart)",
                 threshold
             );
 
@@ -493,11 +493,14 @@ mod engine {
             chunk: Vec<f32>,
         ) -> (bool, f32, Option<CommandIntent>) {
             // ─── Startup grace period ───────────────────────────────────
-            // Ignore all detections during the first 3 seconds after the
-            // engine starts. The audio stream produces transient noise
-            // during initialization that false-triggers the model
-            // (probability 0.9+ on startup). Push 0.0 to flush the buffer.
-            if self.engine_start_time.elapsed().as_secs() < 3 {
+            // Ignore all detections during the first 10 seconds after the
+            // engine starts or after a stream restart. The audio stream
+            // produces transient noise during initialization that
+            // false-triggers the model (probability 0.9+ on startup, and
+            // 0.8+ up to 7s after Intel SST driver restarts).
+            // Increased from 5s to 10s because Intel SST bursts can occur
+            // 5-10s after a stream restart, past the old 5s grace period.
+            if self.engine_start_time.elapsed().as_secs() < 10 {
                 self.detections_buffer.push_back(0.0);
                 return (false, 0.0, None);
             }
@@ -521,14 +524,20 @@ mod engine {
             //   makes quiet and loud "NEXUS" produce the same model input, so the
             //   model (trained on normal-volume TTS) recognizes whispered speech.
             //   The gain is capped at 30x to avoid amplifying pure noise.
-            // Silence gate: lowered to 0.0005 to catch very quiet/whispered
-            // "nexus" calls. Pure digital silence (RMS=0) is still blocked.
-            // The Intel SST driver often produces RMS=0.0000 even when the
-            // mic is working, so we can't set this too high or we block
-            // everything. The AGC step compensates for low input.
-            const SILENCE_RMS_THRESHOLD: f32 = 0.0005;
+            // Silence gate: raised from 0.0005 to 0.002 to block the lowest-
+            // level noise spikes (driver pops, digital floor) that were being
+            // amplified by AGC into full-scale model input and causing false
+            // wakes. 0.002 is still low enough to catch whispered "nexus"
+            // calls (whispered speech at ~30cm produces RMS ~0.005-0.02).
+            // Pure digital silence (RMS=0) and Intel SST silence (RMS=0.000001)
+            // are still blocked.
+            const SILENCE_RMS_THRESHOLD: f32 = 0.002;
             const TARGET_RMS: f32 = 0.03; // Normal speech RMS (~-30dBFS)
-            const MAX_GAIN: f32 = 50.0; // Cap to avoid amplifying noise
+            // Lowered from 50x to 20x: with the higher silence gate, the
+            // maximum AGC output is 0.002 * 20 = 0.04 RMS, which is close to
+            // the target. 50x was amplifying marginal noise (0.001 RMS) to
+            // 0.05 RMS — louder than real speech — and causing false wakes.
+            const MAX_GAIN: f32 = 20.0;
 
             let rms = if chunk.is_empty() {
                 0.0
@@ -803,13 +812,23 @@ mod engine {
         /// command classifier fires.
         ///
         /// Secondary confirmation: after a raw detection, collects 500ms of
-        /// audio to verify there was actual speech (RMS > 0.001). This filters
-        /// pure digital silence/noise spikes that pass the classifier but
-        /// aren't real speech. The threshold is very low (0.001) because the
-        /// Intel SST driver produces brief audio bursts that fade quickly —
-        /// by the time the 500ms confirmation window completes, the mic may
-        /// have gone silent again. The silence gate (0.0005) still blocks
-        /// pure digital silence before it reaches the classifier.
+        /// audio to verify there was actual speech (raw RMS > 0.002). This
+        /// filters pure digital silence/noise spikes that pass the classifier
+        /// but aren't real speech.
+        ///
+        /// IMPORTANT: We do NOT apply AGC to the confirmation RMS. The previous
+        /// implementation applied 50x AGC, which could confirm a wake on audio
+        /// 25x quieter than the silence gate (raw RMS 0.00002 → AGC 0.001),
+        /// effectively bypassing the gate and confirming noise spikes. Using
+        /// raw RMS with a threshold matching the silence gate (0.002) ensures
+        /// consistency: if audio wouldn't pass the silence gate, it shouldn't
+        /// confirm a wake.
+        ///
+        /// Trade-off: on Intel SST mics that fade to silence during the 500ms
+        /// confirmation window, valid wakes may be rejected. This is
+        /// preferable to false wakes that trigger the "Didn't catch that sir"
+        /// retry loop. The user explicitly complained about the loop, not
+        /// about missed wakes.
         pub fn process(&mut self, samples: &[f32]) -> bool {
             // If we're in confirmation mode, collect audio and check RMS
             if self.confirmation_active {
@@ -821,37 +840,23 @@ mod engine {
                         let sum_sq: f32 = buf.iter().map(|s| s * s).sum();
                         (sum_sq / buf.len() as f32).sqrt()
                     };
-                    // Apply the same AGC as the classifier (see detect_chunk):
-                    // amplify to TARGET_RMS (0.03) with MAX_GAIN (50x). This ensures
-                    // the confirmation window sees the same audio level the
-                    // classifier did. Without this, the classifier fires at 0.99
-                    // on AGC-amplified audio but the confirmation rejects it
-                    // because the raw RMS is below 0.001 — a mismatch that
-                    // causes valid wakes to be discarded on Intel SST mics
-                    // that deliver very quiet audio.
-                    const CONF_TARGET_RMS: f32 = 0.03;
-                    const CONF_MAX_GAIN: f32 = 50.0;
-                    let agc_rms = if raw_rms > 0.0 && raw_rms < CONF_TARGET_RMS {
-                        let gain = (CONF_TARGET_RMS / raw_rms).min(CONF_MAX_GAIN);
-                        let amplified: f32 = buf.iter().map(|&s| (s * gain).clamp(-1.0, 1.0)).map(|s| s * s).sum();
-                        (amplified / buf.len() as f32).sqrt()
-                    } else {
-                        raw_rms
-                    };
                     self.confirmation_active = false;
 
-                    // Use AGC-adjusted RMS for the threshold check, but log both
-                    // so we can see what the raw mic level was.
-                    if agc_rms >= 0.001 {
+                    // Use raw RMS only (no AGC) — threshold matches the silence
+                    // gate in detect_chunk (0.002). This prevents the
+                    // confirmation from amplifying quiet noise tails and
+                    // confirming false wakes.
+                    const CONFIRMATION_RMS_THRESHOLD: f32 = 0.002;
+                    if raw_rms >= CONFIRMATION_RMS_THRESHOLD {
                         tracing::info!(
-                            "OWW wake confirmed! (probability: {:.3}, raw RMS: {:.6}, AGC RMS: {:.4})",
-                            self.pending_probability, raw_rms, agc_rms
+                            "OWW wake confirmed! (probability: {:.3}, raw RMS: {:.6})",
+                            self.pending_probability, raw_rms
                         );
                         return true;
                     } else {
                         tracing::info!(
-                            "OWW wake rejected — confirmation RMS too low (raw={:.6}, AGC={:.4} < 0.001), likely noise spike",
-                            raw_rms, agc_rms
+                            "OWW wake rejected — confirmation RMS too low (raw={:.6} < {:.3}), likely noise spike or TTS echo",
+                            raw_rms, CONFIRMATION_RMS_THRESHOLD
                         );
                         // Reset detection state
                         self.detections_buffer.clear();
@@ -971,7 +976,9 @@ mod engine {
         // These mirror the function-local statics so the recovery thread
         // (which runs in a separate thread) can monitor audio health.
         super::CALLBACK_COUNT_GLOBAL.store(n, Ordering::Relaxed);
-        if rms > 0.001 {
+        // Use 0.002 to match the wake engine's SILENCE_RMS_THRESHOLD.
+        // If audio is above this, the mic is working and we don't need recovery.
+        if rms > 0.002 {
             super::LAST_NONSILENT_FOR_RECOVERY.store(n, Ordering::Relaxed);
         }
 
@@ -1032,31 +1039,98 @@ mod engine {
         // 3. Feed 1280-sample chunks to KWS engine
         //    Check meeting/privacy state — if suppressed, drain audio but
         //    don't run detection (prevents wake during meetings and TTS self-trigger).
-        //    Also enforces Dual-Phase 300ms Post-TTS Mute Gate.
+        //    Also enforces Post-TTS Mute Gate (1000ms after TTS ends).
+        //    Also handles Rust-side STT capture (bypasses getUserMedia).
         {
-            let mut last_tts_active = std::time::Instant::now() - std::time::Duration::from_secs(10);
             let mut buf = out_buf.lock();
             buf.extend(produced);
             while buf.len() >= chunk_size {
                 let chunk: Vec<f32> = buf.drain(0..chunk_size).collect();
 
+                // ── Rust-side STT capture ──────────────────────────────
+                // If capturing, append chunk to buffer and run RMS VAD.
+                // Skip KWS during capture (prevents double-trigger).
+                if super::STT_CAPTURING.load(Ordering::Relaxed) {
+                    {
+                        let mut cap = super::STT_CAPTURE_BUFFER.lock();
+                        cap.extend(chunk.iter().copied());
+                    }
+
+                    // RMS-based VAD on this 1280-sample (80ms) chunk
+                    let rms = {
+                        let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
+                        (sum_sq / chunk.len() as f32).sqrt()
+                    };
+
+                    if rms > super::STT_SPEECH_RMS_THRESHOLD {
+                        super::STT_SPEECH_DETECTED.store(true, Ordering::Relaxed);
+                        super::STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
+                    } else if super::STT_SPEECH_DETECTED.load(Ordering::Relaxed) {
+                        super::STT_SILENCE_CHUNKS.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    let total = super::STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
+                    let silence = super::STT_SILENCE_CHUNKS.load(Ordering::Relaxed);
+                    let speech_detected = super::STT_SPEECH_DETECTED.load(Ordering::Relaxed);
+
+                    // Stop conditions:
+                    // 1. Silence after speech: STT_SILENCE_CHUNK_LIMIT chunks (~2.4s)
+                    // 2. Max capture: STT_MAX_CHUNKS chunks (~10s)
+                    // 3. No speech timeout: STT_NO_SPEECH_CHUNK_LIMIT chunks (~8s)
+                    let should_stop = (speech_detected && silence >= super::STT_SILENCE_CHUNK_LIMIT)
+                        || total >= super::STT_MAX_CHUNKS
+                        || (!speech_detected && total >= super::STT_NO_SPEECH_CHUNK_LIMIT);
+
+                    if should_stop {
+                        super::STT_CAPTURING.store(false, Ordering::Relaxed);
+                        let buffer = std::mem::take(&mut *super::STT_CAPTURE_BUFFER.lock());
+                        super::STT_SPEECH_DETECTED.store(false, Ordering::Relaxed);
+                        super::STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
+                        super::STT_TOTAL_CHUNKS.store(0, Ordering::Relaxed);
+
+                        tracing::info!(
+                            "stt-capture: stopping (total={} chunks, speech={}, silence={} chunks, {} samples)",
+                            total, speech_detected, silence, buffer.len()
+                        );
+
+                        // Spawn transcription thread (don't block the audio callback)
+                        std::thread::spawn(move || {
+                            super::transcribe_and_emit(buffer);
+                        });
+                    }
+
+                    // Skip KWS during capture
+                    continue;
+                }
+
                 // Check if wake detection should be suppressed
-                let suppressed = super::MEETING_STATE
-                    .get()
+                let meeting_state = super::MEETING_STATE.get();
+                let suppressed = meeting_state
                     .map(|s: &std::sync::Arc<crate::meeting_detect::MeetingState>| {
                         s.should_suppress_wake()
                     })
                     .unwrap_or(false);
 
                 if suppressed {
-                    last_tts_active = std::time::Instant::now();
                     continue;
                 }
 
-                // Dual-Phase Mute Gate: drop audio chunks for 300ms after TTS finishes
-                // to allow room acoustics and DAC output buffers to settle completely
-                if last_tts_active.elapsed() < std::time::Duration::from_millis(300) {
-                    continue;
+                // Post-TTS Mute Gate: drop audio chunks for 2000ms after TTS
+                // finishes to allow room acoustics, DAC output buffers, and
+                // microphone AGC to settle completely. This prevents TTS echo
+                // (RMS ~0.2) from re-triggering the wake word after the
+                // `tts_playing` flag goes false.
+                //
+                // The previous implementation used a local `last_tts_active`
+                // variable that was reinitialized on every audio callback,
+                // so the gate never actually persisted across callbacks.
+                // Now we use `MeetingState::ms_since_tts_ended()` which
+                // stores the end time in an AtomicU64 that persists.
+                if let Some(state) = meeting_state {
+                    let ms_since_tts = state.ms_since_tts_ended();
+                    if ms_since_tts < 2000 {
+                        continue;
+                    }
                 }
 
                 let mut eng = engine.lock();
@@ -1117,10 +1191,100 @@ static LAST_CALLBACK_FOR_RECOVERY: std::sync::atomic::AtomicU64 = std::sync::ato
 /// Used to rate-limit restarts and log the count for debugging.
 static RECOVERY_RESTART_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Baton-pass flag: when true, the frontend has the mic and the
+/// silence-recovery thread should NOT restart the stream.
+/// Restarting while the frontend is recording disrupts the capture
+/// and causes empty transcripts.
+static MIC_BATON_PASSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// ─── Rust-side STT capture (bypasses getUserMedia entirely) ─────────────
+// The cpal stream that detected the wake word ALSO captures the command audio.
+// This fixes the Intel SST driver issue where getUserMedia returns silence
+// but the cpal stream is still working.
+//
+// Flow:
+//   1. Wake word detected → start_stt_capture() sets STT_CAPTURING=true
+//   2. on_audio() appends 16kHz chunks to STT_CAPTURE_BUFFER
+//   3. RMS-based VAD detects speech start and silence end
+//   4. On silence after speech → stop capture, spawn transcription thread
+//   5. Transcription thread calls Groq or local STT, emits "stt:transcript" event
+//   6. Frontend processes the transcript (correct, parse, execute)
+
+static STT_CAPTURE_BUFFER: once_cell::sync::Lazy<parking_lot::Mutex<Vec<f32>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(Vec::with_capacity(16000 * 15)));
+
+static STT_CAPTURING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STT_SPEECH_DETECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STT_SILENCE_CHUNKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static STT_TOTAL_CHUNKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Global AppHandle for emitting "stt:transcript" events from the capture thread.
+/// We use a channel instead of storing the AppHandle directly (which has a generic
+/// type parameter R that can't be stored in a static).
+#[cfg(not(feature = "mock-wake"))]
+static STT_CAPTURE_TX: OnceCell<std::sync::mpsc::Sender<Vec<f32>>> = OnceCell::new();
+
+/// RMS threshold for speech detection (16kHz mono f32 samples).
+/// 0.01 filters out Intel SST background noise while still catching
+/// normal speech (typical RMS 0.05-0.3). The previous value of 0.005
+/// was too low — the Intel SST mic noise floor can exceed it for
+/// extended periods, causing 16s captures of pure noise that Groq
+/// hallucinates on.
+const STT_SPEECH_RMS_THRESHOLD: f32 = 0.01;
+
+/// Number of silent chunks after speech to wait before stopping capture.
+/// Each chunk is 1280 samples @ 16kHz = 80ms. 30 chunks = 2.4s of silence.
+const STT_SILENCE_CHUNK_LIMIT: u32 = 30;
+
+/// Maximum capture duration in chunks. 125 chunks = 10s.
+/// 10 seconds is plenty for any voice command. The previous value of
+/// 200 (16s) allowed Groq to hallucinate on extended noise captures.
+const STT_MAX_CHUNKS: u32 = 125;
+
+/// No-speech timeout in chunks. 100 chunks = 8s (same as frontend watchdog).
+const STT_NO_SPEECH_CHUNK_LIMIT: u32 = 100;
+
+/// Start capturing audio from the cpal stream for STT.
+/// Called on wake word detection or hotkey press.
+/// Does NOT pause the cpal stream — the stream keeps running and
+/// the audio callback buffers 16kHz samples for transcription.
+#[cfg(not(feature = "mock-wake"))]
+pub fn start_stt_capture() {
+    STT_CAPTURE_BUFFER.lock().clear();
+    STT_CAPTURING.store(true, std::sync::atomic::Ordering::Relaxed);
+    STT_SPEECH_DETECTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    STT_SILENCE_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
+    STT_TOTAL_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("stt-capture: started (cpal-side capture, no baton pass)");
+}
+
+/// Check if STT capture is currently in progress.
+#[cfg(not(feature = "mock-wake"))]
+#[allow(dead_code)]
+pub fn is_stt_capturing() -> bool {
+    STT_CAPTURING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Process a captured audio buffer: send it to the STT thread for transcription.
+/// Called from a spawned thread when silence is detected.
+/// The actual transcription + event emission happens in the STT receiver thread
+/// (spawned in `run()`), which has access to the AppHandle.
+#[cfg(not(feature = "mock-wake"))]
+fn transcribe_and_emit(buffer: Vec<f32>) {
+    if let Some(tx) = STT_CAPTURE_TX.get() {
+        if tx.send(buffer).is_err() {
+            tracing::error!("stt-capture: STT receiver thread died, cannot send buffer");
+        }
+    } else {
+        tracing::warn!("stt-capture: STT_CAPTURE_TX not initialized, dropping buffer");
+    }
+}
+
 /// Pause the wake-word audio stream (release the OS mic lock).
 /// Called by the frontend via `pause_wakeword` IPC before getUserMedia().
 #[cfg(not(feature = "mock-wake"))]
 pub fn pause_stream() {
+    MIC_BATON_PASSED.store(true, std::sync::atomic::Ordering::Relaxed);
     use cpal::traits::StreamTrait;
     let guard = CPAL_STREAM.read();
     if let Some(ref stream) = *guard {
@@ -1137,11 +1301,23 @@ pub fn pause_stream() {
 /// Called by the frontend via `resume_wakeword` IPC after releasing the mic.
 #[cfg(not(feature = "mock-wake"))]
 pub fn resume_stream() {
+    MIC_BATON_PASSED.store(false, std::sync::atomic::Ordering::Relaxed);
     use cpal::traits::StreamTrait;
     let guard = CPAL_STREAM.read();
     if let Some(ref stream) = *guard {
         match stream.0.play() {
-            Ok(()) => tracing::info!("wake: cpal stream resumed (mic baton pass — frontend released mic)"),
+            Ok(()) => {
+                tracing::info!("wake: cpal stream resumed (mic baton pass — frontend released mic)");
+                // Reset the startup grace period when the stream resumes.
+                // The Intel SST driver produces transient noise bursts when
+                // the stream starts/restarts, which false-triggers the wake
+                // word model. The 3s grace period in detect_chunk() ignores
+                // these, but only if engine_start_time is recent.
+                // Without this reset, the grace period expires at app boot
+                // (5.7s before the stream starts) and never protects against
+                // stream-restart transients.
+                reset_grace_period();
+            }
             Err(e) => tracing::warn!("wake: cpal stream resume failed: {e}"),
         }
     } else {
@@ -1149,7 +1325,23 @@ pub fn resume_stream() {
     }
 }
 
+/// Reset the wake engine's startup grace period.
+/// Called when the audio stream starts or resumes — the Intel SST driver
+/// produces transient noise on stream start that false-triggers the model.
+/// The grace period in detect_chunk() ignores detections during this window.
+#[cfg(not(feature = "mock-wake"))]
+pub fn reset_grace_period() {
+    let engine_opt = WAKE_ENGINE_GLOBAL.lock().clone();
+    if let Some(engine) = engine_opt {
+        let mut eng = engine.lock();
+        eng.engine_start_time = std::time::Instant::now();
+        tracing::debug!("wake: grace period reset (10s immunity from false triggers)");
+    }
+}
+
 /// Mock-wake stubs for non-OWW builds.
+#[cfg(feature = "mock-wake")]
+pub fn start_stt_capture() {}
 #[cfg(feature = "mock-wake")]
 pub fn pause_stream() {}
 #[cfg(feature = "mock-wake")]
@@ -1195,6 +1387,14 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     let _ = WAKE_TX.set(tx);
 
     // ─── Phase 3: Start audio capture (with retry for cold-boot audio driver) ──
+    // Reset the grace period BEFORE starting the audio stream. The audio
+    // callback begins receiving chunks immediately when the stream starts,
+    // and if the grace period is reset after, there's a race condition
+    // where the first few chunks are processed with an expired grace period
+    // (set at engine creation 5-10s ago), causing a false wake on startup
+    // transient noise.
+    reset_grace_period();
+
     let t2 = Instant::now();
     let _ = app.emit("wake-engine-status", "starting-audio");
     start_audio_capture_with_retry(engine.clone())?;
@@ -1209,6 +1409,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         let mut g = WAKE_ENGINE_GLOBAL.lock();
         *g = Some(engine.clone());
     }
+
+    // Reset the grace period again AFTER the stream starts, in case the
+    // stream start took several seconds and the pre-start reset has expired.
+    reset_grace_period();
 
     // ─── Silence Recovery Thread ────────────────────────────────────
     // The Intel SST driver sometimes stops delivering audio after 15-30
@@ -1243,6 +1447,25 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         backoff.min(60)
                     };
                     std::thread::sleep(std::time::Duration::from_secs(poll_secs));
+
+                    // Skip recovery if the frontend has the mic (baton pass).
+                    // The stream is intentionally paused — restarting would
+                    // disrupt the frontend's audio capture and cause empty transcripts.
+                    if MIC_BATON_PASSED.load(Ordering::Relaxed) {
+                        continue;
+                    }
+
+                    // Skip recovery if Rust-side STT capture is active.
+                    // The cpal stream is actively capturing command audio —
+                    // restarting mid-capture destroys the audio buffer and
+                    // causes empty transcripts (Groq then hallucinates on
+                    // the silence). This was happening every time the user
+                    // pressed Ctrl+Space: capture started, then 1-5s later
+                    // silence-recovery restarted the stream, killing the capture.
+                    if STT_CAPTURING.load(Ordering::Relaxed) {
+                        continue;
+                    }
+
                     let last_cb = LAST_CALLBACK_FOR_RECOVERY.load(Ordering::Relaxed);
                     let last_non_silent = LAST_NONSILENT_FOR_RECOVERY.load(Ordering::Relaxed);
                     let now_cb = CALLBACK_COUNT_GLOBAL.load(Ordering::Relaxed);
@@ -1340,6 +1563,10 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                                         CALLBACK_COUNT_GLOBAL.load(Ordering::Relaxed),
                                         Ordering::Relaxed,
                                     );
+                                    // Reset the wake-word grace period — the
+                                    // stream restart produces transient noise
+                                    // that false-triggers the wake model.
+                                    reset_grace_period();
                                 }
                                 Err(e) => {
                                     tracing::error!(
@@ -1389,8 +1616,80 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         .ok();
 
     // Main loop: handle wake-word detections
+    // Set up the STT capture channel: the audio callback sends captured audio
+    // via STT_CAPTURE_TX, and this thread receives it, transcribes, and emits
+    // the "stt:transcript" event to the frontend.
+    let (stt_tx, stt_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    let _ = STT_CAPTURE_TX.set(stt_tx);
+
+    // Spawn the STT receiver thread — it has access to the AppHandle and
+    // handles transcription + event emission.
+    let app_for_stt = app.clone();
+    std::thread::Builder::new()
+        .name("stt-capture-rx".into())
+        .spawn(move || {
+            while let Ok(buffer) = stt_rx.recv() {
+                if buffer.is_empty() {
+                    tracing::warn!("stt-capture: empty buffer received");
+                    let _ = app_for_stt.emit("stt:transcript", "");
+                    continue;
+                }
+
+                // Convert f32 samples to i16 PCM
+                let samples: Vec<i16> = buffer
+                    .iter()
+                    .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                    .collect();
+
+                tracing::info!(
+                    "stt-capture: {} samples ({}ms audio), starting transcription",
+                    samples.len(),
+                    samples.len() / 16
+                );
+
+                // Create a tokio runtime for the async STT call
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("stt-capture: failed to create tokio runtime: {}", e);
+                        let _ = app_for_stt.emit("stt:transcript", "");
+                        continue;
+                    }
+                };
+
+                rt.block_on(async {
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_default();
+
+                    let transcript = crate::stt::transcribe_samples(
+                        &samples,
+                        &client,
+                        Some(&app_for_stt),
+                    )
+                    .await;
+
+                    let text = transcript.unwrap_or_default();
+                    tracing::info!("stt-capture: transcript = '{}'", text);
+                    let _ = app_for_stt.emit("stt:transcript", &text);
+                });
+            }
+        })
+        .ok();
+
     while rx.recv().is_ok() {
         tracing::info!("wake-word: NEXUS detected → triggering wake");
+
+        // Start Rust-side STT capture immediately.
+        // The cpal stream is already running and just detected the wake word,
+        // so it's delivering audio. We capture from the same stream — no baton
+        // pass, no getUserMedia. This fixes the Intel SST driver issue where
+        // getUserMedia returns silence but cpal is still working.
+        start_stt_capture();
 
         // Only pre-start the local faster-whisper sidecar if Groq cloud STT
         // will NOT be used. This saves ~64-128MB RAM when Groq is configured.

@@ -1,4 +1,5 @@
 //! AST-aware symbol + import extraction using tree-sitter.
+#![allow(dead_code)]
 //!
 //! Replaces the regex-based `extract_imports_from_source` in architect.rs.
 //! Parses source files with tree-sitter to extract:

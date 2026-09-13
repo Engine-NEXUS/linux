@@ -30,6 +30,7 @@ export type Intent =
   | { action: "close_app"; target: string }
   | { action: "whatsapp_chat"; contact: string }
   | { action: "open_architect" }
+  | { action: "open_settings" }
   | { action: "search"; query: string }
   | { action: "analyse_repo"; owner?: string; repo: string }
   | { action: "analyse_pr"; owner?: string; repo: string; pr_number: number }
@@ -39,6 +40,7 @@ export type Intent =
   | { action: "media_next" }
   | { action: "media_previous" }
   | { action: "media_stop" }
+  | { action: "github_command"; command: unknown }
   | { action: "greeting"; reply: string }
   | { action: "unknown"; raw: string };
 
@@ -537,6 +539,32 @@ export function parseIntent(transcript: string): Intent {
   // Also catch "open the architect" / "open the architecture mapper"
   if (/^(?:open|launch|start|show)\s+the\s+(?:architecture|architect)(?:\s+(?:mapper|map|window))?$/i.test(text)) {
     return { action: "open_architect" };
+  }
+
+  // --- Open Settings / Command Center ---
+  // "open settings" / "show settings" / "open command center" / "open preferences"
+  // "configure NEXUS" / "NEXUS settings" / "open config" / "show preferences"
+  if (/^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?settings?$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?command\s+center$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?preferences?$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?(?:config|configuration)$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^configure\s+nexus$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^nexus\s+(?:settings?|config|configuration|preferences?|command\s+center)$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  // Bare words (Intel SST mic truncation)
+  if (/^(?:settings|preferences|config|configuration)$/i.test(text)) {
+    return { action: "open_settings" };
   }
 
   // --- Media Control (MPRIS D-Bus / System Keys) ---

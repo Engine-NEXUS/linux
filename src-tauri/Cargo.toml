@@ -101,6 +101,13 @@ sha2 = "0.10"
 octocrab = "0.42"
 async-trait = "0.1"
 
+# Live mode: cross-platform keyboard/mouse simulation + clipboard for paste-text.
+# enigo: used by live/commands/keyboard.rs to type text and press keys.
+# arboard: used by live/commands/keyboard.rs for clipboard-paste (avoids
+# autocomplete corruption when typing into WhatsApp/search boxes).
+enigo = "0.5"
+arboard = "3.4"
+
 
 # Windows-specific: EnumWindows + SetForegroundWindow + ShellExecuteW
 [target.'cfg(windows)'.dependencies]
@@ -152,7 +159,14 @@ default = ["wakeword-oww"]
 # dev server and hot reload keep working.
 custom-protocol = ["tauri/custom-protocol"]
 wakeword-oww = []                # openWakeWord via tract-onnx (new, default)
+wakeword-sherpa = []             # Sherpa-ONNX wake word + speaker verification (optional, not in default build)
 mock-wake = []                   # CI: skip native lib, emit fake wake on hotkey only
+# Admin-only brain system (Qwen 0.5B + pronunciation learning + auto-train).
+# When enabled, brain_client + brain_monitor modules are compiled in.
+# When disabled (default), all brain code is compiled out — normal users
+# can never run the brain even if they find the files.
+# Build with: cargo build --features admin-brain
+admin-brain = []
 
 [profile.dev]
 opt-level = 0

@@ -293,12 +293,34 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
 
 /// Check TTS configuration.
 /// Phase 2: edge-tts (cloud) primary, Piper (local) fallback.
-/// edge-tts is cloud-based (0 MB RAM), ack phrases are pre-cached at boot.
+/// Uses the cached network state from tts_network (updated every 60s).
 fn check_tts() -> ServiceStatus {
+    let network_up = crate::tts_network::is_network_up();
+    let piper_loaded = crate::tts_network::is_piper_loaded();
+
+    let (connected, detail) = if network_up {
+        if piper_loaded {
+            (
+                true,
+                "Edge TTS (cloud) active — Piper loaded but will unload after 10 min stable network".to_string(),
+            )
+        } else {
+            (
+                true,
+                "Edge TTS (cloud) active — Piper standby (unloaded, 0 MB RAM)".to_string(),
+            )
+        }
+    } else {
+        (
+            false,
+            "Network down — Piper (local) fallback active (~80 MB RAM)".to_string(),
+        )
+    };
+
     ServiceStatus {
-        name: "TTS (edge-tts cloud)".into(),
-        connected: true,
-        detail: "Cached ack phrases ready — edge-tts cloud + Piper local fallback".into(),
+        name: "TTS (edge-tts cloud + Piper fallback)".into(),
+        connected,
+        detail,
         latency_ms: Some(0),
     }
 }

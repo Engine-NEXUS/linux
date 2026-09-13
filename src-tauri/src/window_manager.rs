@@ -8,28 +8,61 @@ use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
 
 const WIN: &str = "main";
 
-/// Position the orb at bottom-center, just above the taskbar/dock/panel.
+/// Read orb position + size from settings.json.
+/// Falls back to defaults (center-bottom, 200px) if the file is missing,
+/// can't be parsed, or doesn't contain the orb fields.
+fn read_orb_settings<R: Runtime>(app: &AppHandle<R>) -> (f64, f64, u32) {
+    let dir = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(_) => return (0.5, 1.0, 200),
+    };
+    let path = dir.join("settings.json");
+    if !path.exists() {
+        return (0.5, 1.0, 200);
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return (0.5, 1.0, 200),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return (0.5, 1.0, 200),
+    };
+    let h = json.get("orbHorizontalPct").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let v = json.get("orbVerticalPct").and_then(|v| v.as_f64()).unwrap_or(1.0);
+    let size = json.get("orbSize").and_then(|v| v.as_u64()).unwrap_or(200) as u32;
+    // Clamp to safe ranges
+    let h = h.max(0.0).min(1.0);
+    let v = v.max(0.0).min(1.0);
+    let size = size.max(100).min(300);
+    (h, v, size)
+}
+
+/// Position the orb based on saved settings (orbHorizontalPct, orbVerticalPct, orbSize).
+/// Falls back to center-bottom, 200px if settings are missing or invalid.
+/// Called at startup, on every wake, on every hotkey press, and on show_overlay.
 pub fn position_orb<R: Runtime>(win: &WebviewWindow<R>) -> Result<(), String> {
     use tauri::PhysicalPosition;
     if let Ok(Some(monitor)) = win.current_monitor() {
         let scale = monitor.scale_factor();
         let screen = monitor.size();
-        let orb = 200i32; // matches tauri.conf.json
+
+        let (h_pct, v_pct, orb_size) = read_orb_settings(win.app_handle());
+        let orb = orb_size as i32;
         let phys_orb = (orb as f64 * scale) as i32;
 
-        let x = (screen.width as i32 - phys_orb) / 2;
-        #[cfg(target_os = "macos")]
-        let dock_offset = (70.0 * scale) as i32;
-        #[cfg(target_os = "windows")]
-        let dock_offset = (48.0 * scale) as i32;
-        #[cfg(target_os = "linux")]
-        let dock_offset = (36.0 * scale) as i32;
+        // Compute position from percentages
+        let raw_x = (screen.width as f64 * h_pct) as i32 - phys_orb / 2;
+        let raw_y = (screen.height as f64 * v_pct) as i32 - phys_orb / 2;
 
-        let gap = (12.0 * scale) as i32;
-        let y = screen.height as i32 - phys_orb - dock_offset - gap;
+        // Clamp to keep orb fully on-screen
+        let x = raw_x.max(0).min(screen.width as i32 - phys_orb);
+        let y = raw_y.max(0).min(screen.height as i32 - phys_orb);
 
         let _ = win.set_position(PhysicalPosition::new(x, y));
-        tracing::debug!("orb positioned at ({x}, {y}) [scale={scale}]");
+        let _ = win.set_size(tauri::PhysicalSize::new(orb, orb));
+        tracing::debug!("orb positioned at ({}, {}) size {}px [h={}, v={}, scale={}]",
+            x, y, orb, h_pct, v_pct, scale);
     }
     Ok(())
 }
@@ -101,5 +134,43 @@ pub fn hide_overlay<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         .get_webview_window(WIN)
         .ok_or_else(|| "main window not found".to_string())?;
     win.hide().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// IPC: `invoke('set_orb_position', { horizontalPct, verticalPct, size })`.
+/// Live-updates the orb position and size without restarting.
+/// Does NOT save to settings — the frontend should call save_settings separately.
+/// Used by the settings sidebar sliders for real-time preview.
+#[tauri::command]
+pub fn set_orb_position<R: Runtime>(
+    app: AppHandle<R>,
+    horizontal_pct: f64,
+    vertical_pct: f64,
+    size: u32,
+) -> Result<(), String> {
+    let win = app
+        .get_webview_window(WIN)
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    // Clamp inputs to safe ranges
+    let h = horizontal_pct.max(0.0).min(1.0);
+    let v = vertical_pct.max(0.0).min(1.0);
+    let orb = size.max(100).min(300) as i32;
+
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let scale = monitor.scale_factor();
+        let screen = monitor.size();
+        let phys_orb = (orb as f64 * scale) as i32;
+
+        let raw_x = (screen.width as f64 * h) as i32 - phys_orb / 2;
+        let raw_y = (screen.height as f64 * v) as i32 - phys_orb / 2;
+        let x = raw_x.max(0).min(screen.width as i32 - phys_orb);
+        let y = raw_y.max(0).min(screen.height as i32 - phys_orb);
+
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        let _ = win.set_size(tauri::PhysicalSize::new(orb, orb));
+        tracing::debug!("set_orb_position: ({}, {}) size {}px [h={}, v={}]",
+            x, y, orb, h, v);
+    }
     Ok(())
 }

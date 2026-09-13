@@ -33,7 +33,7 @@ export function Avatar() {
 
   // Load the Lottie JSON animation
   useEffect(() => {
-    fetch("/wakeup.json")
+    fetch(`${import.meta.env.BASE_URL}wakeup.json`)
       .then((res) => res.json())
       .then((data) => setAnimationData(data))
       .catch((err) => console.error("Failed to load lottie:", err));

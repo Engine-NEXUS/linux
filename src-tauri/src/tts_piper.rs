@@ -134,6 +134,23 @@ pub async fn synthesize(
     Ok((samples, sample_rate))
 }
 
+/// Unload the Piper engine to free ~80 MB RAM.
+///
+/// Called by the network monitor after 10 minutes of stable network.
+/// If the network drops again, Piper will reload on the next fallback.
+pub async fn unload_engine(engine: &PiperEngine) {
+    let mut lock = engine.lock().await;
+    if lock.is_some() {
+        *lock = None;
+        tracing::info!("tts-piper: engine unloaded (network stable for 10+ minutes, ~80 MB freed)");
+    }
+}
+
+/// Check if the Piper engine is currently loaded.
+pub async fn is_engine_loaded(engine: &PiperEngine) -> bool {
+    engine.lock().await.is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

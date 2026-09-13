@@ -32,11 +32,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::commands::read_local_stt_only;
-use crate::intent_parser::{parse_deterministic, ParsedIntent, ParseResult};
+use crate::intent_parser::{parse_deterministic, ParsedIntent};
 use crate::network;
 
 // ─── Types ─────────────────────────────────────────────────────────────
@@ -215,6 +214,119 @@ fn clear_active_request(request_id: &str) {
     }
 }
 
+// ─── ML parsing fallback ──────────────────────────────────────────────
+
+/// Try brain (Qwen, admin-only) then NLU (BERT-Mini) when the deterministic
+/// parser misses. This is the same pipeline as `parse_transcript` (Tauri
+/// command) — extracted here so the orchestrator can use it for routing
+/// instead of bypassing the ML classifiers.
+///
+/// Returns `None` if both brain and NLU are unavailable or low-confidence.
+async fn parse_with_ml(transcript: &str) -> Option<crate::intent_parser::ParseResult> {
+    // 1. Try brain server FIRST (admin-only, if enabled)
+    // The brain (Qwen 0.5B LLM) is much smarter than BERT-Mini and can
+    // understand mishearings, filler words, and unusual phrasing.
+    #[cfg(feature = "admin-brain")]
+    {
+        if crate::admin_config::is_admin() {
+            if let Some(mut result) = crate::brain_client::brain_classify(transcript).await {
+                tracing::info!(
+                    "orchestrator: brain: {:?} (confidence={:.3})",
+                    result.intent, result.confidence
+                );
+                // Validate and sanitize the brain's output before using it.
+                // The brain (Qwen 0.5B) sometimes hallucinates repo names
+                // from garbage transcripts or returns literal placeholders
+                // like "owner/repo". Sanitize before routing.
+                sanitize_ml_intent(&mut result);
+                if result.confidence >= 0.5 {
+                    return Some(result);
+                }
+                tracing::info!(
+                    "orchestrator: brain confidence too low ({:.2}), falling back to NLU",
+                    result.confidence
+                );
+            }
+        }
+    }
+
+    // 2. Try NLU server (BERT-Mini fallback)
+    if let Some(mut result) = crate::nlu_client::parse_via_nlu(transcript).await {
+        tracing::info!(
+            "orchestrator: nlu: {:?} (confidence={:.3})",
+            result.intent, result.confidence
+        );
+        sanitize_ml_intent(&mut result);
+        return Some(result);
+    }
+
+    None
+}
+
+/// Sanitize ML-classified intent: validate repo names, reject garbage.
+///
+/// The brain (Qwen 0.5B) and NLU (BERT-Mini) can hallucinate repo names
+/// from garbage transcripts. This function:
+///   - Replaces literal "owner/repo" placeholder with empty string
+///   - Validates repo names against GitHub naming rules
+///   - Falls back to account-wide (empty repo) for list_prs if repo is garbage
+///   - Rejects commands with invalid repos by lowering confidence below threshold
+fn sanitize_ml_intent(result: &mut crate::intent_parser::ParseResult) {
+    use crate::github_cmd::GitHubCommand;
+    use crate::intent_parser::ParsedIntent;
+
+    if let ParsedIntent::GitHubCommand { command } = &mut result.intent {
+        match command {
+            GitHubCommand::ListPrs { repo, .. }
+            | GitHubCommand::GetPr { repo, .. }
+            | GitHubCommand::MergePr { repo, .. }
+            | GitHubCommand::ApprovePr { repo, .. }
+            | GitHubCommand::ClosePr { repo, .. }
+            | GitHubCommand::RevertPr { repo, .. }
+            | GitHubCommand::ListPrFiles { repo, .. }
+            | GitHubCommand::CommentPr { repo, .. }
+            | GitHubCommand::CreatePr { repo, .. }
+            | GitHubCommand::UpdateBranch { repo, .. } => {
+                let trimmed = repo.trim().to_string();
+                // Reject literal placeholder "owner/repo"
+                if trimmed.eq_ignore_ascii_case("owner/repo") || trimmed.eq_ignore_ascii_case("owner/repo/") {
+                    tracing::warn!("orchestrator: brain returned literal placeholder '{}' as repo — clearing", trimmed);
+                    *repo = String::new();
+                    return;
+                }
+                // Validate repo name: only alphanumeric, hyphens, underscores, dots, slashes
+                // GitHub repo names: alphanumeric, -, _, . and owner/repo format
+                if !trimmed.is_empty() && !is_valid_repo_name(&trimmed) {
+                    tracing::warn!(
+                        "orchestrator: brain returned invalid repo '{}' — clearing (likely hallucinated from garbage transcript)",
+                        trimmed
+                    );
+                    *repo = String::new();
+                    // For ListPrs, empty repo = account-wide (valid).
+                    // For other commands, empty repo will cause a user-friendly error.
+                    // Lower confidence so the brain monitor logs it as a failure.
+                    if !matches!(command, GitHubCommand::ListPrs { .. }) {
+                        result.confidence = result.confidence.min(0.4);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Check if a string is a valid GitHub repository name.
+/// Valid: "zync", "owner/repo", "zync-ui", "my_repo", "v1.0"
+/// Invalid: "very homely person", "owner/repo", sentences, phrases
+fn is_valid_repo_name(s: &str) -> bool {
+    if s.is_empty() || s.len() > 100 {
+        return false;
+    }
+    // GitHub repo names only contain: a-z, A-Z, 0-9, -, _, ., /
+    // No spaces, no special characters
+    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
+}
+
 // ─── Routing ───────────────────────────────────────────────────────────
 
 /// Decide which subsystem should handle this intent.
@@ -239,6 +351,9 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // Architecture mapper — Rust + Worker enrichment
         ParsedIntent::OpenArchitect => Subsystem::Architect,
 
+        // Settings sidebar — handled locally (no Worker round-trip)
+        ParsedIntent::OpenSettings => Subsystem::LocalCommand,
+
         // GitHub sub-command system — typed operations via octocrab
         ParsedIntent::GitHubCommand { .. } => Subsystem::GitHub,
 
@@ -257,6 +372,7 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
 ///
 /// Local commands are instant (<5ms) — no loading indicator.
 /// Worker and Architect are long-running — show loading indicator after ack.
+#[allow(dead_code)]
 fn is_long_running(subsystem: &Subsystem) -> bool {
     matches!(
         subsystem,
@@ -278,7 +394,8 @@ pub struct ProcessResult {
 ///
 /// This is the MAIN ENTRY POINT called when the user finishes speaking.
 /// It:
-///   1. Parses the intent (deterministic Rust parser, <1ms)
+///   1. Parses the intent: deterministic (regex, <1ms) → brain (Qwen,
+///      admin-only) → NLU (BERT-Mini) → Unknown
 ///   2. Routes to the correct subsystem
 ///   3. Installs a new request (cancels any previous)
 ///   4. Emits ack + loading state to the frontend
@@ -300,8 +417,28 @@ pub async fn process_transcript<R: Runtime>(
         transcript.chars().take(80).collect::<String>()
     );
 
-    // 1. Parse intent (deterministic, <1ms)
+    // 1. Parse intent: deterministic (fast, <1ms) → brain (admin) → NLU → Unknown
+    // The full pipeline ensures that phrases trained in BERT-Mini or classified
+    // by the Qwen brain are actually used for routing, not just observed.
     let parse_result = parse_deterministic(&transcript);
+
+    // If deterministic missed, try brain (admin-only) then NLU before falling
+    // back to Unknown. This is the same pipeline as parse_transcript (Tauri
+    // command) — the orchestrator no longer bypasses the ML classifiers.
+    let parse_result = if parse_result.is_some() {
+        parse_result
+    } else {
+        tracing::info!("orchestrator: deterministic missed, trying brain/NLU");
+        let ml_result = parse_with_ml(&transcript).await;
+        if let Some(ref r) = ml_result {
+            tracing::info!(
+                "orchestrator: ML classified as {:?} (confidence={}, source={})",
+                r.intent, r.confidence, r.source
+            );
+        }
+        ml_result
+    };
+
     let intent = parse_result
         .as_ref()
         .map(|r| r.intent.clone())
@@ -311,8 +448,51 @@ pub async fn process_transcript<R: Runtime>(
 
     tracing::info!("orchestrator: parsed intent: {:?}", intent);
 
+    // 1b. Brain monitor — watches every transcript in the background.
+    // Non-blocking: spawns a tokio task, never delays the main pipeline.
+    // The brain cross-checks the parse, learns pronunciations, and
+    // auto-generates training data for BERT-Mini.
+    // Only compiled when the admin-brain feature is enabled.
+    #[cfg(feature = "admin-brain")]
+    {
+        let det_intent_name = parse_result.as_ref().map(|r| crate::intent_parser::intent_to_label(&r.intent).to_string());
+        let transcript_clone = transcript.clone();
+        crate::brain_monitor::monitor_transcript(
+            transcript_clone,
+            det_intent_name,
+            None,
+        );
+    }
+
     // 2. Route to subsystem
     let subsystem = route_intent(&intent);
+
+    // 2b. Check for verbal "wrong" feedback (admin says "wrong" after a bad command)
+    #[cfg(feature = "admin-brain")]
+    {
+        if crate::brain_monitor::is_verbal_wrong(&transcript) {
+            crate::brain_monitor::report_verbal_wrong();
+            // Emit done immediately — "wrong" is a meta-command, not a real command
+            emit(
+                &app,
+                &OrchestratorEvent::Done {
+                    request_id: "verbal_wrong".to_string(),
+                },
+            );
+            return Ok(ProcessResult {
+                request_id: "verbal_wrong".to_string(),
+                subsystem: Subsystem::None,
+                handled_locally: true,
+            });
+        }
+    }
+
+    // 2c. Record the last command (for verbal "wrong" feedback)
+    #[cfg(feature = "admin-brain")]
+    {
+        let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
+        crate::brain_monitor::record_last_command(transcript.clone(), intent_name);
+    }
 
     // 3. Install new request (cancels previous)
     let (request_id, cancel_flag) = install_new_request(subsystem.clone());
@@ -332,6 +512,14 @@ pub async fn process_transcript<R: Runtime>(
             // Local commands are instant — no ack, no loading indicator.
             // The frontend handles these directly (open app, media, etc).
             // We just emit done immediately.
+
+            // Report execution success to the brain monitor (admin-only)
+            #[cfg(feature = "admin-brain")]
+            {
+                let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
+                crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+            }
+
             emit(
                 &app,
                 &OrchestratorEvent::Done {
@@ -390,6 +578,12 @@ pub async fn process_transcript<R: Runtime>(
 
             match result {
                 Ok((text, analysis, dialog_state)) => {
+                    // Report execution success to the brain monitor (admin-only)
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
+                        crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+                    }
                     // Emit result
                     emit(
                         &app,
@@ -414,6 +608,17 @@ pub async fn process_transcript<R: Runtime>(
                 }
                 Err(e) => {
                     hide_loading(&app);
+                    // Report execution failure to the brain monitor
+                    // (admin-only, no-op if not admin)
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
+                        crate::brain_monitor::report_execution_failure(
+                            &transcript,
+                            &intent_name,
+                            &e,
+                        );
+                    }
                     emit(
                         &app,
                         &OrchestratorEvent::Error {
@@ -584,6 +789,13 @@ pub async fn process_transcript<R: Runtime>(
             // Emit the appropriate event based on the result type
             match &gh_result {
                 crate::github_cmd::GitHubResult::NeedsConfirmation { prompt, command } => {
+                    // Report successful detection (even though it needs confirmation,
+                    // the parsing was correct)
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
+                        crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+                    }
                     let cmd_json = serde_json::to_value(command).unwrap_or(serde_json::Value::Null);
                     emit(
                         &app,
@@ -613,6 +825,12 @@ pub async fn process_transcript<R: Runtime>(
                     );
                 }
                 crate::github_cmd::GitHubResult::Text { text } => {
+                    // Report GitHub command success to the brain monitor
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
+                        crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+                    }
                     emit(
                         &app,
                         &OrchestratorEvent::Result {
@@ -623,7 +841,78 @@ pub async fn process_transcript<R: Runtime>(
                         },
                     );
                 }
+                crate::github_cmd::GitHubResult::PrList { repo, state, prs } => {
+                    // Report GitHub command success to the brain monitor
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
+                        crate::brain_monitor::report_execution_success(&transcript, &intent_name);
+                    }
+                    // Emit a short TTS ack + the structured PR list for the sidebar.
+                    // The frontend will open the PR list sidebar panel.
+                    let count = prs.len();
+                    let ack_text = if repo == "all repositories" {
+                        format!(
+                            "Showing {} {} PR{} across all your repositories.",
+                            count,
+                            state,
+                            if count == 1 { "" } else { "s" },
+                        )
+                    } else {
+                        format!(
+                            "Showing {} {} PR{} in {}.",
+                            count,
+                            state,
+                            if count == 1 { "" } else { "s" },
+                            repo
+                        )
+                    };
+                    emit(
+                        &app,
+                        &OrchestratorEvent::Result {
+                            text: ack_text,
+                            request_id: request_id.clone(),
+                            analysis: None,
+                            dialog_state: None,
+                        },
+                    );
+
+                    // Store the PR list as pending data BEFORE creating the
+                    // sidebar window. The frontend fetches this on mount via
+                    // `get_pending_pr_list`, which is race-free regardless of
+                    // how long the WebView takes to load. This fixes the bug
+                    // where the `github_result` event was emitted before the
+                    // sidebar window existed, so the event was lost.
+                    let pr_list_json = serde_json::json!({
+                        "type": "pr_list",
+                        "repo": repo,
+                        "state": state,
+                        "prs": prs,
+                    });
+                    crate::commands::set_pending_pr_list(pr_list_json);
+
+                    // Create the sidebar window directly from Rust (don't
+                    // rely on the frontend to call `show_pr_list_sidebar`,
+                    // because the frontend listener that would call it
+                    // doesn't exist yet — the window hasn't been created).
+                    let app_clone = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = crate::commands::show_pr_list_sidebar(app_clone).await {
+                            tracing::error!("orchestrator: failed to show PR list sidebar: {}", e);
+                        }
+                    });
+                }
                 crate::github_cmd::GitHubResult::Error { message, .. } => {
+                    // Report GitHub command failure to the brain monitor
+                    #[cfg(feature = "admin-brain")]
+                    {
+                        let intent_name = crate::intent_parser::intent_to_label(&intent).to_string();
+                        crate::brain_monitor::report_execution_failure(
+                            &transcript,
+                            &intent_name,
+                            message,
+                        );
+                    }
                     emit(
                         &app,
                         &OrchestratorEvent::Error {
@@ -697,7 +986,7 @@ pub fn signal_done(request_id: &str) {
 /// routes the response through the orchestrator's event channel instead
 /// of the old "assistant:server" channel.
 async fn dispatch_to_worker<R: Runtime>(
-    app: AppHandle<R>,
+    _app: AppHandle<R>,
     transcript: String,
     dialog_context: Option<serde_json::Value>,
     request_id: String,
@@ -847,7 +1136,7 @@ pub async fn orchestrator_github_execute<R: Runtime>(
 
     let request_id = {
         let id = new_request_id();
-        let (rid, flag) = install_new_request(Subsystem::GitHub);
+        let (rid, _flag) = install_new_request(Subsystem::GitHub);
         let _ = id;
         rid
     };
@@ -909,6 +1198,25 @@ pub async fn orchestrator_github_execute<R: Runtime>(
                 &app,
                 &OrchestratorEvent::Result {
                     text: text.clone(),
+                    request_id: request_id.clone(),
+                    analysis: None,
+                    dialog_state: None,
+                },
+            );
+        }
+        crate::github_cmd::GitHubResult::PrList { repo, state, prs } => {
+            let count = prs.len();
+            let ack_text = format!(
+                "Showing {} {} PR{} in {}.",
+                count,
+                state,
+                if count == 1 { "" } else { "s" },
+                repo
+            );
+            emit(
+                &app,
+                &OrchestratorEvent::Result {
+                    text: ack_text,
                     request_id: request_id.clone(),
                     analysis: None,
                     dialog_state: None,
@@ -1081,7 +1389,7 @@ mod tests {
     #[test]
     fn test_install_and_cancel() {
         // Install two requests — the second should cancel the first
-        let (id1, cancel1) = install_new_request(Subsystem::WorkerBackend);
+        let (id1, _cancel1) = install_new_request(Subsystem::WorkerBackend);
         let (id2, cancel2) = install_new_request(Subsystem::WorkerBackend);
         assert_ne!(id1, id2, "IDs should be different");
         assert!(!is_cancelled(&cancel2), "second request should not be cancelled");
@@ -1240,7 +1548,7 @@ mod tests {
     fn test_barge_in_cancels_previous() {
         // Start request 1
         let (_id1, cancel1) = install_new_request(Subsystem::WorkerBackend);
-        let cancel1_was_cancelled = is_cancelled(&cancel1);
+        let _cancel1_was_cancelled = is_cancelled(&cancel1);
 
         // Start request 2 (barge-in) — this cancels request 1
         let (id2, cancel2) = install_new_request(Subsystem::WorkerBackend);

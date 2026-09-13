@@ -248,6 +248,7 @@ pub enum ArchitectProgress {
     GraphReady { node_count: usize, edge_count: usize },
     HotspotsReady { hotspots: Vec<HotspotItem> },
     CyclesReady { circular_deps: Vec<CircularDependency> },
+    #[allow(dead_code)]
     AiExplanation { summary: String },
     Complete { stage: String },
     Failed { stage: String, error: String },

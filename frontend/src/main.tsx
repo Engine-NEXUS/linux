@@ -17,8 +17,8 @@ import "./styles.css";
 // audio is only captured when recording is active. VAD runs only during
 // listening state. No audio leaves the device.
 
-import { preloadSileroVad, preloadMicVad, startVad, stopVad, setSpeechStartCallback } from "./audio/vad";
-import { captureUntilSilence, abortCapture } from "./audio/recorder";
+import { preloadSileroVad, preloadMicVad, stopVad } from "./audio/vad";
+import { abortCapture, processTranscript } from "./audio/recorder";
 import { stopTts } from "./audio/ttsPlayer";
 import { useAssistant } from "./store/assistant";
 import { setBargedIn, clearBargedIn, clearDialogContext } from "./net/wsBridge";
@@ -41,34 +41,10 @@ export function triggerFollowupListen(): void {
 let micStream: MediaStream | null = null;
 
 // ─── No-speech watchdog ───────────────────────────────────────────────────
-// If the user wakes NEXUS but never says anything, the orb would stay in
-// "listening" state forever (Silero VAD has no built-in timeout for "no
-// speech detected"). This watchdog cancels listening after 8 seconds of
-// silence so the orb hides cleanly instead of spinning indefinitely.
-const NO_SPEECH_TIMEOUT_MS = 8000;
-let noSpeechTimer: ReturnType<typeof setTimeout> | null = null;
-
-function clearNoSpeechTimer(): void {
-  if (noSpeechTimer !== null) {
-    clearTimeout(noSpeechTimer);
-    noSpeechTimer = null;
-  }
-}
-
-function startNoSpeechWatchdog(): void {
-  clearNoSpeechTimer();
-  noSpeechTimer = setTimeout(() => {
-    console.log("[NEXUS] no-speech timeout — cancelling listening");
-    noSpeechTimer = null;
-    stopVad();
-    void abortCapture().catch(() => {});
-    setSpeechStartCallback(null);
-    // Clear any pending dialog context — the follow-up is abandoned
-    clearDialogContext();
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
-  }, NO_SPEECH_TIMEOUT_MS);
-}
+// NOTE: The no-speech watchdog is now handled on the Rust side.
+// The Rust STT capture has a built-in timeout (STT_NO_SPEECH_CHUNK_LIMIT = 100
+// chunks = ~8s). If no speech is detected, it stops capturing and emits an
+// empty transcript, which triggers the "didn't catch that" retry logic.
 
 /**
  * Acquire the mic stream at startup and keep it warm.
@@ -193,65 +169,21 @@ async function startListening() {
   // Clear barge-in flag now that we're starting a fresh listening session
   clearBargedIn();
 
-  // ─── Approach A: Hot Mic ───────────────────────────────────────────
-  // If the mic stream is already warm (acquired at startup), reuse it.
-  // Only call getUserMedia() if the stream was lost or never acquired.
-  if (!micStream || !micStream.active) {
-    // THE BATON PASS: Tell Rust to pause the wake-word cpal stream so the
-    // OS mic lock is released. Without this, Windows Intel SST drivers
-    // deadlock when WebView2 tries to capture the mic simultaneously.
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("pause_wakeword").catch((e: unknown) => console.warn("pause_wakeword failed:", e));
-      console.log("[NEXUS] baton pass: Rust wakeword paused");
-    } catch (err) {
-      console.warn("[NEXUS] pause_wakeword invocation failed:", err);
-    }
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      });
-      console.log("[NEXUS] hot mic: stream re-acquired (was cold)");
-    } catch (err) {
-      console.error("[NEXUS] mic permission denied or unavailable:", err);
-      useAssistant.getState().reset();
-      useAssistant.getState().setVisible(false);
-      return;
-    }
-  } else {
-    // Re-enable tracks in case they were disabled by VAD's pauseStream
-    micStream.getTracks().forEach((t) => (t.enabled = true));
-  }
-
-  // ─── Approach C: Parallel recording + VAD start ────────────────────
-  // Start recording and VAD simultaneously instead of sequentially.
-  // This overlaps the two init operations, saving ~60-250ms.
-  // Also start the no-speech watchdog — if the user doesn't say anything
-  // within 8 seconds, cancel listening and hide the orb.
-  setSpeechStartCallback(() => {
-    console.log("[NEXUS] speech detected — cancelling no-speech watchdog");
-    clearNoSpeechTimer();
-  });
-  startNoSpeechWatchdog();
-
-  try {
-    await Promise.all([
-      captureUntilSilence(micStream),
-      startVad(micStream),
-    ]);
-  } catch (err) {
-    console.error("[NEXUS] recording/VAD failed:", err);
-    clearNoSpeechTimer();
-    setSpeechStartCallback(null);
-    stopVad();
-    await abortCapture().catch(() => {});
-    useAssistant.getState().reset();
-    useAssistant.getState().setVisible(false);
-  }
+  // ─── Rust-side STT capture ────────────────────────────────────────
+  // The Rust cpal stream (which detected the wake word) captures audio
+  // directly — no getUserMedia, no baton pass, no frontend audio processing.
+  // This fixes the Intel SST driver issue where getUserMedia returns silence
+  // but the cpal stream is still working.
+  //
+  // The Rust side:
+  //   1. Buffers 16kHz audio from the cpal callback
+  //   2. RMS-based VAD detects speech + silence
+  //   3. On silence, transcribes (Groq or local faster-whisper)
+  //   4. Emits "stt:transcript" event with the transcript text
+  //
+  // The frontend just shows the orb and waits for the event.
+  // No getUserMedia, no VAD, no ScriptProcessorNode, no baton pass.
+  console.log("[NEXUS] Rust-side STT capture active — waiting for stt:transcript event");
 }
 
 /** Called from Rust on wake (hotkey, spoken "NEXUS", or tray click). */
@@ -437,6 +369,28 @@ async function setupCommandDetectionListener() {
 
 // Register the listener at startup (non-blocking, non-fatal)
 void setupCommandDetectionListener();
+
+// ─── Rust-side STT transcript listener ─────────────────────────────────
+// The Rust cpal stream captures audio and transcribes it (Groq or local
+// faster-whisper). When the transcript is ready, Rust emits "stt:transcript".
+// The frontend processes it using the same logic as the old finishCapture().
+async function setupSttTranscriptListener() {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen<string>("stt:transcript", async (event) => {
+      const transcript = event.payload;
+      console.log(`[NEXUS] stt:transcript event received: "${transcript}"`);
+      // Process the transcript using the same logic as finishCapture()
+      await processTranscript(transcript);
+    });
+    console.log("[NEXUS] stt:transcript listener registered");
+  } catch (err) {
+    console.warn("[NEXUS] Failed to register stt:transcript listener:", err);
+  }
+}
+
+// Register at startup
+void setupSttTranscriptListener();
 
 /** Called from Rust to cancel the current session. */
 (window as any).__NEXUS_CANCEL__ = async () => {

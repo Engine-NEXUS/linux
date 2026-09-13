@@ -20,7 +20,7 @@
     },
     "security": {
       "csp": "default-src 'self'; connect-src 'self' wss: https: ipc: http://ipc.localhost; media-src 'self' blob: data: https: http:; img-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:",
-      "capabilities": ["main-cap", "sidebar-cap", "architect-cap", "loading-cap"],
+      "capabilities": ["main-cap", "sidebar-cap", "architect-cap", "loading-cap", "pr-list-cap"],
       "assetProtocol": { "enable": false }
     },
     "macOSPrivateApi": true
@@ -30,13 +30,13 @@
     "targets": "all",
     "resources": [
       "resources/oww/**/*",
-      "resources/sherpa/speaker_model.onnx",
       "resources/espeak-ng-data/**/*",
       "resources/server/stt_server.py",
       "resources/server/nlu_server.py",
       "resources/server/nlu/requirements.txt",
       "resources/server/nlu/model/nexus_nlu.onnx",
       "resources/server/nlu/model/nexus_nlu.onnx.data",
+      "resources/server/nlu/model/labels.json",
       "resources/server/nlu/model/tokenizer/*",
       "resources/piper/en_US-amy-medium.onnx",
       "resources/piper/en_US-amy-medium.onnx.json"

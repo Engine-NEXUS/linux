@@ -210,10 +210,10 @@ pub async fn speak_text(
     .await
     .map_err(|e| format!("TTS task panicked: {}", e))??;
 
-    // Check if stop was requested DURING synthesis ΓÇö if so, skip playback
+    // Check if stop was requested DURING synthesis — if so, skip playback
     if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
         tracing::info!("tts: stop requested during synthesis, skipping playback");
-        meeting.set_tts_playing(false);
+        // Do NOT set tts_playing=false — a newer generation is active.
         return Ok(());
     }
 
@@ -346,7 +346,7 @@ pub async fn speak_cached(
     // Check if stop was requested during synthesis
     if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
         tracing::info!("tts: stop requested before cached playback, skipping");
-        meeting.set_tts_playing(false);
+        // Do NOT set tts_playing=false — a newer generation is active.
         return Ok(());
     }
 

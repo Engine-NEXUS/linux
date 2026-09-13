@@ -24,6 +24,13 @@ mod app_registry;
 pub mod intent_parser;
 mod nlu_client;
 mod lazy_nlu;
+mod admin_config;
+#[cfg(feature = "admin-brain")]
+mod brain_client;
+#[cfg(feature = "admin-brain")]
+mod brain_monitor;
+#[cfg(feature = "admin-brain")]
+mod lazy_brain;
 mod lazy_stt;
 mod stt;
 pub mod stt_groq;
@@ -31,6 +38,10 @@ mod stt_learning;
 mod tts;
 pub mod tts_edge;
 pub mod tts_piper;
+mod tts_network;
+#[cfg(test)]
+mod tts_bench;
+mod pipeline_bench;
 mod volume;
 // Verification is not yet wired into wakeword_oww (see AGENTS.md known limitations).
 mod meeting_detect;
@@ -43,6 +54,7 @@ mod dyn_windows;
 mod diagnostics;
 pub mod orchestrator;
 pub mod github_cmd;
+pub mod live;
 #[cfg(target_os = "windows")]
 mod dwm_corners;
 #[cfg(target_os = "windows")]
@@ -275,6 +287,14 @@ pub fn run() {
             // Handle deep-link redirects on Windows/Linux (passed as CLI arg)
             if let Some(url) = args.iter().find(|a| a.starts_with("nexus://")) {
                 tracing::info!("single-instance: deep-link callback: {}", url);
+                if url == "nexus://settings" {
+                    // Open settings sidebar via deep link
+                    let app_clone = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::commands::show_settings_sidebar(app_clone).await;
+                    });
+                    return;
+                }
                 let _ = app.emit("deep-link://oauth-callback", url.clone());
                 // OAuth callback — just emit the event and return.
                 // Do NOT try to show/wake the main window here; the WebView2
@@ -302,10 +322,11 @@ pub fn run() {
                     let _ = win.set_focus();
                 }
             } else if is_settings {
-                if let Ok(win) = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::settings()) {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // Open the settings sidebar (liquid-glass, 720x1000)
+                let app_clone = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = crate::commands::show_settings_sidebar(app_clone).await;
+                });
             } else {
                 // Only wake the main window if we are NOT in the middle of setup
                 let setup_active = app.get_webview_window("setup").is_some();
@@ -333,7 +354,7 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
     }
 
-    let builder = builder.setup(|app| {
+    builder.setup(|app| {
         // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
             // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
             #[cfg(target_os = "macos")]
@@ -606,6 +627,10 @@ pub fn run() {
                 tracing::info!("tts: startup cache pre-generation complete — ack phrases ready");
             });
 
+            // Start TTS network monitor — checks Edge TTS availability every 60s
+            // and unloads Piper after 10 minutes of stable network.
+            tts_network::start_network_monitor();
+
             // STT pre-warm removed in Phase 2.
             // Primary STT is now Groq cloud (0 MB RAM, ~247ms latency).
             // Local faster-whisper starts lazily only as a fallback when
@@ -663,6 +688,12 @@ pub fn run() {
                     let url_str = url.as_str();
                     if url_str.starts_with("nexus://oauth/") {
                         let _ = handle.emit("deep-link://oauth-callback", url_str);
+                    } else if url_str == "nexus://settings" {
+                        // Deep link to open settings sidebar
+                        let app_clone = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = crate::commands::show_settings_sidebar(app_clone).await;
+                        });
                     }
                 }
             });
@@ -784,6 +815,7 @@ pub fn run() {
             window_manager::set_click_through,
             window_manager::show_overlay,
             window_manager::hide_overlay,
+            window_manager::set_orb_position,
             network::open_session,
             network::send_transcript,
             network::cancel_session,
@@ -808,6 +840,8 @@ pub fn run() {
             commands::close_settings_window,
             commands::get_settings,
             commands::save_settings,
+            commands::list_tts_voices,
+            commands::get_pending_settings_backdrop,
             commands::set_autostart,
             commands::is_autostart_enabled,
             commands::check_mic_permission,
@@ -821,13 +855,20 @@ pub fn run() {
             commands::get_pending_sidebar_content,
             commands::show_loading_indicator,
             commands::hide_loading_indicator,
+            commands::show_pr_list_sidebar,
+            commands::hide_pr_list_sidebar,
+            commands::get_pending_pr_list,
+            commands::show_settings_sidebar,
+            commands::hide_settings_sidebar,
             commands::pause_wakeword,
             commands::resume_wakeword,
+            commands::start_stt_capture,
             stt::transcribe_audio,
             stt::stt_status,
             tts::speak_text,
             tts::speak_cached,
             tts::stop_tts,
+            tts::preview_voice,
             stt_learning::log_failed_transcript,
             stt_learning::log_successful_transcript,
             stt_learning::get_learned_corrections,
@@ -844,6 +885,21 @@ pub fn run() {
             architect::query_impact,
             architect::enrich_phase1,
             architect::analyze_repo_fast,
+            // Live mode commands
+            live::live_type_text,
+            live::live_press_key,
+            live::live_press_hotkey,
+            live::live_whatsapp_open,
+            live::live_whatsapp_search,
+            live::live_whatsapp_send,
+            live::live_whatsapp_type_message,
+            live::live_browser_new_tab,
+            live::live_browser_navigate,
+            live::live_browser_search,
+            live::live_open_site,
+            live::live_focus_app,
+            live::live_cancel,
+            live::live_get_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NEXUS application");

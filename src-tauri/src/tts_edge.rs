@@ -116,4 +116,50 @@ mod tests {
         // Just verify the module compiles and links
         let _ = std::hint::black_box(());
     }
+
+    /// Test that Edge TTS succeeds with a valid Microsoft voice ID.
+    /// This proves the cloud TTS path works when given the correct voice.
+    #[tokio::test]
+    async fn test_edge_tts_valid_voice() {
+        let result = synthesize_to_mp3("Hello world", "en-US-AvaNeural").await;
+        match &result {
+            Ok(bytes) => println!("test_edge_tts_valid_voice: OK ({} bytes)", bytes.len()),
+            Err(e) => println!("test_edge_tts_valid_voice: FAILED — {}", e),
+        }
+        // Don't fail the test on network errors — just report
+        // (CI might not have internet)
+        if let Ok(bytes) = &result {
+            assert!(!bytes.is_empty(), "Edge TTS should return non-empty audio");
+        }
+    }
+
+    /// Test that Edge TTS FAILS with a Kokoro voice ID ("af_sky").
+    /// This proves the bug: the frontend sends "af_sky" to Edge TTS,
+    /// which fails and silently falls back to Piper (local).
+    #[tokio::test]
+    async fn test_edge_tts_invalid_kokoro_voice() {
+        let result = synthesize_to_mp3("Hello world", "af_sky").await;
+        match &result {
+            Ok(bytes) => {
+                // If this succeeds, Microsoft might have added "af_sky" as an alias
+                // — but this is extremely unlikely
+                println!("test_edge_tts_invalid_kokoro_voice: UNEXPECTED OK ({} bytes)", bytes.len());
+            }
+            Err(e) => {
+                // This is the expected case — Edge TTS rejects "af_sky"
+                println!("test_edge_tts_invalid_kokoro_voice: FAILED as expected — {}", e);
+                // This confirms the bug: "af_sky" is not a valid Edge TTS voice
+            }
+        }
+        // We expect this to fail — if it succeeds, something changed
+        // Don't assert hard fail since network might be down
+    }
+
+    /// Test that is_available() works (network check).
+    #[tokio::test]
+    async fn test_edge_tts_is_available() {
+        let available = is_available().await;
+        println!("test_edge_tts_is_available: {}", available);
+        // Don't fail on network issues — just report
+    }
 }

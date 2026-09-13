@@ -35,28 +35,18 @@ impl WindowConfig {
     pub fn main() -> Self {
         Self {
             label: "main", title: "NEXUS", url: "index.html",
-            width: 200., height: 200., min_width: Some(200.), min_height: Some(200.),
-            resizable: false, decorations: false, transparent: true,
+            width: 200., height: 200., min_width: Some(100.), min_height: Some(100.),
+            resizable: true, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: false,
             focus: false, center: true, hidden_title: true,
         }
     }
 
-    /// Loading indicator window — small 80x80 transparent window at the
+    /// Loading indicator — small 80x80 transparent window at the
     /// top-right corner of the screen, below where a close button would be.
     /// Shows a Lottie loading animation while a long-running command is
     /// being processed by the Worker. Created on-demand and destroyed when
     /// the result arrives.
-    pub fn loading() -> Self {
-        Self {
-            label: "loading", title: "NEXUS Loading", url: "loading.html",
-            width: 80., height: 80., min_width: None, min_height: None,
-            resizable: false, decorations: false, transparent: true,
-            always_on_top: true, skip_taskbar: true, shadow: false,
-            focus: false, center: false, hidden_title: true,
-        }
-    }
-    /// Loading indicator — same as loading() but with the stashed label.
     pub fn loading_indicator() -> Self {
         Self {
             label: "loading-indicator", title: "NEXUS Loading", url: "loading.html",
@@ -88,19 +78,10 @@ impl WindowConfig {
     pub fn sidebar() -> Self {
         Self {
             label: "sidebar", title: "NEXUS Response", url: "sidebar.html",
-            width: 600., height: 1000., min_width: Some(600.), min_height: Some(1000.),
+            width: 400., height: 1000., min_width: Some(400.), min_height: Some(1000.),
             resizable: false, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: false,
             focus: false, center: false, hidden_title: true,
-        }
-    }
-    pub fn architect() -> Self {
-        Self {
-            label: "architect", title: "NEXUS Architecture Mapper", url: "architect.html",
-            width: 1400., height: 900., min_width: Some(900.), min_height: Some(600.),
-            resizable: true, decorations: true, transparent: false,
-            always_on_top: false, skip_taskbar: false, shadow: true,
-            focus: true, center: true, hidden_title: false,
         }
     }
     /// Architect sidebar — 900px wide, transparent, undecorated, always-on-top.
@@ -111,6 +92,34 @@ impl WindowConfig {
         Self {
             label: "architect-sidebar", title: "NEXUS Architecture Mapper", url: "architect.html",
             width: 900., height: 1000., min_width: Some(900.), min_height: Some(1000.),
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+    /// PR List sidebar — 500px wide, transparent, undecorated, always-on-top.
+    /// Shows a vertical list of PRs with Merge and Analyse buttons.
+    /// Narrower than the response sidebar (600px) because PR cards are compact.
+    /// Same height (1000px) as the other sidebars for visual consistency.
+    /// Carbon copy of the response/architect sidebar: transparent, blurred
+    /// backdrop, DWM rounded corners, capture exclusion, non-resizable.
+    pub fn pr_list_sidebar() -> Self {
+        Self {
+            label: "pr-list-sidebar", title: "NEXUS PR List", url: "pr-list.html",
+            width: 500., height: 1000., min_width: Some(500.), min_height: Some(1000.),
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+    /// Settings sidebar — 520px wide, transparent, undecorated, always-on-top.
+    /// Same height (1000px) as all other sidebars.
+    /// Liquid-glass styling: transparent window, screenshot-blur backdrop,
+    /// DWM rounded corners, capture exclusion, non-activating.
+    pub fn settings_sidebar() -> Self {
+        Self {
+            label: "settings-sidebar", title: "NEXUS Settings", url: "settings-sidebar.html",
+            width: 520., height: 1000., min_width: Some(520.), min_height: Some(1000.),
             resizable: false, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: false,
             focus: false, center: false, hidden_title: true,
@@ -164,7 +173,7 @@ pub fn get_or_create_window<R: Runtime>(
     // Apply platform-specific effects
     #[cfg(target_os = "windows")]
     {
-        if config.label == "sidebar" || config.label == "architect-sidebar" {
+        if config.label == "sidebar" || config.label == "architect-sidebar" || config.label == "pr-list-sidebar" || config.label == "settings-sidebar" {
             crate::dwm_corners::round_corners(&win);
 
             if let Ok(hwnd) = win.hwnd() {
@@ -180,7 +189,7 @@ pub fn get_or_create_window<R: Runtime>(
 
     #[cfg(target_os = "macos")]
     {
-        if config.label == "sidebar" || config.label == "architect-sidebar" {
+        if config.label == "sidebar" || config.label == "architect-sidebar" || config.label == "pr-list-sidebar" || config.label == "settings-sidebar" {
             // NOTE: loading-indicator deliberately does NOT get vibrancy —
             // it must be fully transparent with no blur (per user spec).
             use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};

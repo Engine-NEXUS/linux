@@ -37,6 +37,7 @@ use tokio::sync::RwLock;
 static GITHUB_TOKEN: once_cell::sync::Lazy<Arc<RwLock<Option<CachedToken>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(None)));
 
+#[allow(dead_code)]
 struct CachedToken {
     token: String,
     /// When the token expires (unix timestamp). 0 = no expiry (classic OAuth).
@@ -413,6 +414,13 @@ pub enum GitHubResult {
     Text {
         text: String,
     },
+    /// Structured PR list — rendered in the sidebar as cards with
+    /// Merge and Analyse buttons. Not spoken via TTS (visual-only).
+    PrList {
+        repo: String,
+        state: String,
+        prs: Vec<PrSummary>,
+    },
     /// Destructive operation needs confirmation.
     /// The orchestrator should ask the user to confirm, then re-execute
     /// with `confirmed: true`.
@@ -436,6 +444,21 @@ pub enum GitHubResult {
         /// Whether this is a token/permission error (user should reconnect)
         is_auth_error: bool,
     },
+}
+
+/// A summary of a single PR for list display in the sidebar.
+#[derive(Debug, Clone, Serialize)]
+pub struct PrSummary {
+    pub number: u64,
+    pub title: String,
+    pub author: String,
+    pub repo: String,
+    pub state: String,
+    /// ISO 8601 timestamp of PR creation
+    pub created_at: String,
+    /// Whether the PR is mergeable (null = unknown, true/false = GitHub's answer)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mergeable: Option<bool>,
 }
 
 /// A file with merge conflicts.
@@ -953,11 +976,186 @@ async fn execute_close_pr(
 
 // ─── List PRs ──────────────────────────────────────────────────────────
 
+/// Fetch ALL PRs across every repository the authenticated user has access to.
+///
+/// This covers repos where the user is:
+///   - Owner (their own repos)
+///   - Collaborator (invited to someone else's repo)
+///   - Organization member (repos owned by orgs the user belongs to)
+///
+/// Uses a two-step approach:
+///   1. List all repos via `GET /user/repos?affiliation=owner,collaborator,organization_member`
+///   2. Fetch PRs from each repo in parallel via `GET /repos/{owner}/{repo}/pulls`
+///   3. Aggregate, sort by created_at desc, cap at 100
+///
+/// This replaces the old `author:{username}` search which only found PRs the
+/// user *created*. The new approach finds ALL PRs in ALL repos the user has
+/// access to — including PRs opened by teammates, contributors, etc.
+async fn execute_list_prs_account_wide(
+    client: &octocrab::Octocrab,
+    state: &str,
+) -> GitHubResult {
+    // 1. Get the authenticated user's login (for logging)
+    let current_user = match client.current().user().await {
+        Ok(u) => u,
+        Err(e) => return map_octocrab_error(e, "fetch current user for account-wide PR list"),
+    };
+    let username = &current_user.login;
+    tracing::info!("[github_cmd] account-wide PR list for user '{}', state='{}'", username, state);
+
+    // 2. List ALL repos the user has access to (owner + collaborator + org member)
+    let repo_page = match client
+        .current()
+        .list_repos_for_authenticated_user()
+        .affiliation("owner,collaborator,organization_member")
+        .per_page(100)
+        .send()
+        .await
+    {
+        Ok(page) => page,
+        Err(e) => return map_octocrab_error(e, "list repos for account-wide PR list"),
+    };
+
+    // Collect (owner, repo_name) pairs from the first page.
+    // We cap at 100 repos to avoid excessive API calls.
+    let repo_list: Vec<(String, String)> = repo_page
+        .items
+        .iter()
+        .filter_map(|repo| {
+            let owner = repo.owner.as_ref()?.login.clone();
+            let name = repo.name.clone();
+            Some((owner, name))
+        })
+        .collect();
+
+    let repo_count = repo_list.len();
+    tracing::info!("[github_cmd] account-wide PR list: fetching from {} repos", repo_count);
+
+    if repo_list.is_empty() {
+        return GitHubResult::Text {
+            text: "You don't have any accessible repositories, sir.".to_string(),
+        };
+    }
+
+    // 3. Fetch PRs from each repo in parallel (capped concurrency to avoid
+    //    hitting GitHub's rate limit). We use tokio JoinSet with chunks of 10.
+    let mut all_prs: Vec<PrSummary> = Vec::new();
+    const CONCURRENCY: usize = 10;
+
+    for chunk in repo_list.chunks(CONCURRENCY) {
+        let mut set = tokio::task::JoinSet::new();
+        for (owner, name) in chunk {
+            let client = client.clone();
+            let owner = owner.clone();
+            let name = name.clone();
+            let state_str = state.to_string();
+            set.spawn(async move {
+                match client
+                    .pulls(&owner, &name)
+                    .list()
+                    .state(match state_str.to_lowercase().as_str() {
+                        "closed" => octocrab::params::State::Closed,
+                        "all" => octocrab::params::State::All,
+                        _ => octocrab::params::State::Open,
+                    })
+                    .per_page(20)
+                    .send()
+                    .await
+                {
+                    Ok(page) => {
+                        let repo_full = format!("{}/{}", owner, name);
+                        let prs: Vec<PrSummary> = page
+                            .items
+                            .iter()
+                            .map(|pr| PrSummary {
+                                number: pr.number,
+                                title: pr.title.clone().unwrap_or_default(),
+                                author: pr.user.as_ref().map(|u| u.login.clone()).unwrap_or_default(),
+                                repo: repo_full.clone(),
+                                state: match &pr.state {
+                                    Some(octocrab::models::IssueState::Open) => "open".to_string(),
+                                    Some(octocrab::models::IssueState::Closed) => "closed".to_string(),
+                                    _ => state_str.clone(),
+                                },
+                                created_at: pr.created_at.unwrap_or_default().to_rfc3339(),
+                                mergeable: None,
+                            })
+                            .collect();
+                        prs
+                    }
+                    Err(e) => {
+                        tracing::warn!("[github_cmd] failed to fetch PRs from {}/{}: {}", owner, name, e);
+                        Vec::new()
+                    }
+                }
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok(prs) = res {
+                all_prs.extend(prs);
+            }
+        }
+    }
+
+    if all_prs.is_empty() {
+        return GitHubResult::Text {
+            text: format!("You have no {} pull requests across your {} repositories.", state, repo_count),
+        };
+    }
+
+    // 5. Sort by created_at descending (latest first)
+    all_prs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    // 6. Cap at 100 PRs to keep the sidebar manageable
+    if all_prs.len() > 100 {
+        all_prs.truncate(100);
+    }
+
+    let count = all_prs.len();
+    tracing::info!("[github_cmd] account-wide PR list: {} PRs from {} repos for user '{}'", count, repo_count, username);
+
+    GitHubResult::PrList {
+        repo: "all repositories".to_string(),
+        state: state.to_string(),
+        prs: all_prs,
+    }
+}
+
+/// Extract "owner/repo" from a GitHub API repository_url.
+/// Input: "https://api.github.com/repos/owner/repo"
+/// Output: "owner/repo"
+#[allow(dead_code)]
+fn extract_repo_from_url(url: &str) -> String {
+    // Parse the URL string to extract the path after /repos/
+    // URL format: https://api.github.com/repos/{owner}/{repo}
+    if let Some(pos) = url.find("/repos/") {
+        let after_repos = &url[pos + 7..]; // skip "/repos/"
+        // after_repos = "owner/repo" (possibly with trailing slash or query)
+        // Take everything up to the first '?' or end
+        let repo_part = after_repos.split('?').next().unwrap_or(after_repos);
+        // Remove trailing slash
+        let repo_part = repo_part.trim_end_matches('/');
+        // Now we have "owner/repo" — take the first two path segments
+        let parts: Vec<&str> = repo_part.splitn(3, '/').collect();
+        if parts.len() >= 2 {
+            return format!("{}/{}", parts[0], parts[1]);
+        }
+    }
+    // Fallback: use the full URL as the repo identifier
+    url.to_string()
+}
+
 async fn execute_list_prs(
     client: &octocrab::Octocrab,
     repo: &str,
     state: &str,
 ) -> GitHubResult {
+    // If no repo is specified, fetch ALL PRs across the user's entire account
+    // using the GitHub Search API. This handles "Open PR list" without a repo.
+    if repo.is_empty() {
+        return execute_list_prs_account_wide(client, state).await;
+    }
+
     let (owner, repo_name) = split_repo(repo);
 
     let state_enum = match state.to_lowercase().as_str() {
@@ -970,7 +1168,7 @@ async fn execute_list_prs(
         .pulls(owner, repo_name)
         .list()
         .state(state_enum)
-        .per_page(10)
+        .per_page(20)
         .send()
         .await
     {
@@ -984,28 +1182,29 @@ async fn execute_list_prs(
         };
     }
 
-    let pr_list: Vec<String> = prs
+    // Build structured PR summaries for the sidebar.
+    // Sort by created_at descending (latest first).
+    let mut pr_summaries: Vec<PrSummary> = prs
         .items
         .iter()
-        .enumerate()
-        .map(|(i, pr)| {
-            format!(
-                "{}. PR #{}: {} (by {})",
-                i + 1,
-                pr.number,
-                pr.title.as_deref().unwrap_or("(no title)"),
-                pr.user.as_ref().map(|u| u.login.as_str()).unwrap_or("unknown")
-            )
+        .map(|pr| PrSummary {
+            number: pr.number,
+            title: pr.title.clone().unwrap_or_else(|| "(no title)".to_string()),
+            author: pr.user.as_ref().map(|u| u.login.clone()).unwrap_or_else(|| "unknown".to_string()),
+            repo: repo.to_string(),
+            state: state.to_string(),
+            created_at: pr.created_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
+            mergeable: None, // not available in list view; fetched on demand
         })
         .collect();
 
-    GitHubResult::Text {
-        text: format!(
-            "Here are the {} pull requests in {}:\n{}",
-            state,
-            repo,
-            pr_list.join("\n")
-        ),
+    // Sort by created_at descending (latest first)
+    pr_summaries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    GitHubResult::PrList {
+        repo: repo.to_string(),
+        state: state.to_string(),
+        prs: pr_summaries,
     }
 }
 

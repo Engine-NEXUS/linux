@@ -1,13 +1,14 @@
-//! STT proxy — routes to Groq cloud STT (primary) or local faster-whisper (fallback).
+//! STT proxy — routes to Groq cloud STT (primary) or local Moonshine (fallback).
 //!
 //! Primary: Groq Whisper Large v3 Turbo (cloud, ~247ms, $0 free tier)
-//! Fallback: faster-whisper tiny.en (local Python sidecar, ~500ms warm / ~8s cold)
+//! Fallback: Moonshine Small Streaming (local Python sidecar, ~165ms, 7.84% WER)
 //!
 //! The fallback is used when:
 //! - No Groq API key is set in settings
 //! - Groq API is unreachable (network error)
 //! - Groq rate limit is hit (429)
 //! - Groq returns an error
+//! - localSttOnly is true (privacy mode — audio never leaves the device)
 
 use std::sync::Arc;
 use tauri::State;
@@ -74,8 +75,54 @@ pub async fn transcribe_audio(
     transcribe_local(&samples, &state.client).await
 }
 
+/// Transcribe audio samples using the full STT pipeline (Groq → local fallback).
+/// This is the same logic as `transcribe_audio` but can be called from
+/// the Rust-side STT capture thread (no Tauri command context needed).
+///
+/// # Arguments
+/// * `samples` - Raw i16 PCM samples at 16kHz mono
+/// * `client` - Reused reqwest client
+/// * `app` - Optional AppHandle for reading Groq API key and local_stt_only setting
+pub async fn transcribe_samples<R: tauri::Runtime>(
+    samples: &[i16],
+    client: &reqwest::Client,
+    app: Option<&tauri::AppHandle<R>>,
+) -> Result<String, String> {
+    tracing::info!("stt: transcribing {} samples (Rust-side capture)", samples.len());
+
+    // Read Groq API key from settings (if app handle is available)
+    if let Some(app) = app {
+        let groq_key = crate::commands::read_groq_api_key(app);
+        let local_only = crate::commands::read_local_stt_only(app);
+
+        if local_only {
+            tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
+        } else if !groq_key.is_empty() {
+            match crate::stt_groq::transcribe_with_groq(samples, &groq_key, client).await {
+                Ok(text) => {
+                    let filtered = apply_hallucination_filter(&text);
+                    if filtered != text {
+                        tracing::info!("stt: filtered hallucination '{}' -> '{}'", text, filtered);
+                    } else {
+                        tracing::info!("stt: groq transcript: '{}'", filtered);
+                    }
+                    return Ok(filtered);
+                }
+                Err(e) => {
+                    tracing::warn!("stt: groq failed ({}), falling back to local whisper", e);
+                }
+            }
+        } else {
+            tracing::info!("stt: no groq key, using local whisper directly");
+        }
+    }
+
+    // Fallback: local faster-whisper Python sidecar
+    transcribe_local(samples, client).await
+}
+
 /// Transcribe using the local faster-whisper Python sidecar (port 39217).
-async fn transcribe_local(samples: &[i16], client: &reqwest::Client) -> Result<String, String> {
+pub async fn transcribe_local(samples: &[i16], client: &reqwest::Client) -> Result<String, String> {
     // Ensure the STT server is running (lazy start)
     crate::lazy_stt::ensure_stt_running();
     crate::lazy_stt::mark_stt_request();

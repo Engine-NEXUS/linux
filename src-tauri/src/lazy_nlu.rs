@@ -18,9 +18,18 @@ use std::time::{Duration, Instant};
 static NLU_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 static NLU_RUNNING: AtomicBool = AtomicBool::new(false);
 static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
+/// Cooldown after a failed NLU startup — don't retry for 60s to avoid
+/// blocking every command that misses the deterministic parser.
+static NLU_LAST_FAILURE: Mutex<Option<Instant>> = Mutex::new(None);
 
 const NLU_IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes (was 60s)
 const NLU_PORT: u16 = 39218;
+/// How long to wait for the NLU server to become responsive (was 30s —
+/// too long, caused "loading non stop" when the ONNX model was missing).
+/// The BERT-Mini ONNX model loads in ~8-12s; 15s is enough.
+const NLU_STARTUP_TIMEOUT_SECS: u64 = 15;
+/// Cooldown after a failed startup attempt (60s).
+const NLU_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// Get the NLU server script path.
 fn nlu_script_path() -> Option<std::path::PathBuf> {
@@ -144,6 +153,22 @@ pub fn ensure_nlu_running() {
         return;
     }
 
+    // Cooldown: if the last startup attempt failed recently, don't retry.
+    // This prevents blocking every command for 15s when the NLU server
+    // can't start (e.g. missing ONNX model, missing Python deps).
+    {
+        let last_fail = NLU_LAST_FAILURE.lock().unwrap();
+        if let Some(t) = *last_fail {
+            if t.elapsed() < NLU_FAILURE_COOLDOWN {
+                tracing::debug!(
+                    "[lazy_nlu] skipping startup — in cooldown ({:.0}s remaining)",
+                    (NLU_FAILURE_COOLDOWN - t.elapsed()).as_secs_f64()
+                );
+                return;
+            }
+        }
+    }
+
     // Check if an external NLU server is already running on the port
     if is_nlu_responsive() {
         NLU_RUNNING.store(true, Ordering::Relaxed);
@@ -184,23 +209,36 @@ pub fn ensure_nlu_running() {
             *NLU_CHILD.lock().unwrap() = Some(c);
             NLU_RUNNING.store(true, Ordering::Relaxed);
             tracing::info!("[lazy_nlu] NLU server spawned, waiting for it to be ready...");
-            // Wait for the server to be responsive (up to 30 seconds).
-            // The BERT-Mini ONNX model + transformers tokenizer can take ~18s
-            // to load on first spawn, so we wait 30s to be safe.
-            for _ in 0..60 {
-                std::thread::sleep(Duration::from_millis(500));
+            // Wait for the server to be responsive (up to 15 seconds — was 30s).
+            // The BERT-Mini ONNX model + transformers tokenizer takes ~8-12s
+            // to load on first spawn. 15s gives a small margin.
+            let poll_interval = Duration::from_millis(500);
+            let max_polls = (NLU_STARTUP_TIMEOUT_SECS * 1000) / poll_interval.as_millis() as u64;
+            for _ in 0..max_polls {
+                std::thread::sleep(poll_interval);
                 if is_nlu_responsive() {
                     tracing::info!("[lazy_nlu] NLU server is ready");
+                    // Clear any previous failure time
+                    *NLU_LAST_FAILURE.lock().unwrap() = None;
                     // Start the idle killer thread
                     start_idle_killer();
                     return;
                 }
             }
-            tracing::warn!("[lazy_nlu] NLU server did not become responsive in 30s");
+            tracing::warn!("[lazy_nlu] NLU server did not become responsive in {}s", NLU_STARTUP_TIMEOUT_SECS);
             NLU_RUNNING.store(false, Ordering::Relaxed);
+            // Record the failure time so we don't retry for 60s
+            *NLU_LAST_FAILURE.lock().unwrap() = Some(Instant::now());
+            // Kill the failed child process
+            let mut child_guard = NLU_CHILD.lock().unwrap();
+            if let Some(mut child) = child_guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
         Err(e) => {
             tracing::error!("[lazy_nlu] failed to spawn NLU server: {}", e);
+            *NLU_LAST_FAILURE.lock().unwrap() = Some(Instant::now());
         }
     }
 }

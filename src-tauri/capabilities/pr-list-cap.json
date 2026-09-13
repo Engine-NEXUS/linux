@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pr-list-cap",
+  "description": "Capabilities for the NEXUS PR List sidebar window — event listening, orchestrator invoke, and show/hide commands.",
+  "windows": ["pr-list-sidebar"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

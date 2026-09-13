@@ -7,12 +7,14 @@
 #   pwsh ./scripts/run.ps1              # normal start
 #   pwsh ./scripts/run.ps1 -Build       # rebuild before starting
 #   pwsh ./scripts/run.ps1 -Debug       # enable CDP debugging port 9222
+#   pwsh ./scripts/run.ps1 -Admin       # start Qwen brain server (admin mode)
 #
 # Press Ctrl+C to stop everything cleanly.
 
 param(
   [switch]$Build,
-  [switch]$Debug
+  [switch]$Debug,
+  [switch]$Admin
 )
 
 $ErrorActionPreference = "Stop"
@@ -148,6 +150,79 @@ if ($nexusProc.HasExited) {
 }
 Write-Log "NEXUS" "App running (PID=$($nexusProc.Id))" $C_RUST
 
+# ─── Start Qwen Brain Server (admin mode) ──────────────────────────────────
+if ($Admin) {
+  $brainScript = "$ProjectRoot\server\admin\brain_server.py"
+  $adminConfig = "$ProjectRoot\server\admin\admin_config.json"
+  $brainModel = "$ProjectRoot\server\admin\model\qwen2.5-0.5b-instruct-q4_k_m.gguf"
+
+  # Kill any existing brain server on port 39219 (from a previous session)
+  $oldBrain = Get-NetTCPConnection -LocalPort 39219 -ErrorAction SilentlyContinue
+  if ($oldBrain) {
+    $oldPid = $oldBrain.OwningProcess | Select-Object -Unique
+    foreach ($p in $oldPid) {
+      $proc = Get-Process -Id $p -ErrorAction SilentlyContinue
+      if ($proc) {
+        Write-Log "BRAIN" "Killing old brain server (PID=$p)..." "DarkMagenta"
+        Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+        Start-Sleep 1
+      }
+    }
+  }
+
+  if (-not (Test-Path $brainScript)) {
+    Write-Log "BRAIN" "brain_server.py not found at $brainScript" $C_ERR
+    Write-Log "BRAIN" "Admin mode requires server/admin/brain_server.py" $C_ERR
+  } elseif (-not (Test-Path $adminConfig)) {
+    Write-Log "BRAIN" "admin_config.json not found — creating default..." $C_SYS
+    $defaultConfig = @{
+      is_admin = $true
+      brain_enabled = $true
+      brain_port = 39219
+      brain_model = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+      auto_train = $true
+      retrain_threshold = 50
+      min_confidence = 0.90
+    } | ConvertTo-Json -Depth 3
+    Set-Content -Path $adminConfig -Value $defaultConfig -Encoding UTF8
+    Write-Log "BRAIN" "Created admin_config.json with defaults" $C_SYS
+  }
+
+  if (Test-Path $brainScript) {
+    # Check if brain model exists
+    if (-not (Test-Path $brainModel)) {
+      Write-Log "BRAIN" "Qwen model not found at $brainModel" $C_ERR
+      Write-Log "BRAIN" "Download qwen2.5-0.5b-instruct-q4_k_m.gguf (~398MB)" $C_ERR
+      Write-Log "BRAIN" "Place it in server/admin/model/" $C_ERR
+    } else {
+      $brainLog = "$LogDir\brain_server.log"
+      $brainErr = "$LogDir\brain_server_err.log"
+      if (Test-Path $brainLog) { Clear-Content $brainLog -Force -ErrorAction SilentlyContinue }
+      if (Test-Path $brainErr) { Clear-Content $brainErr -Force -ErrorAction SilentlyContinue }
+
+      Write-Log "BRAIN" "Starting Qwen brain server (port 39219)..." "Magenta"
+      $brainProc = Start-Process -FilePath "python" `
+        -ArgumentList $brainScript `
+        -WorkingDirectory "$ProjectRoot\server\admin" `
+        -RedirectStandardOutput $brainLog `
+        -RedirectStandardError $brainErr `
+        -PassThru -WindowStyle Hidden
+      $jobs.Add([PSCustomObject]@{ Name="BRAIN"; Process=$brainProc }) | Out-Null
+
+      # Wait a moment and check if it crashed
+      Start-Sleep 3
+      if ($brainProc.HasExited) {
+        Write-Log "BRAIN" "Brain server CRASHED — check $brainErr" $C_ERR
+        Get-Content $brainErr | ForEach-Object { Write-Log "BRAIN" $_ $C_ERR }
+      } else {
+        Write-Log "BRAIN" "Brain server starting (PID=$($brainProc.Id)) — model loads in ~10s" "Magenta"
+        Write-Log "BRAIN" "  Port: 39219  Model: Qwen2.5-0.5B-Instruct (398MB GGUF)" "DarkMagenta"
+        Write-Log "BRAIN" "  Continuous learning: ON  Auto-train: ON" "DarkMagenta"
+      }
+    }
+  }
+}
+
 # ─── Start CDP monitor (frontend console logs) ────────────────────────────
 $cdpScript = "$ProjectRoot\scripts\cdp_monitor.js"
 if ($Debug -and (Test-Path $cdpScript)) {
@@ -165,6 +240,9 @@ if ($Debug -and (Test-Path $cdpScript)) {
 Write-Log "READY" "═══════════════════════════════════════════════════════" $C_SYS
 Write-Log "READY" "  NEXUS Unified Console — all logs below" $C_SYS
 Write-Log "READY" "  Rust=Green  Frontend=Yellow  Cmd=Magenta  STT=Cyan" $C_SYS
+if ($Admin) {
+  Write-Log "READY" "  Brain=Magenta  (Qwen 0.5B on port 39219 — admin mode)" "Magenta"
+}
 Write-Log "READY" "  Press Ctrl+C to stop everything" $C_SYS
 Write-Log "READY" "═══════════════════════════════════════════════════════" $C_SYS
 Write-Host ""
@@ -179,6 +257,7 @@ Write-Host ""
 $posRust = 0
 $posCDP = 0
 $posErr = 0
+$posBrain = 0
 
 function Get-NewLines([string]$File, [ref]$Position) {
   if (-not (Test-Path $File)) { return @() }
@@ -296,6 +375,23 @@ try {
         Write-Log "NET" $clean $C_CMD
       } elseif ($clean.Length -gt 5 -and $clean -notmatch "registry key|Chrome_WidgetWin") {
         Write-Log "ERR" $clean $C_ERR
+      }
+    }
+
+    # Brain server logs (admin mode)
+    if ($Admin -and (Test-Path "$LogDir\brain_server.log")) {
+      $brainLines = Get-NewLines "$LogDir\brain_server.log" ([ref]$posBrain)
+      foreach ($line in $brainLines) {
+        $clean = $line -replace '\x1b\[[0-9;]*m', ""
+        if ($clean.Length -gt 5) {
+          if ($clean -match "classify|phrasing|pronunciation|train") {
+            Write-Log "BRAIN" $clean "Magenta"
+          } elseif ($clean -match "ERROR|error|Traceback") {
+            Write-Log "BRAIN" $clean $C_ERR
+          } elseif ($clean -match "startup|ready|loaded|model") {
+            Write-Log "BRAIN" $clean "DarkMagenta"
+          }
+        }
       }
     }
   }

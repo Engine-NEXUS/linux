@@ -33,6 +33,10 @@ pub enum ParsedIntent {
     WhatsappChat { contact: String },
     #[serde(rename = "open_architect")]
     OpenArchitect,
+    /// Open the settings sidebar (command center).
+    /// "open settings" / "open command center" / "show preferences" / "configure NEXUS"
+    #[serde(rename = "open_settings")]
+    OpenSettings,
     #[serde(rename = "search")]
     Search { query: String },
     #[serde(rename = "analyse_repo")]
@@ -102,6 +106,68 @@ pub struct ParseResult {
     pub source: String,
 }
 
+/// Convert a `ParsedIntent` to its snake_case NLU label.
+/// This is the reverse of `nlu_client::nlu_to_parsed_intent`.
+/// Used by the brain monitor and orchestrator to store intent labels
+/// that `merge_and_train.py` can use for BERT-Mini training.
+///
+/// Without this, `format!("{:?}", intent)` produces Debug output like
+/// `GitHubCommand { command: ListPrs { repo: "...", state: "..." } }`
+/// which doesn't match any NLU training label.
+pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
+    use crate::github_cmd::GitHubCommand;
+    match intent {
+        ParsedIntent::OpenApp { .. } => "open_app",
+        ParsedIntent::OpenUrl { .. } => "open_url",
+        ParsedIntent::CloseApp { .. } => "close_app",
+        ParsedIntent::WhatsappChat { .. } => "whatsapp_chat",
+        ParsedIntent::OpenArchitect => "open_architect",
+        ParsedIntent::OpenSettings => "open_settings",
+        ParsedIntent::Search { .. } => "search",
+        ParsedIntent::AnalyseRepo { .. } => "analyse_repo",
+        ParsedIntent::AnalysePr { .. } => "analyse_pr",
+        ParsedIntent::AnalyseLatestPr { .. } => "analyse_latest_pr",
+        ParsedIntent::CheckBranch { .. } => "check_branch",
+        ParsedIntent::MediaPlayPause => "media_play_pause",
+        ParsedIntent::MediaNext => "media_next",
+        ParsedIntent::MediaPrevious => "media_previous",
+        ParsedIntent::MediaStop => "media_stop",
+        ParsedIntent::Greeting { .. } => "greeting",
+        ParsedIntent::NluResult { .. } => "nlu_result",
+        ParsedIntent::Unknown { .. } => "unknown",
+        ParsedIntent::GitHubCommand { command } => match command {
+            GitHubCommand::MergePr { .. } => "merge_pr",
+            GitHubCommand::ApprovePr { .. } => "approve_pr",
+            GitHubCommand::ClosePr { .. } => "close_pr",
+            GitHubCommand::ListPrs { .. } => "list_prs",
+            GitHubCommand::GetPr { .. } => "get_pr",
+            GitHubCommand::CreatePr { .. } => "create_pr",
+            GitHubCommand::UpdateBranch { .. } => "update_branch",
+            GitHubCommand::RevertPr { .. } => "revert_pr",
+            GitHubCommand::ListPrFiles { .. } => "list_pr_files",
+            GitHubCommand::CommentPr { .. } => "comment_pr",
+            GitHubCommand::AddCollaborator { .. } => "add_collaborator",
+            GitHubCommand::RemoveCollaborator { .. } => "remove_collaborator",
+            GitHubCommand::ListCollaborators { .. } => "list_collaborators",
+            GitHubCommand::AddOrgMember { .. } => "add_org_member",
+            GitHubCommand::RemoveOrgMember { .. } => "remove_org_member",
+            GitHubCommand::ListOrgMembers { .. } => "list_org_members",
+            GitHubCommand::ConvertToOutsideCollaborator { .. } => "convert_to_outside_collaborator",
+            GitHubCommand::ListOutsideCollaborators { .. } => "list_outside_collaborators",
+            GitHubCommand::SetBranchProtection { .. } => "set_branch_protection",
+            GitHubCommand::DeleteBranch { .. } => "delete_branch",
+            GitHubCommand::ListBranches { .. } => "list_branches",
+            GitHubCommand::CreateRelease { .. } => "create_release",
+            GitHubCommand::ListReleases { .. } => "list_releases",
+            GitHubCommand::DeleteRelease { .. } => "delete_release",
+            GitHubCommand::ListWorkflows { .. } => "list_workflows",
+            GitHubCommand::ListWorkflowRuns { .. } => "list_workflow_runs",
+            GitHubCommand::RerunWorkflow { .. } => "rerun_workflow",
+            GitHubCommand::CancelWorkflow { .. } => "cancel_workflow",
+        },
+    }
+}
+
 // ΓöÇΓöÇΓöÇ Deterministic parser ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /// Parse a transcript into a structured intent using deterministic rules.
@@ -116,10 +182,21 @@ pub struct ParseResult {
 pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     let text = transcript.trim().to_lowercase();
     let text = normalize_whitespace(&text);
+    // Strip trailing punctuation that STT often appends (e.g. "Open the PR list."
+    // from Groq/Whisper). Without this, regexes anchored with `$` (like the
+    // ListPrs pattern) fail to match and the permissive OpenApp fallback
+    // catches the phrase — "the pr list." resolved to a cached app target.
+    let text = strip_trailing_punctuation(&text);
 
     if text.is_empty() {
         return None;
     }
+
+    // Strip leading filler words that STT often inserts (e.g. "And analyse
+    // PR 254 in zync", "So open chrome", "But first close notepad").
+    // These conversational connectors are not part of the command and cause
+    // every starts_with() check below to fail.
+    let text = strip_leading_filler(&text);
 
     // --- Open Architecture Mapper ---
     if is_architect_command(&text) {
@@ -139,6 +216,17 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
             intent: ParsedIntent::OpenArchitect,
             confidence: 0.85,
             source: "deterministic-fuzzy".to_string(),
+        });
+    }
+
+    // --- Open Settings / Command Center ---
+    // "open settings" / "show settings" / "open command center" / "open preferences"
+    // "configure NEXUS" / "NEXUS settings" / "open config" / "show preferences"
+    if is_settings_command(&text) {
+        return Some(ParseResult {
+            intent: ParsedIntent::OpenSettings,
+            confidence: 1.0,
+            source: "deterministic".to_string(),
         });
     }
 
@@ -191,6 +279,16 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
         return Some(result);
     }
 
+    // --- Live mode commands ---
+    // "type hello world", "press enter", "press ctrl a"
+    // "send", "new tab", "open new tab"
+    // Must be BEFORE open/close — "open new tab" would match parse_open_command.
+    // "cancel" and "never mind" are already handled by the greeting parser
+    // above (they return a Greeting with "Very well, sir." which is appropriate).
+    if let Some(result) = parse_live_command(&text) {
+        return Some(result);
+    }
+
     // --- Open app / URL ---
     // "open whatsapp", "launch gemini", "start calculator", etc.
     if let Some(result) = parse_open_command(&text) {
@@ -219,6 +317,40 @@ const OPEN_VERBS: &[&str] = &[
     "open", "launch", "start", "run", "fire up", "bring up", "show", "pull up",
     "go to", "visit", "browse to", "navigate to",
 ];
+
+/// Heuristic: does this target phrase look like a GitHub command that
+/// `parse_github_command` somehow missed? Used as a defensive guard in
+/// `parse_open_command` so we don't launch a wrong app (e.g. Dribbble
+/// for "the pr list.") when the GitHub regex failed on a punctuation or
+/// phrasing variant.
+///
+/// Matches phrases containing PR/pull-request/repo keywords. Returns
+/// `true` for things like "the pr list", "pull requests", "open prs",
+/// "the repo list", "my prs".
+fn looks_like_github_phrase(s: &str) -> bool {
+    let s = s.trim().to_lowercase();
+    if s.is_empty() {
+        return false;
+    }
+    // Word-boundary checks so "pr" doesn't match inside "preview" / "process".
+    // "pr" as a standalone token or followed by "s"/"list"/"number"/"#".
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    let has_pr = tokens.iter().any(|&t| {
+        t == "pr" || t == "prs" || t == "pr's"
+            || t == "pr-list" || t == "prlist"
+            || t.starts_with("pr#")
+            || t == "pull" // "pull request(s)" — check bigram below
+    });
+    let has_pull_request = s.contains("pull request") || s.contains("pull requests");
+    let has_repo_phrase = tokens.iter().any(|&t| {
+        t == "repo" || t == "repos" || t == "repository" || t == "repositories"
+    }) || s.contains("repo list");
+    // "pull request(s)" bigram
+    let has_pull_bigram = tokens.windows(2).any(|w| {
+        w[0] == "pull" && (w[1] == "request" || w[1] == "requests")
+    });
+    has_pr || has_pull_request || has_pull_bigram || has_repo_phrase
+}
 
 fn parse_open_command(text: &str) -> Option<ParseResult> {
     // Try each open verb
@@ -257,6 +389,19 @@ fn parse_open_command(text: &str) -> Option<ParseResult> {
             }
 
             // App name ΓÇö resolve against the app registry
+            // Defensive guard: if the target looks like a GitHub command
+            // phrase that the GitHub parser somehow missed (e.g. STT
+            // punctuation variants, unusual phrasing), do NOT treat it as
+            // an app name. Returning None lets the NLU/brain fallback
+            // classify it correctly instead of launching a wrong app.
+            if looks_like_github_phrase(&cleaned_no_site) {
+                tracing::info!(
+                    "[intent_parser] open-command fallback: '{}' looks like a GitHub phrase, skipping app resolution",
+                    cleaned_no_site
+                );
+                return None;
+            }
+
             let resolved = resolve_app_name(&cleaned_no_site);
             return Some(ParseResult {
                 intent: ParsedIntent::OpenApp {
@@ -539,27 +684,27 @@ fn parse_pr_analyse(text: &str) -> Option<ParseResult> {
     // Match: "PR <num> [in|of|for|from|on] <repo>" or "pull request <num> ..."
     // Also handles "PR number <num>" and "PR # <num>" (STT variations)
     // Also handles "the PR" (user says "analyse the pr 254 in zync")
-    let pr_patterns = [
+    let pr_patterns: &[&str] = &[
         // "PR number 24 on NEXUS agent" / "PR number 24 in repo"
-        regex::Regex::new(r"^pr\s*(?:number|#\s*)?\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$").ok()?,
+        r"^pr\s*(?:number|#\s*)?\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$",
         // "PR number 24 NEXUS agent" (no preposition)
-        regex::Regex::new(r"^pr\s*number\s*#?\s*(\d+)\s+(.+)$").ok()?,
-        regex::Regex::new(r"^pr\s*#?\s*(\d+)\s+(?:in|of|for|from)\s+(.+)$").ok()?,
-        regex::Regex::new(r"^pr\s*#?\s*(\d+)\s+(.+)$").ok()?,
-        regex::Regex::new(r"^pull\s+request\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$").ok()?,
-        regex::Regex::new(r"^pull\s+request\s*#?\s*(\d+)\s+(.+)$").ok()?,
+        r"^pr\s*number\s*#?\s*(\d+)\s+(.+)$",
+        r"^pr\s*#?\s*(\d+)\s+(?:in|of|for|from)\s+(.+)$",
+        r"^pr\s*#?\s*(\d+)\s+(.+)$",
+        r"^pull\s+request\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$",
+        r"^pull\s+request\s*#?\s*(\d+)\s+(.+)$",
         // "PR <num> owner/repo"
-        regex::Regex::new(r"^pr\s*#?\s*(\d+)\s+(\S+/\S+)$").ok()?,
+        r"^pr\s*#?\s*(\d+)\s+(\S+/\S+)$",
         // "the PR <num> in <repo>" ΓÇö user says "analyse the pr 254 in zync"
-        regex::Regex::new(r"^the\s+pr\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$").ok()?,
+        r"^the\s+pr\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$",
         // "the PR <num> <repo>" (no preposition)
-        regex::Regex::new(r"^the\s+pr\s*#?\s*(\d+)\s+(.+)$").ok()?,
+        r"^the\s+pr\s*#?\s*(\d+)\s+(.+)$",
         // "the pull request <num> in <repo>"
-        regex::Regex::new(r"^the\s+pull\s+request\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$").ok()?,
+        r"^the\s+pull\s+request\s*#?\s*(\d+)\s+(?:in|of|for|from|on)\s+(.+)$",
     ];
 
-    for pat in &pr_patterns {
-        if let Some(caps) = pat.captures(text) {
+    for &pat in pr_patterns {
+        if let Some(caps) = regex_captures(text, pat) {
             let pr_number: u32 = caps[1].parse().ok()?;
             let repo_part = caps[2].trim();
 
@@ -623,7 +768,10 @@ fn parse_pr_analyse(text: &str) -> Option<ParseResult> {
 fn fuzzy_match_repo_name(repo: &str) -> Option<String> {
     for &known in KNOWN_REPOS {
         let dist = levenshtein(repo, known);
-        // Threshold: 2 for short repos (Γëñ6 chars), 3 for longer
+        // Threshold: 2 for short repos (≤6 chars), 3 for longer.
+        // STT mishearings are primarily handled in the frontend
+        // (correctSttTranscript) before reaching the parser.
+        // The fuzzy matcher is a safety net for residual mishearings.
         let threshold = if known.len() <= 6 { 2 } else { 3 };
         if dist <= threshold && dist > 0 {
             return Some(known.to_string());
@@ -684,11 +832,7 @@ fn parse_latest_pr_analyse(text: &str) -> Option<ParseResult> {
     // 3. "of <repo>" (when "of" is followed by a known repo, not a person)
 
     // Pattern 1: "[of|by|from] <author> in <repo>"
-    let author_repo_pat = regex::Regex::new(
-        r"^(?:of|by|from)\s+(\S+)\s+in\s+(.+)$"
-    ).ok()?;
-
-    if let Some(caps) = author_repo_pat.captures(after_pr) {
+    if let Some(caps) = regex_captures(after_pr, r"^(?:of|by|from)\s+(\S+)\s+in\s+(.+)$") {
         let author = caps[1].trim().to_string();
         let repo_part = caps[2].trim();
 
@@ -727,8 +871,7 @@ fn parse_latest_pr_analyse(text: &str) -> Option<ParseResult> {
     }
 
     // Pattern 2: "in <repo>" (no author)
-    let in_repo_pat = regex::Regex::new(r"^in\s+(.+)$").ok()?;
-    if let Some(caps) = in_repo_pat.captures(after_pr) {
+    if let Some(caps) = regex_captures(after_pr, r"^in\s+(.+)$") {
         let repo_part = caps[1].trim();
 
         if let Some((owner, repo)) = parse_owner_repo(repo_part) {
@@ -766,8 +909,7 @@ fn parse_latest_pr_analyse(text: &str) -> Option<ParseResult> {
     // Pattern 3: "of <repo>" (when "of" is followed by a known repo)
     // This is ambiguous — "of prem" could be author "prem" or repo "prem"
     // Only treat as repo if it matches a KNOWN_REPO
-    let of_repo_pat = regex::Regex::new(r"^of\s+(.+)$").ok()?;
-    if let Some(caps) = of_repo_pat.captures(after_pr) {
+    if let Some(caps) = regex_captures(after_pr, r"^of\s+(.+)$") {
         let repo_part = caps[1].trim();
         let lower_repo = repo_part.to_lowercase();
         if KNOWN_REPOS.contains(&lower_repo.as_str()) {
@@ -883,11 +1025,7 @@ fn parse_branch_command(text: &str) -> Option<ParseResult> {
 
     // Pattern A: "[of|in] <repo> [by] <author>"
     // The repo is everything between "of/in" and "by", or the rest if no "by"
-    let repo_author_pat_a = regex::Regex::new(
-        r"^(?:of|in)\s+(.+?)\s+by\s+(\S+)$"
-    ).ok()?;
-
-    if let Some(caps) = repo_author_pat_a.captures(&after_branch) {
+    if let Some(caps) = regex_captures(&after_branch, r"^(?:of|in)\s+(.+?)\s+by\s+(\S+)$") {
         let repo_part = caps[1].trim();
         let author = caps[2].trim().to_string();
 
@@ -924,11 +1062,7 @@ fn parse_branch_command(text: &str) -> Option<ParseResult> {
     }
 
     // Pattern B: "[by] <author> [in|of] <repo>"
-    let author_repo_pat_b = regex::Regex::new(
-        r"^by\s+(\S+)\s+(?:in|of)\s+(.+)$"
-    ).ok()?;
-
-    if let Some(caps) = author_repo_pat_b.captures(&after_branch) {
+    if let Some(caps) = regex_captures(&after_branch, r"^by\s+(\S+)\s+(?:in|of)\s+(.+)$") {
         let author = caps[1].trim().to_string();
         let repo_part = caps[2].trim();
 
@@ -965,8 +1099,7 @@ fn parse_branch_command(text: &str) -> Option<ParseResult> {
     }
 
     // Pattern C: "[of|in] <repo>" (no author — just latest branch)
-    let repo_only_pat = regex::Regex::new(r"^(?:of|in)\s+(.+)$").ok()?;
-    if let Some(caps) = repo_only_pat.captures(&after_branch) {
+    if let Some(caps) = regex_captures(&after_branch, r"^(?:of|in)\s+(.+)$") {
         let repo_part = caps[1].trim();
 
         // Strip trailing " by <something>" if present (already handled above, but just in case)
@@ -1128,7 +1261,7 @@ fn clean_repo_name(text: &str) -> String {
 
 // ΓöÇΓöÇΓöÇ Close app command ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-const CLOSE_VERBS: &[&str] = &["close", "quit", "exit", "kill", "shut down", "shut"];
+const CLOSE_VERBS: &[&str] = &["close", "quit", "exit", "kill", "terminate", "end", "shut down", "shut"];
 
 fn parse_close_command(text: &str) -> Option<ParseResult> {
     for verb in CLOSE_VERBS {
@@ -1270,10 +1403,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     // "merge PR 23 in owner/repo"
     // "squash merge PR 23 in owner/repo"
     // "rebase merge PR 23 in owner/repo"
-    let merge_re = regex::Regex::new(
-        r"^(?:(squash|rebase)\s+)?merge\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = merge_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^(?:(squash|rebase)\s+)?merge\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let method = match caps.get(1).map(|m| m.as_str()) {
             Some("squash") => MergeMethod::Squash,
             Some("rebase") => MergeMethod::Rebase,
@@ -1304,10 +1434,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Approve PR ---
-    let approve_re = regex::Regex::new(
-        r"^approve\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = approve_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^approve\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let pr_number: u64 = caps[1].parse().ok()?;
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
@@ -1332,10 +1459,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Close PR ---
-    let close_re = regex::Regex::new(
-        r"^close\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = close_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^close\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let pr_number: u64 = caps[1].parse().ok()?;
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
@@ -1360,10 +1484,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Get PR ---
-    let get_re = regex::Regex::new(
-        r"^(?:get|show|tell\s+me\s+about)\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = get_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^(?:get|show|tell\s+me\s+about)\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let pr_number: u64 = caps[1].parse().ok()?;
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
@@ -1388,19 +1509,56 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List PRs ---
-    let list_prs_re = regex::Regex::new(
-        r"^list\s+(open\s+|closed\s+|all\s+)?prs?(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = list_prs_re.captures(text) {
-        let state = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("open").to_string();
+    // Natural language patterns: "give me the pr list", "show live prs",
+    // "show open prs", "latest prs", "what prs are open", "open pr list", etc.
+    // These all map to ListPrs with a state filter.
+    // "open pr list" is included because STT often transcribes "show" as "open"
+    // and the user means "open the PR list sidebar", not "open an app called pr list".
+    if let Some(caps) = regex_captures(text, r"^(?:give\s+me\s+(?:the\s+)?|show\s+(?:me\s+)?(?:the\s+)?|get\s+(?:me\s+)?(?:the\s+)?|tell\s+me\s+(?:the\s+)?|what\s+(?:are\s+|is\s+)?(?:the\s+)?|open\s+(?:the\s+)?|view\s+(?:the\s+)?|fetch\s+(?:me\s+)?(?:the\s+)?|display\s+(?:the\s+)?|bring\s+(?:me\s+)?(?:the\s+)?|pull\s+up\s+(?:the\s+)?)?(?:(open|closed|all|live|latest|active|merged)\s+)?prs?(?:\s+list)?(?:\s+in\s+(\S+))?$") {
+        let raw_state = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("open");
+        let state = match raw_state {
+            "live" | "active" | "open" => "open",
+            "closed" => "closed",
+            "all" => "all",
+            "latest" => "open", // latest implies most recent open PRs
+            "merged" => "closed", // merged PRs are closed
+            _ => "open",
+        }.to_string();
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
         } else {
-            return extract_repo(text).map(|(repo, _)| ParseResult {
+            // Try "in <repo>" / "for <repo>" from text
+            if let Some((repo, _)) = extract_repo(text) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.9,
+                    source: "deterministic".to_string(),
+                });
+            }
+            // No repo in text — try auto-detection (browser URL, etc.)
+            if let Some(repo_id) = crate::architect::get_active_repo_url() {
+                let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
+                tracing::info!(
+                    "[intent_parser] ListPrs: auto-detected repo '{}'",
+                    repo
+                );
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.85,
+                    source: "deterministic".to_string(),
+                });
+            }
+            // No repo found at all — return with empty repo, let the GitHub
+            // subsystem handle the error or use a default repo
+            return Some(ParseResult {
                 intent: ParsedIntent::GitHubCommand {
-                    command: GitHubCommand::ListPrs { repo, state },
+                    command: GitHubCommand::ListPrs { repo: String::new(), state },
                 },
-                confidence: 0.9,
+                confidence: 0.7,
                 source: "deterministic".to_string(),
             });
         };
@@ -1415,17 +1573,194 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         }
     }
 
+    // --- "what prs are open" / "which prs are open" / "are there any open prs" ---
+    // Different word order: state comes AFTER "prs"
+    if let Some(caps) = regex_captures(text, r"^(?:what|which|any)\s+prs?\s+(?:are\s+)?(?:(open|closed|all|live|active))?(?:\s+in\s+(\S+))?$") {
+        let raw_state = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("open");
+        let state = match raw_state {
+            "live" | "active" | "open" => "open",
+            "closed" => "closed",
+            "all" => "all",
+            _ => "open",
+        }.to_string();
+        let repo = if let Some(r) = caps.get(2) {
+            clean_repo_name(r.as_str())
+        } else {
+            if let Some((repo, _)) = extract_repo(text) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.9,
+                    source: "deterministic".to_string(),
+                });
+            }
+            if let Some(repo_id) = crate::architect::get_active_repo_url() {
+                let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.85,
+                    source: "deterministic".to_string(),
+                });
+            }
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs { repo: String::new(), state },
+                },
+                confidence: 0.7,
+                source: "deterministic".to_string(),
+            });
+        };
+        if !repo.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs { repo, state },
+                },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+
+    // Original pattern: "list (open|closed|all) prs in <repo>"
+    if let Some(caps) = regex_captures(text, r"^list\s+(open\s+|closed\s+|all\s+)?prs?(?:\s+in\s+(\S+))?$") {
+        let state = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("open").to_string();
+        let repo = if let Some(r) = caps.get(2) {
+            clean_repo_name(r.as_str())
+        } else {
+            // Try "in <repo>" / "for <repo>" from text
+            if let Some((repo, _)) = extract_repo(text) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.9,
+                    source: "deterministic".to_string(),
+                });
+            }
+            // No repo in text — try auto-detection
+            if let Some(repo_id) = crate::architect::get_active_repo_url() {
+                let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { repo, state },
+                    },
+                    confidence: 0.85,
+                    source: "deterministic".to_string(),
+                });
+            }
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs { repo: String::new(), state },
+                },
+                confidence: 0.7,
+                source: "deterministic".to_string(),
+            });
+        };
+        if !repo.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs { repo, state },
+                },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+
+    // --- Fuzzy "list" fallback ---
+    // Catches STT mishearings where the user said "show me the pr list" or
+    // "list prs" but STT heard something like "so you have to list" or
+    // "show me the list". If the transcript contains "list" and doesn't
+    // match any other pattern, try ListPrs with auto-detected repo.
+    // This is a low-confidence fallback (0.6) — the brain/NLU can override.
+    // IMPORTANT: This must NOT catch "list branches", "list releases", etc.
+    // Those have their own patterns below. We exclude them here.
+    if text.contains("list") {
+        let lower = text.to_lowercase();
+        // Skip if it looks like a different list command or non-PR list
+        if lower.contains("to do") || lower.contains("todo") || lower.contains("shopping")
+            || lower.contains("bucket") || lower.contains("wait") || lower.contains("listen")
+            || lower.contains("branch") || lower.contains("release")
+            || lower.contains("workflow") || lower.contains("collaborator")
+            || lower.contains("file") || lower.contains("member")
+            || lower.contains("run") || lower.contains("pr files") {
+            // Not a PR list command — let the specific patterns handle it
+        } else {
+            // Try "in <repo>" / "for <repo>" first
+            if let Some((repo, _)) = extract_repo(text) {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs {
+                            repo,
+                            state: "open".to_string(),
+                        },
+                    },
+                    confidence: 0.6,
+                    source: "deterministic-fuzzy".to_string(),
+                });
+            }
+            // No repo in text — try auto-detection (browser URL, clipboard, etc.)
+            // This is a blocking call, so we do it last.
+            if let Some(repo_id) = crate::architect::get_active_repo_url() {
+                let repo = format!("{}/{}", repo_id.owner, repo_id.repo);
+                tracing::info!(
+                    "[intent_parser] fuzzy 'list' fallback: auto-detected repo '{}'",
+                    repo
+                );
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs {
+                            repo,
+                            state: "open".to_string(),
+                        },
+                    },
+                    confidence: 0.6,
+                    source: "deterministic-fuzzy".to_string(),
+                });
+            }
+            // No repo found at all — return with empty repo for account-wide
+            // PR search. Without this, "show me the pr list" (no repo) falls
+            // through to Unknown even though it contains "list".
+            tracing::info!(
+                "[intent_parser] fuzzy 'list' fallback: no repo detected, returning account-wide ListPrs"
+            );
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrs {
+                        repo: String::new(),
+                        state: "open".to_string(),
+                    },
+                },
+                confidence: 0.6,
+                source: "deterministic-fuzzy".to_string(),
+            });
+        }
+    }
+
     // --- List PR files ---
-    if let Some(rest) = text.strip_prefix("list pr files ") {
-        // "list pr files for PR <num> in <repo>" or "list pr files for <num> in <repo>"
-        let rest = rest.trim_start_matches("for ").trim();
-        let rest = rest.trim_start_matches("pr ").trim();
-        if let Ok(pr_number) = rest.parse::<u64>() {
+    // "list pr files for PR <num> in <repo>" or "list pr files <num> in <repo>"
+    if let Some(caps) = regex_captures(text, r"^list\s+pr\s+files\s+(?:for\s+)?(?:pr\s+)?#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
+        let pr_number: u64 = caps[1].parse().ok()?;
+        let repo = if let Some(r) = caps.get(2) {
+            clean_repo_name(r.as_str())
+        } else {
             return extract_repo(text).map(|(repo, _)| ParseResult {
                 intent: ParsedIntent::GitHubCommand {
                     command: GitHubCommand::ListPrFiles { repo, pr_number },
                 },
                 confidence: 0.9,
+                source: "deterministic".to_string(),
+            });
+        };
+        if !repo.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::ListPrFiles { repo, pr_number },
+                },
+                confidence: 0.95,
                 source: "deterministic".to_string(),
             });
         }
@@ -1447,10 +1782,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Revert PR ---
-    let revert_re = regex::Regex::new(
-        r"^revert\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$"
-    ).ok()?;
-    if let Some(caps) = revert_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^revert\s+(?:pr|pull\s+request)\s*#?\s*(\d+)(?:\s+in\s+(\S+))?$") {
         let pr_number: u64 = caps[1].parse().ok()?;
         let repo = if let Some(r) = caps.get(2) {
             clean_repo_name(r.as_str())
@@ -1474,12 +1806,54 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         }
     }
 
+    // --- Comment on PR ---
+    // "comment on PR <num> in <repo> <body>" or "comment on PR <num> <body>"
+    if let Some(caps) = regex_captures(text, r"^comment\s+on\s+(?:pr|pull\s+request)\s*#?\s*(\d+)\s+in\s+(\S+)\s+(.+)$") {
+        let pr_number: u64 = caps[1].parse().ok()?;
+        let repo = clean_repo_name(&caps[2]);
+        let body = caps[3].trim().to_string();
+        if !repo.is_empty() && !body.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::CommentPr { repo, pr_number, body },
+                },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+    // "comment on PR <num> <body>" (repo extracted from context)
+    if let Some(caps) = regex_captures(text, r"^comment\s+on\s+(?:pr|pull\s+request)\s*#?\s*(\d+)\s+(.+)$") {
+        let pr_number: u64 = caps[1].parse().ok()?;
+        let rest = caps[2].trim();
+        // Try to split "in <repo> <body>" from "<body>"
+        if let Some(pos) = rest.find(" in ") {
+            let repo = clean_repo_name(&rest[..pos].trim());
+            let body = rest[pos + 4..].trim().to_string();
+            if !repo.is_empty() && !body.is_empty() {
+                return Some(ParseResult {
+                    intent: ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::CommentPr { repo, pr_number, body },
+                    },
+                    confidence: 0.9,
+                    source: "deterministic".to_string(),
+                });
+            }
+        }
+        // No "in <repo>" — try extracting repo from full text
+        return extract_repo(text).map(|(repo, _)| ParseResult {
+            intent: ParsedIntent::GitHubCommand {
+                command: GitHubCommand::CommentPr { repo, pr_number, body: rest.to_string() },
+            },
+            confidence: 0.85,
+            source: "deterministic".to_string(),
+        });
+    }
+
     // --- Add collaborator ---
     // "add <user> as collaborator to <repo>" or "add <user> as admin to <repo>"
-    let add_collab_re = regex::Regex::new(
-        r"^add\s+(\S+)\s+as\s+(admin|push|pull|triage|maintain)?\s*collaborator\s+to\s+(\S+)$"
-    ).ok()?;
-    if let Some(caps) = add_collab_re.captures(text) {
+    // Also: "add <user> as admin to <repo>" (without "collaborator" keyword)
+    if let Some(caps) = regex_captures(text, r"^add\s+(\S+)\s+as\s+(admin|push|pull|triage|maintain)?\s*(?:collaborator\s+)?to\s+(\S+)$") {
         let username = caps[1].to_string();
         let permission = match caps.get(2).map(|m| m.as_str().trim()) {
             Some("admin") => CollaboratorPermission::Admin,
@@ -1502,10 +1876,8 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Remove collaborator ---
-    let rem_collab_re = regex::Regex::new(
-        r"^remove\s+(\S+)\s+(?:as\s+)?collaborator\s+from\s+(\S+)$"
-    ).ok()?;
-    if let Some(caps) = rem_collab_re.captures(text) {
+    // "remove <user> from <repo>" or "remove <user> as collaborator from <repo>"
+    if let Some(caps) = regex_captures(text, r"^remove\s+(\S+)\s+(?:as\s+)?(?:collaborator\s+)?from\s+(\S+)$") {
         let username = caps[1].to_string();
         let repo = clean_repo_name(&caps[2]);
         if !repo.is_empty() {
@@ -1520,8 +1892,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List collaborators ---
-    let list_collab_re = regex::Regex::new(r"^list\s+collaborators\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_collab_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+collaborators\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1536,10 +1907,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
 
     // --- Add org member ---
     // "add <user> to org <org>" or "add <user> as admin to org <org>"
-    let add_org_re = regex::Regex::new(
-        r"^add\s+(\S+)\s+(?:as\s+(admin|member)\s+)?to\s+org\s+(\S+)$"
-    ).ok()?;
-    if let Some(caps) = add_org_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^add\s+(\S+)\s+(?:as\s+(admin|member)\s+)?to\s+org\s+(\S+)$") {
         let username = caps[1].to_string();
         let role = match caps.get(2).map(|m| m.as_str()) {
             Some("admin") => OrgRole::Admin,
@@ -1556,8 +1924,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Remove org member ---
-    let rem_org_re = regex::Regex::new(r"^remove\s+(\S+)\s+from\s+org\s+(\S+)$").ok()?;
-    if let Some(caps) = rem_org_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^remove\s+(\S+)\s+from\s+org\s+(\S+)$") {
         let username = caps[1].to_string();
         let org = caps[2].to_string();
         return Some(ParseResult {
@@ -1570,8 +1937,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List org members ---
-    let list_org_re = regex::Regex::new(r"^list\s+members\s+of\s+org\s+(\S+)$").ok()?;
-    if let Some(caps) = list_org_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+members\s+of\s+org\s+(\S+)$") {
         let org = caps[1].to_string();
         return Some(ParseResult {
             intent: ParsedIntent::GitHubCommand {
@@ -1583,8 +1949,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List branches ---
-    let list_branches_re = regex::Regex::new(r"^list\s+branches\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_branches_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+branches\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1598,8 +1963,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Delete branch ---
-    let del_branch_re = regex::Regex::new(r"^delete\s+branch\s+(\S+)\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = del_branch_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^delete\s+branch\s+(\S+)\s+in\s+(\S+)$") {
         let branch = caps[1].to_string();
         let repo = clean_repo_name(&caps[2]);
         if !repo.is_empty() {
@@ -1614,8 +1978,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List releases ---
-    let list_releases_re = regex::Regex::new(r"^list\s+releases\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_releases_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+releases\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1628,9 +1991,34 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
         }
     }
 
+    // --- Create release ---
+    // "create release v1.0 in owner/repo" or "create release v1.0 in owner/repo with notes <body>"
+    if let Some(caps) = regex_captures(text, r"^create\s+release\s+(\S+)\s+in\s+(\S+)(?:\s+with\s+notes\s+(.+))?$") {
+        let tag = caps[1].to_string();
+        let repo = clean_repo_name(&caps[2]);
+        let body = caps.get(3).map(|m| m.as_str().trim().to_string());
+        let name = tag.clone();
+        if !repo.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::GitHubCommand {
+                    command: GitHubCommand::CreateRelease {
+                        repo,
+                        tag,
+                        name,
+                        body,
+                        draft: false,
+                        prerelease: false,
+                        target_commitish: None,
+                    },
+                },
+                confidence: 0.95,
+                source: "deterministic".to_string(),
+            });
+        }
+    }
+
     // --- List workflows ---
-    let list_wf_re = regex::Regex::new(r"^list\s+workflows\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_wf_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+workflows\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1644,8 +2032,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- List workflow runs ---
-    let list_runs_re = regex::Regex::new(r"^list\s+workflow\s+runs\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = list_runs_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^list\s+workflow\s+runs\s+in\s+(\S+)$") {
         let repo = clean_repo_name(&caps[1]);
         if !repo.is_empty() {
             return Some(ParseResult {
@@ -1659,8 +2046,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Rerun workflow ---
-    let rerun_re = regex::Regex::new(r"^rerun\s+workflow\s+(\d+)\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = rerun_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^rerun\s+workflow\s+(\d+)\s+in\s+(\S+)$") {
         let run_id: u64 = caps[1].parse().ok()?;
         let repo = clean_repo_name(&caps[2]);
         if !repo.is_empty() {
@@ -1675,8 +2061,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
     }
 
     // --- Cancel workflow ---
-    let cancel_re = regex::Regex::new(r"^cancel\s+workflow\s+(\d+)\s+in\s+(\S+)$").ok()?;
-    if let Some(caps) = cancel_re.captures(text) {
+    if let Some(caps) = regex_captures(text, r"^cancel\s+workflow\s+(\d+)\s+in\s+(\S+)$") {
         let run_id: u64 = caps[1].parse().ok()?;
         let repo = clean_repo_name(&caps[2]);
         if !repo.is_empty() {
@@ -1705,7 +2090,7 @@ fn parse_github_command(text: &str) -> Option<ParseResult> {
 /// Returns a `Greeting` intent with a pre-written reply.
 fn parse_greeting(text: &str) -> Option<ParseResult> {
     // Hello / Hi / Hey
-    if regex_match(text, r"^(?:hello|hi|hey|yo|sup|what'?s\s+up|howdy|greetings|hi\s+ya|hiya|hey\s+(?:there|nexus)|hello\s+nexus|hi\s+nexus)$") {
+    if regex_match(text, r"^(?:hello|hi|hey|yo|sup|what'?s\s+up|howdy|greetings|hi\s+ya|hiya|hey\s+(?:there|nexus)|hello\s+nexus|hi\s+nexus|hey\s+nexus)$") {
         let replies = [
             "Hello, sir.",
             "Hi, sir. How can I help?",
@@ -1859,7 +2244,7 @@ fn parse_media(text: &str) -> Option<ParsedIntent> {
     if regex_match(text, r"^(?:previous|previous\s+song|previous\s+track|prev|prev\s+song|go\s+back\s+a\s+song)$") {
         return Some(ParsedIntent::MediaPrevious);
     }
-    if regex_match(text, r"^(?:stop\s+music|stop\s+media|stop\s+playback)$") {
+    if regex_match(text, r"^(?:stop\s+music|stop\s+media|stop\s+playback|stop)$") {
         return Some(ParsedIntent::MediaStop);
     }
     None
@@ -1899,6 +2284,83 @@ fn is_architect_command(text: &str) -> bool {
         text,
         r"^(?:show|display|view)\s+(?:me\s+)?(?:the\s+)?architecture$",
     )
+}
+
+// ─── Settings / Command Center ───────────────────────────────────────────
+
+/// Match settings/command center commands.
+/// Covers all natural phrasings:
+///   "open settings" / "open the settings"
+///   "show settings" / "show me the settings"
+///   "open command center" / "open the command center"
+///   "show command center" / "show me the command center"
+///   "open preferences" / "show preferences"
+///   "open configuration" / "open config"
+///   "configure NEXUS" / "NEXUS settings" / "NEXUS config"
+///   "NEXUS preferences" / "NEXUS command center"
+///   "bring up settings" / "pull up settings"
+///   "launch settings" / "start settings"
+///
+/// Also handles STT singular variants:
+///   "open setting" / "show setting" / "open preference"
+///
+/// Also handles bare words (Intel SST mic truncation):
+///   "settings" / "preferences" / "config" / "command center"
+fn is_settings_command(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+
+    // Bare words — Intel SST mic silence cuts the utterance mid-word.
+    // "settings" alone almost always means "open settings".
+    if t == "settings" || t == "preferences" || t == "config" || t == "configuration" {
+        return true;
+    }
+
+    // (open|launch|start|show|bring up|pull up|give me|show me) + (the)? + settings/setting
+    if regex_match(
+        text,
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?settings?$",
+    ) {
+        return true;
+    }
+
+    // (open|show|launch) + (the)? + command center
+    if regex_match(
+        text,
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?command\s+center$",
+    ) {
+        return true;
+    }
+
+    // (open|show) + (the)? + preferences? / preference
+    if regex_match(
+        text,
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?preferences?$",
+    ) {
+        return true;
+    }
+
+    // (open|show) + (the)? + config / configuration
+    if regex_match(
+        text,
+        r"^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?(?:config|configuration)$",
+    ) {
+        return true;
+    }
+
+    // "configure NEXUS" / "configure nexus"
+    if regex_match(text, r"^configure\s+nexus$") {
+        return true;
+    }
+
+    // "NEXUS settings" / "NEXUS config" / "NEXUS preferences" / "NEXUS command center"
+    if regex_match(
+        text,
+        r"^nexus\s+(?:settings?|config|configuration|preferences?|command\s+center)$",
+    ) {
+        return true;
+    }
+
+    false
 }
 
 /// Fuzzy match for architecture mapper commands that STT misheard.
@@ -2052,16 +2514,16 @@ const BROWSER_FORCE_URLS: &[(&str, &str)] = &[
 
 fn parse_browser_force(text: &str) -> Option<ParseResult> {
     // "open gmail in browser" / "open gmail website" / "open gmail site"
-    let patterns = [
-        regex::Regex::new(r"^(.+?)\s+in\s+(?:the\s+)?browser$").ok()?,
-        regex::Regex::new(r"^(.+?)\s+website$").ok()?,
-        regex::Regex::new(r"^(.+?)\s+site$").ok()?,
-        regex::Regex::new(r"^(.+?)\s+on\s+(?:the\s+)?web$").ok()?,
-        regex::Regex::new(r"^(.+?)\s+web\s+version$").ok()?,
+    let patterns: &[&str] = &[
+        r"^(.+?)\s+in\s+(?:the\s+)?browser$",
+        r"^(.+?)\s+website$",
+        r"^(.+?)\s+site$",
+        r"^(.+?)\s+on\s+(?:the\s+)?web$",
+        r"^(.+?)\s+web\s+version$",
     ];
 
-    for pat in &patterns {
-        if let Some(caps) = pat.captures(text) {
+    for &pat in patterns {
+        if let Some(caps) = regex_captures(text, pat) {
             let app_name = caps[1].trim();
             // Check URL map
             for (key, url) in BROWSER_FORCE_URLS {
@@ -2102,6 +2564,77 @@ fn parse_browser_force(text: &str) -> Option<ParseResult> {
 
 fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Strip trailing sentence-ending punctuation that STT engines (Groq
+/// whisper-large-v3-turbo, faster-whisper) often append to transcripts.
+///
+/// Only strips from the very end of the string so internal punctuation
+/// (e.g. "owner/repo", "what's up") is preserved. Handles repeated
+/// punctuation ("ok...") and trailing quotes/brackets STT sometimes adds.
+fn strip_trailing_punctuation(s: &str) -> String {
+    let trimmed = s.trim_end_matches(|c: char| {
+        matches!(c, '.' | ',' | '?' | '!' | ';' | ':' | '"' | '\'' | ')' | ']' | '…')
+    });
+    trimmed.to_string()
+}
+
+/// Leading filler words that STT often inserts before the actual command.
+/// e.g. "And analyse PR 254 in zync" → "analyse PR 254 in zync"
+///      "So open chrome" → "open chrome"
+///      "But first close notepad" → "close notepad"
+///
+/// These are conversational connectors — the user is speaking naturally,
+/// not issuing a robotic command. Without stripping, every `starts_with()`
+/// check in the parser fails and the intent falls through to `Unknown`.
+///
+/// We only strip filler at the START of the transcript (not mid-sentence),
+/// and we strip at most one filler word — "and so open chrome" keeps "so"
+/// because "and so" is rare and stripping multiple words risks eating the
+/// actual command ("so" alone is a valid filler, but "and so" could be
+/// "answer so..." mishears).
+fn strip_leading_filler(text: &str) -> String {
+    /// Single-word fillers that can precede a command.
+    const FILLERS: &[&str] = &[
+        "and", "so", "but", "then", "now", "also", "plus", "like", "okay",
+        "ok", "well", "um", "uh", "hmm", "actually", "basically",
+        "just", "please", "now please",
+    ];
+
+    // Protect "hey nexus" / "hello nexus" / "hi nexus" — these are greetings,
+    // not filler + command. "hey" alone is filler, but "hey nexus" is a wake.
+    let lower = text.to_lowercase();
+    if lower == "hey nexus" || lower == "hello nexus" || lower == "hi nexus"
+        || lower == "hey there" || lower == "hey nexus wake up"
+    {
+        return text.to_string();
+    }
+
+    // Try two-word fillers first (e.g. "and so", "but first", "now just")
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() >= 3 {
+        let two = format!("{} {}", words[0], words[1]);
+        if FILLERS.contains(&two.as_str())
+            || (words[0] == "and" && (words[1] == "so" || words[1] == "then" || words[1] == "now"))
+            || (words[0] == "but" && words[1] == "first")
+            || (words[0] == "now" && (words[1] == "just" || words[1] == "please"))
+        {
+            return words[2..].join(" ");
+        }
+    }
+
+    // Single-word filler — but NOT "hey" when followed by "nexus"/"there"
+    if words.len() >= 2 {
+        if FILLERS.contains(&words[0]) {
+            return words[1..].join(" ");
+        }
+        // "hey" is filler only when NOT followed by "nexus" or "there"
+        if words[0] == "hey" && words[1] != "nexus" && words[1] != "there" {
+            return words[1..].join(" ");
+        }
+    }
+
+    text.to_string()
 }
 
 fn strip_trailing_app_words(s: &str) -> String {
@@ -2171,6 +2704,23 @@ fn regex_match(text: &str, pattern: &str) -> bool {
     re.is_match(text)
 }
 
+/// Cached regex captures helper. Uses the same OnceLock+Mutex cache as
+/// `regex_match` but returns capture groups for pattern extraction.
+///
+/// `Captures` borrows from `text` (not from the `Regex`), so it is safe
+/// to return even though the MutexGuard is dropped when this function
+/// returns.
+fn regex_captures<'t>(text: &'t str, pattern: &str) -> Option<regex::Captures<'t>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, regex::Regex>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    let re = guard
+        .entry(pattern.to_string())
+        .or_insert_with(|| regex::Regex::new(pattern).unwrap_or_else(|_| regex::Regex::new("$^").unwrap()));
+    re.captures(text)
+}
+
 // ΓöÇΓöÇΓöÇ Tauri command ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
 /// Parse a transcript into a structured intent.
@@ -2194,17 +2744,65 @@ pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String>
         return Ok(result);
     }
 
-    // 2. Try NLU server (if available)
+    // 2. Try brain server FIRST (admin-only, if enabled)
+    // The brain (Qwen 0.5B LLM) is much smarter than BERT-Mini and can
+    // understand mishearings, filler words, and unusual phrasing.
+    // BERT-Mini often returns confident-but-wrong results (e.g. "So, you
+    // have to list." → MediaPlayPause with 0.90 confidence), which blocks
+    // the brain from ever being tried. By trying the brain first, we get
+    // accurate classification for admin users.
+    #[cfg(feature = "admin-brain")]
+    if crate::admin_config::is_admin() {
+        if let Some(result) = crate::brain_client::brain_classify(&transcript).await {
+            tracing::info!(
+                "[intent_parser] brain: {:?} (confidence={}, source={})",
+                result.intent,
+                result.confidence,
+                result.source
+            );
+
+            // Brain monitor: observe the brain's own result
+            let brain_intent_name = intent_to_label(&result.intent).to_string();
+            crate::brain_monitor::monitor_transcript(
+                transcript.clone(),
+                None, // deterministic missed
+                Some(brain_intent_name),
+            );
+
+            // Only accept brain result if confidence is reasonable
+            if result.confidence >= 0.5 {
+                return Ok(result);
+            }
+            tracing::info!(
+                "[intent_parser] brain confidence too low ({:.2}), falling back to NLU",
+                result.confidence
+            );
+        }
+    }
+
+    // 3. Try NLU server (BERT-Mini fallback)
     if let Some(result) = crate::nlu_client::parse_via_nlu(&transcript).await {
         tracing::info!(
             "[intent_parser] nlu: {:?} (confidence={})",
             result.intent,
             result.confidence
         );
+
+        // Brain monitor: observe the NLU result (non-blocking, background)
+        #[cfg(feature = "admin-brain")]
+        {
+            let nlu_intent_name = intent_to_label(&result.intent).to_string();
+            crate::brain_monitor::monitor_transcript(
+                transcript.clone(),
+                None, // deterministic missed
+                Some(nlu_intent_name),
+            );
+        }
+
         return Ok(result);
     }
 
-    // 3. Fallback: unknown
+    // 4. Fallback: unknown
     tracing::info!("[intent_parser] no match, returning unknown");
     Ok(ParseResult {
         intent: ParsedIntent::Unknown {
@@ -2217,6 +2815,114 @@ pub async fn parse_transcript(transcript: String) -> Result<ParseResult, String>
 
 // ΓöÇΓöÇΓöÇ Tests ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
+// ─── Live mode commands ───────────────────────────────────────────────
+
+/// Parse live-mode commands: type, press, send, cancel, new tab, etc.
+///
+/// These are only matched after all other parsers fail, so they don't
+/// interfere with existing commands like "open app" or "search for X".
+///
+/// Patterns:
+///   "type <text>"              → TypeText
+///   "press <key>"              → PressKey
+///   "press <key1> <key2>"       → PressHotkey (multi-key combo)
+///   "press ctrl a"             → PressHotkey ["ctrl", "a"]
+///   "send"                     → ConfirmSend (requires confirmation)
+///   "cancel" / "never mind"    → CancelAction
+///   "new tab"                  → BrowserNewTab
+fn parse_live_command(text: &str) -> Option<ParseResult> {
+    // --- Type text ---
+    if let Some(rest) = text.strip_prefix("type ") {
+        let typed = rest.trim();
+        if !typed.is_empty() {
+            return Some(ParseResult {
+                intent: ParsedIntent::NluResult {
+                    intent: "type_text".to_string(),
+                    slots: serde_json::json!({ "text": typed }),
+                    confidence: 1.0,
+                },
+                confidence: 1.0,
+                source: "deterministic-live".to_string(),
+            });
+        }
+    }
+
+    // --- Press key / hotkey ---
+    if let Some(rest) = text.strip_prefix("press ") {
+        let keys_str = rest.trim();
+        if !keys_str.is_empty() {
+            let keys: Vec<&str> = keys_str.split_whitespace().collect();
+            if keys.len() == 1 {
+                return Some(ParseResult {
+                    intent: ParsedIntent::NluResult {
+                        intent: "press_key".to_string(),
+                        slots: serde_json::json!({ "key": keys[0] }),
+                        confidence: 1.0,
+                    },
+                    confidence: 1.0,
+                    source: "deterministic-live".to_string(),
+                });
+            } else {
+                return Some(ParseResult {
+                    intent: ParsedIntent::NluResult {
+                        intent: "press_hotkey".to_string(),
+                        slots: serde_json::json!({ "keys": keys }),
+                        confidence: 1.0,
+                    },
+                    confidence: 1.0,
+                    source: "deterministic-live".to_string(),
+                });
+            }
+        }
+    }
+
+    // --- Send (requires confirmation) ---
+    if text == "send" || text == "send it" || text == "send message" {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "confirm_send".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic-live".to_string(),
+        });
+    }
+
+    // --- Cancel ---
+    // "stop" is not handled by the greeting parser, so we catch it here.
+    // "cancel", "never mind", "forget it" are already handled by the
+    // greeting parser (they return "Very well, sir." which is appropriate).
+    // In live mode, the orchestrator should also reset the state machine
+    // when it sees a Greeting that is actually a cancel.
+    if text == "stop" {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "cancel_action".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic-live".to_string(),
+        });
+    }
+
+    // --- New tab ---
+    if text == "new tab" || text == "open new tab" || text == "open a new tab" {
+        return Some(ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "browser_new_tab".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 1.0,
+            },
+            confidence: 1.0,
+            source: "deterministic-live".to_string(),
+        });
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2227,6 +2933,34 @@ mod tests {
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(matches!(r.intent, ParsedIntent::OpenApp { .. }));
+    }
+
+    #[test]
+    fn test_open_settings() {
+        let result = parse_deterministic("open the settings");
+        assert!(result.is_some(), "should parse 'open the settings'");
+        let r = result.unwrap();
+        assert!(
+            matches!(r.intent, ParsedIntent::OpenSettings),
+            "expected OpenSettings, got {:?}",
+            r.intent
+        );
+    }
+
+    #[test]
+    fn test_open_settings_no_the() {
+        let result = parse_deterministic("open settings");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(matches!(r.intent, ParsedIntent::OpenSettings));
+    }
+
+    #[test]
+    fn test_open_command_center() {
+        let result = parse_deterministic("open the command center");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(matches!(r.intent, ParsedIntent::OpenSettings));
     }
 
     #[test]
@@ -2303,6 +3037,58 @@ mod tests {
         } else {
             panic!("expected AnalysePr");
         }
+    }
+
+    #[test]
+    fn test_analyse_pr_with_leading_filler_and() {
+        // "And analyse PR 254 in zync" — STT inserts "And" at the start
+        let result = parse_deterministic("And analyse PR 254 in zync");
+        assert!(result.is_some(), "should parse with leading 'And'");
+        let r = result.unwrap();
+        if let ParsedIntent::AnalysePr {
+            repo, pr_number, ..
+        } = r.intent
+        {
+            assert_eq!(repo, "zync");
+            assert_eq!(pr_number, 254);
+        } else {
+            panic!("expected AnalysePr, got {:?}", r.intent);
+        }
+    }
+
+    #[test]
+    fn test_analyse_pr_with_leading_filler_so() {
+        let result = parse_deterministic("so analyse PR 5 in servx");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        if let ParsedIntent::AnalysePr {
+            repo, pr_number, ..
+        } = r.intent
+        {
+            assert_eq!(repo, "servx");
+            assert_eq!(pr_number, 5);
+        } else {
+            panic!("expected AnalysePr, got {:?}", r.intent);
+        }
+    }
+
+    #[test]
+    fn test_open_with_leading_filler() {
+        let result = parse_deterministic("and open chrome");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(matches!(r.intent, ParsedIntent::OpenApp { .. }));
+        if let ParsedIntent::OpenApp { target } = r.intent {
+            assert_eq!(target, "chrome");
+        }
+    }
+
+    #[test]
+    fn test_strip_leading_filler_doesnt_eat_commands() {
+        // "open and close chrome" should NOT strip "open"
+        let result = parse_deterministic("open and close chrome");
+        assert!(result.is_some());
+        // "open" is the verb, "and close chrome" is the target — weird but valid
     }
 
     #[test]
@@ -2686,6 +3472,140 @@ mod tests {
                 r.intent
             );
         }
+    }
+
+    #[test]
+    fn test_pr_list_commands() {
+        use crate::github_cmd::GitHubCommand;
+        // "open pr list" must NOT be parsed as OpenApp("pr list")
+        // It should be ListPrs
+        for cmd in &[
+            "open pr list",
+            "open the pr list",
+            "show pr list",
+            "show the pr list",
+            "show me the pr list",
+            "show me pr list",
+            "show me prs",
+            "give me the pr list",
+            "view pr list",
+            "view the pr list",
+            "get pr list",
+            "get me the pr list",
+            "get me prs",
+            "tell me the pr list",
+            "what prs are open",
+            "show open prs",
+            "show live prs",
+            "latest prs",
+            "give me prs",
+            "show prs",
+            "get prs",
+            "fetch prs",
+            "display prs",
+            "bring me the pr list",
+            "pull up the pr list",
+            "show merged prs",
+            "merged prs",
+        ] {
+            let result = parse_deterministic(cmd);
+            assert!(result.is_some(), "failed to parse: {}", cmd);
+            let r = result.unwrap();
+            assert!(
+                matches!(
+                    r.intent,
+                    ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { .. }
+                    }
+                ),
+                "expected ListPrs for: {}, got {:?}",
+                cmd,
+                r.intent
+            );
+        }
+    }
+
+    #[test]
+    fn test_pr_list_with_trailing_punctuation() {
+        use crate::github_cmd::GitHubCommand;
+        // Groq whisper-large-v3-turbo appends trailing punctuation to
+        // transcripts. Without strip_trailing_punctuation() the ListPrs
+        // regex (anchored with $) fails and the permissive OpenApp
+        // fallback catches "the pr list." → resolves to a cached app
+        // (Dribbble). This test guards against that regression.
+        for cmd in &[
+            "open the pr list.",
+            "open the pr list?",
+            "open the pr list!",
+            "show the pr list.",
+            "show me the pr list.",
+            "show me pr list.",
+            "show open prs.",
+            "list open prs.",
+            "what prs are open.",
+            "give me the pr list.",
+            "view the pr list.",
+            "get prs.",
+            "get me the pr list.",
+            "fetch prs.",
+            "display prs.",
+        ] {
+            let result = parse_deterministic(cmd);
+            assert!(result.is_some(), "failed to parse: {}", cmd);
+            let r = result.unwrap();
+            assert!(
+                matches!(
+                    r.intent,
+                    ParsedIntent::GitHubCommand {
+                        command: GitHubCommand::ListPrs { .. }
+                    }
+                ),
+                "expected ListPrs for: {}, got {:?} (trailing punctuation not stripped?)",
+                cmd,
+                r.intent
+            );
+        }
+    }
+
+    #[test]
+    fn test_open_app_still_works_with_punctuation() {
+        // Ensure strip_trailing_punctuation doesn't break normal app opens
+        let result = parse_deterministic("open chrome.");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(
+            matches!(r.intent, ParsedIntent::OpenApp { .. }),
+            "expected OpenApp for 'open chrome.', got {:?}",
+            r.intent
+        );
+    }
+
+    #[test]
+    fn test_strip_trailing_punctuation_helper() {
+        assert_eq!(strip_trailing_punctuation("hello."), "hello");
+        assert_eq!(strip_trailing_punctuation("hello?"), "hello");
+        assert_eq!(strip_trailing_punctuation("hello!"), "hello");
+        assert_eq!(strip_trailing_punctuation("hello..."), "hello");
+        assert_eq!(strip_trailing_punctuation("hello"), "hello");
+        // Internal punctuation preserved
+        assert_eq!(strip_trailing_punctuation("owner/repo"), "owner/repo");
+        assert_eq!(strip_trailing_punctuation("what's up"), "what's up");
+        assert_eq!(strip_trailing_punctuation("pr#23"), "pr#23");
+    }
+
+    #[test]
+    fn test_looks_like_github_phrase() {
+        assert!(looks_like_github_phrase("the pr list"));
+        assert!(looks_like_github_phrase("pull requests"));
+        assert!(looks_like_github_phrase("the repo list"));
+        assert!(looks_like_github_phrase("open prs"));
+        assert!(looks_like_github_phrase("my prs"));
+        // Not github phrases
+        assert!(!looks_like_github_phrase("chrome"));
+        assert!(!looks_like_github_phrase("notepad"));
+        assert!(!looks_like_github_phrase("whatsapp"));
+        assert!(!looks_like_github_phrase("preview")); // "pr" inside word, not token
+        assert!(!looks_like_github_phrase("process"));
     }
 
     #[test]
@@ -3455,5 +4375,120 @@ mod tests {
         use crate::orchestrator::{route_intent, Subsystem};
         let intent = ParsedIntent::Search { query: "test".into() };
         assert_ne!(route_intent(&intent), Subsystem::GitHub);
+    }
+
+    // ─── Live mode intent parsing tests ─────────────────────────────
+
+    #[test]
+    fn test_parse_live_type_text() {
+        let result = parse_deterministic("type hello world");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, slots, .. } = result.unwrap().intent {
+            assert_eq!(intent, "type_text");
+            assert_eq!(slots["text"], "hello world");
+        } else {
+            panic!("expected NluResult for type_text");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_press_key() {
+        let result = parse_deterministic("press enter");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, slots, .. } = result.unwrap().intent {
+            assert_eq!(intent, "press_key");
+            assert_eq!(slots["key"], "enter");
+        } else {
+            panic!("expected NluResult for press_key");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_press_hotkey() {
+        let result = parse_deterministic("press ctrl a");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, slots, .. } = result.unwrap().intent {
+            assert_eq!(intent, "press_hotkey");
+            assert_eq!(slots["keys"][0], "ctrl");
+            assert_eq!(slots["keys"][1], "a");
+        } else {
+            panic!("expected NluResult for press_hotkey");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_send() {
+        let result = parse_deterministic("send");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+            assert_eq!(intent, "confirm_send");
+        } else {
+            panic!("expected NluResult for confirm_send");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_send_it() {
+        let result = parse_deterministic("send it");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+            assert_eq!(intent, "confirm_send");
+        } else {
+            panic!("expected NluResult for confirm_send");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_cancel() {
+        // "cancel" is handled by the greeting parser, not live mode
+        let result = parse_deterministic("cancel");
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap().intent, ParsedIntent::Greeting { .. }));
+    }
+
+    #[test]
+    fn test_parse_live_never_mind() {
+        // "never mind" is handled by the greeting parser, not live mode
+        let result = parse_deterministic("never mind");
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap().intent, ParsedIntent::Greeting { .. }));
+    }
+
+    #[test]
+    fn test_parse_live_new_tab() {
+        let result = parse_deterministic("new tab");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+            assert_eq!(intent, "browser_new_tab");
+        } else {
+            panic!("expected NluResult for browser_new_tab");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_open_new_tab() {
+        let result = parse_deterministic("open new tab");
+        assert!(result.is_some());
+        if let ParsedIntent::NluResult { intent, .. } = result.unwrap().intent {
+            assert_eq!(intent, "browser_new_tab");
+        } else {
+            panic!("expected NluResult for browser_new_tab");
+        }
+    }
+
+    #[test]
+    fn test_parse_live_does_not_interfere_with_open() {
+        // "open whatsapp" should still be OpenApp, not a live command
+        let result = parse_deterministic("open whatsapp");
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap().intent, ParsedIntent::OpenApp { .. }));
+    }
+
+    #[test]
+    fn test_parse_live_does_not_interfere_with_search() {
+        // "search for cats" should still be Search, not a live command
+        let result = parse_deterministic("search for cats");
+        assert!(result.is_some());
+        assert!(matches!(result.unwrap().intent, ParsedIntent::Search { .. }));
     }
 }

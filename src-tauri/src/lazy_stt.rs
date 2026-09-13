@@ -220,7 +220,7 @@ pub fn ensure_stt_running() {
             STT_STARTING.store(false, Ordering::SeqCst);
             tracing::error!(
                 "lazy_stt: no Python interpreter found. Install Python 3.12+ and run: \
-                 pip install faster-whisper fastapi uvicorn python-multipart"
+                 pip install moonshine-voice fastapi uvicorn python-multipart"
             );
             return;
         }

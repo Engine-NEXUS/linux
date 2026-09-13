@@ -37,6 +37,33 @@ struct PendingSidebar {
 
 static PENDING_SIDEBAR: Mutex<Option<PendingSidebar>> = Mutex::new(None);
 
+// ─── Pending PR list (race-free sidebar creation) ──────────────────────
+// Same pattern as PENDING_SIDEBAR: the orchestrator stores the PR list
+// result here before creating the sidebar window. The frontend calls
+// `get_pending_pr_list` on mount to fetch (and clear) the pending data.
+// This is race-free regardless of how long the WebView takes to load.
+static PENDING_PR_LIST: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+
+/// Store a pending PR list result (called from the orchestrator before
+/// creating the sidebar window). The frontend fetches this on mount.
+pub fn set_pending_pr_list(pr_list_json: serde_json::Value) {
+    let mut pending = PENDING_PR_LIST.lock().unwrap();
+    *pending = Some(pr_list_json);
+}
+
+/// IPC: Fetch pending PR list data (called by the PR list sidebar on mount).
+/// Returns the PR list JSON that was stored by the orchestrator, or null
+/// if no data is pending. Clears the pending data after returning.
+#[tauri::command]
+pub fn get_pending_pr_list() -> Result<Option<serde_json::Value>, String> {
+    let mut pending = PENDING_PR_LIST.lock().unwrap();
+    let data = pending.take();
+    if data.is_some() {
+        tracing::info!("pr-list: pending data fetched by frontend");
+    }
+    Ok(data)
+}
+
 /// IPC: open the setup window (called from tray menu "Settings…" or first launch).
 /// Creates the window on-demand if it doesn't exist (saves ~250 MB RAM at idle).
 #[tauri::command]
@@ -445,6 +472,13 @@ pub struct MeetingStatus {
 
 // ─── Response Sidebar window ─────────────────────────────────────────
 
+/// Pending backdrop for the settings sidebar — stored when the window is
+/// first shown, fetched by the frontend on mount (same pattern as
+/// PENDING_SIDEBAR for the response sidebar). This handles the race
+/// condition where the backdrop event is emitted before the React app
+/// has mounted and registered its event listener.
+static PENDING_SETTINGS_BACKDROP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// IPC: Show the response sidebar window (positioned at bottom-right).
 /// Called when a server response is incoming (n8n/Ollama/Hermes).
 /// Creates the sidebar window on-demand if it doesn't exist (saves ~250 MB RAM at idle).
@@ -496,7 +530,7 @@ pub async fn show_sidebar_with_content<R: Runtime>(
     }) {
         let scale = monitor.scale_factor();
         let screen = monitor.size();
-        let sidebar_w = 600i32;
+        let sidebar_w = 400i32;
         let sidebar_h = 1000i32;
         let phys_w = (sidebar_w as f64 * scale) as i32;
         let phys_h = (sidebar_h as f64 * scale) as i32;
@@ -643,7 +677,7 @@ fn capture_backdrop<R: Runtime>(
         let screen = monitor.size();
         // Read the ACTUAL window size — the wide sidebar is 900px, not 600px.
         let logical = win.inner_size().map(|s| s.to_logical::<f64>(scale)).unwrap_or(
-            tauri::LogicalSize::new(600.0, 1000.0)
+            tauri::LogicalSize::new(400.0, 1000.0)
         );
         let sidebar_w = logical.width;
         let sidebar_h = logical.height;
@@ -681,8 +715,17 @@ fn show_sidebar_inner<R: Runtime>(
     backdrop_already_captured: bool,
 ) -> Result<(), String> {
 
+    // Force the sidebar to the correct size in case the window was
+    // created with a different size from a previous build.
+    if let Ok(scale) = win.scale_factor() {
+        let _ = win.set_size(tauri::PhysicalSize::new(
+            (400.0 * scale) as i32,
+            (1000.0 * scale) as i32,
+        ));
+    }
+
     // Position at bottom-right of the screen, above the taskbar.
-    // Read the ACTUAL window size (logical) instead of hardcoding 600x1000 —
+    // Read the ACTUAL window size (logical) instead of hardcoding —
     // the wide sidebar is 900px and would otherwise be pushed off-screen.
     use tauri::PhysicalPosition;
     if let Ok(Some(monitor)) = win.current_monitor() {
@@ -690,7 +733,7 @@ fn show_sidebar_inner<R: Runtime>(
         let screen = monitor.size();
         // Get the window's actual logical size; fall back to 600x1000 if unavailable
         let logical = win.inner_size().map(|s| s.to_logical::<f64>(scale)).unwrap_or(
-            tauri::LogicalSize::new(600.0, 1000.0)
+            tauri::LogicalSize::new(400.0, 1000.0)
         );
         let sidebar_w = logical.width;
         let sidebar_h = logical.height;
@@ -729,7 +772,7 @@ fn show_sidebar_inner<R: Runtime>(
         if let Ok(Some(monitor)) = win.current_monitor() {
             let scale = monitor.scale_factor();
             let screen = monitor.size();
-            let sidebar_w = 600i32;
+            let sidebar_w = 400i32;
             let sidebar_h = 1000i32;
             let phys_w = (sidebar_w as f64 * scale) as i32;
             let phys_h = (sidebar_h as f64 * scale) as i32;
@@ -787,7 +830,7 @@ fn show_sidebar_inner<R: Runtime>(
                     if let Ok(Some(monitor)) = win_clone.current_monitor() {
                         let scale = monitor.scale_factor();
                         let screen = monitor.size();
-                        let sidebar_w = 600i32;
+                        let sidebar_w = 400i32;
                         let sidebar_h = 1000i32;
                         let phys_w = (sidebar_w as f64 * scale) as i32;
                         let phys_h = (sidebar_h as f64 * scale) as i32;
@@ -857,6 +900,290 @@ pub fn hide_sidebar<R: Runtime>(
     let _ = crate::dyn_windows::destroy_window(&app, "sidebar");
     let _ = crate::dyn_windows::destroy_window(&app, "architect-sidebar");
     Ok(())
+}
+
+// ─── PR List sidebar window ───────────────────────────────────────────
+
+/// IPC: Show the PR list sidebar window.
+/// Creates a 500x1000 transparent, always-on-top, non-activating window
+/// on the right edge of the screen. Shows the PR list with Merge and
+/// Analyse buttons. The window is created on-demand and destroyed when
+/// closed (frees ~250 MB of WebView2 processes).
+///
+/// Carbon copy of the response sidebar: captures the desktop backdrop,
+/// blurs it, emits `sidebar:backdrop`, and runs a 1 FPS live blur loop
+/// so the PR list has the same liquid-glass appearance.
+#[tauri::command]
+pub async fn show_pr_list_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let win = crate::dyn_windows::get_or_create_window(
+        &app,
+        crate::dyn_windows::WindowConfig::pr_list_sidebar(),
+    )?;
+
+    // Position at the right edge of the screen, vertically centered
+    use tauri::PhysicalPosition;
+    let mut capture_x = 0i32;
+    let mut capture_y = 0i32;
+    let mut capture_w = 500i32;
+    let mut capture_h = 1000i32;
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let scale = monitor.scale_factor();
+        let screen = monitor.size();
+        let win_w = 500i32;
+        let win_h = 1000i32;
+        let phys_w = (win_w as f64 * scale) as i32;
+        let phys_h = (win_h as f64 * scale) as i32;
+        let gap = (12.0 * scale) as i32;
+        let x = screen.width as i32 - phys_w - gap;
+        let y = (screen.height as i32 - phys_h) / 2; // vertically centered
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+        capture_x = x;
+        capture_y = y;
+        capture_w = phys_w;
+        capture_h = phys_h;
+    }
+
+    // ─── "Fake blur" backdrop capture (Windows only) ───────────────
+    // Capture the desktop behind the window BEFORE showing it, so we
+    // don't capture the sidebar itself. This matches the response sidebar.
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(data_uri) = crate::sidebar_backdrop::capture_and_blur(
+            capture_x, capture_y, capture_w, capture_h, 32.0,
+        ) {
+            tracing::info!("pr-list: backdrop captured ({} bytes)", data_uri.len());
+            let _ = app.emit("sidebar:backdrop", data_uri);
+        } else {
+            tracing::warn!("pr-list: backdrop capture failed");
+        }
+    }
+
+    win.show().map_err(|e| e.to_string())?;
+
+    // ─── Live blur loop (Windows only) ──────────────────────────────
+    // 1 FPS capture + change detection, matching the response sidebar.
+    #[cfg(target_os = "windows")]
+    {
+        static PR_LIVE_BLUR_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static PR_LAST_FRAME_HASH: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+        if !PR_LIVE_BLUR_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+            PR_LIVE_BLUR_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+            *PR_LAST_FRAME_HASH.lock().unwrap() = None;
+
+            let win_clone = win.clone();
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                while win_clone.is_visible().unwrap_or(false) {
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    if !win_clone.is_visible().unwrap_or(false) {
+                        break;
+                    }
+
+                    if let Ok(Some(monitor)) = win_clone.current_monitor() {
+                        let scale = monitor.scale_factor();
+                        let screen = monitor.size();
+                        let win_w = 500i32;
+                        let win_h = 1000i32;
+                        let phys_w = (win_w as f64 * scale) as i32;
+                        let phys_h = (win_h as f64 * scale) as i32;
+                        let gap = (12.0 * scale) as i32;
+                        let x = screen.width as i32 - phys_w - gap;
+                        let y = (screen.height as i32 - phys_h) / 2;
+
+                        let raw_bgra = match crate::sidebar_backdrop::capture_region_bgra_public(x, y, phys_w, phys_h) {
+                            Some(bgra) => bgra,
+                            None => continue,
+                        };
+
+                        let current_hash = crate::sidebar_backdrop::frame_hash(&raw_bgra);
+                        let mut prev_hash_guard = PR_LAST_FRAME_HASH.lock().unwrap();
+                        let should_emit = match *prev_hash_guard {
+                            Some(prev) => prev != current_hash,
+                            None => true,
+                        };
+                        *prev_hash_guard = Some(current_hash);
+                        drop(prev_hash_guard);
+
+                        if should_emit {
+                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg(&raw_bgra, phys_w, phys_h, 32.0) {
+                                let _ = app_clone.emit("sidebar:backdrop", data_uri);
+                            }
+                        }
+                    }
+                }
+
+                *PR_LAST_FRAME_HASH.lock().unwrap() = None;
+                PR_LIVE_BLUR_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// IPC: Hide (destroy) the PR list sidebar window.
+#[tauri::command]
+pub fn hide_pr_list_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let _ = crate::dyn_windows::destroy_window(&app, "pr-list-sidebar");
+    Ok(())
+}
+
+/// IPC: Show the settings sidebar (liquid-glass, 520x1000, always-on-top).
+/// Creates the window on-demand, positions it at the LEFT edge of the
+/// screen (vertically centered) so the orb is visible on the right while
+/// adjusting position. Captures the desktop backdrop for the blur effect
+/// and starts the live-blur loop. Same pattern as the other sidebars.
+#[tauri::command]
+pub async fn show_settings_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let win = crate::dyn_windows::get_or_create_window(
+        &app,
+        crate::dyn_windows::WindowConfig::settings_sidebar(),
+    )?;
+
+    // Update size in case the window already existed with a different size
+    let _ = win.set_size(tauri::PhysicalSize::new(
+        (520.0 * win.scale_factor().unwrap_or(1.0)) as i32,
+        (1000.0 * win.scale_factor().unwrap_or(1.0)) as i32,
+    ));
+
+    // Show the main orb window so the user can see it move while dragging
+    // the position sliders in the Display tab.
+    if let Some(orb) = app.get_webview_window("main") {
+        let _ = orb.show();
+    }
+
+    // Position at the LEFT edge of the screen, vertically centered.
+    // This keeps the right side of the screen free so the orb is visible
+    // while the user adjusts its position via the sliders.
+    use tauri::PhysicalPosition;
+    let mut capture_x = 0i32;
+    let mut capture_y = 0i32;
+    let mut capture_w = 520i32;
+    let mut capture_h = 1000i32;
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let scale = monitor.scale_factor();
+        let screen = monitor.size();
+        let win_w = 520i32;
+        let win_h = 1000i32;
+        let phys_w = (win_w as f64 * scale) as i32;
+        let phys_h = (win_h as f64 * scale) as i32;
+        let gap = (12.0 * scale) as i32;
+        let x = gap; // LEFT edge
+        let y = (screen.height as i32 - phys_h) / 2;
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+        capture_x = x;
+        capture_y = y;
+        capture_w = phys_w;
+        capture_h = phys_h;
+    }
+
+    // "Fake blur" backdrop capture (Windows only) — same as other sidebars.
+    // Store in PENDING_SETTINGS_BACKDROP so the frontend can fetch it on
+    // mount (the event would be lost if emitted before React loads).
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(data_uri) = crate::sidebar_backdrop::capture_and_blur(
+            capture_x, capture_y, capture_w, capture_h, 32.0,
+        ) {
+            tracing::info!("settings-sidebar: backdrop captured ({} bytes)", data_uri.len());
+            // Store for frontend to fetch on mount
+            *PENDING_SETTINGS_BACKDROP.lock().unwrap() = Some(data_uri.clone());
+            // Also emit (works if window already existed and React is loaded)
+            let _ = app.emit("sidebar:backdrop", data_uri);
+        } else {
+            tracing::warn!("settings-sidebar: backdrop capture failed");
+        }
+    }
+
+    win.show().map_err(|e| e.to_string())?;
+
+    // Live blur loop (Windows only) — 1 FPS capture + change detection.
+    #[cfg(target_os = "windows")]
+    {
+        static SETTINGS_LIVE_BLUR_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static SETTINGS_LAST_FRAME_HASH: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+        if !SETTINGS_LIVE_BLUR_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+            SETTINGS_LIVE_BLUR_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+            *SETTINGS_LAST_FRAME_HASH.lock().unwrap() = None;
+
+            let win_clone = win.clone();
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                while win_clone.is_visible().unwrap_or(false) {
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    if !win_clone.is_visible().unwrap_or(false) {
+                        break;
+                    }
+
+                    if let Ok(Some(monitor)) = win_clone.current_monitor() {
+                        let scale = monitor.scale_factor();
+                        let screen = monitor.size();
+                        let win_w = 520i32;
+                        let win_h = 1000i32;
+                        let phys_w = (win_w as f64 * scale) as i32;
+                        let phys_h = (win_h as f64 * scale) as i32;
+                        let gap = (12.0 * scale) as i32;
+                        let x = gap; // LEFT edge
+                        let y = (screen.height as i32 - phys_h) / 2;
+
+                        let raw_bgra = match crate::sidebar_backdrop::capture_region_bgra_public(x, y, phys_w, phys_h) {
+                            Some(bgra) => bgra,
+                            None => continue,
+                        };
+
+                        let current_hash = crate::sidebar_backdrop::frame_hash(&raw_bgra);
+                        let mut prev_hash_guard = SETTINGS_LAST_FRAME_HASH.lock().unwrap();
+                        let should_emit = match *prev_hash_guard {
+                            Some(prev) => prev != current_hash,
+                            None => true,
+                        };
+                        *prev_hash_guard = Some(current_hash);
+                        drop(prev_hash_guard);
+
+                        if should_emit {
+                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg(&raw_bgra, phys_w, phys_h, 32.0) {
+                                let _ = app_clone.emit("sidebar:backdrop", data_uri);
+                            }
+                        }
+                    }
+                }
+
+                *SETTINGS_LAST_FRAME_HASH.lock().unwrap() = None;
+                SETTINGS_LIVE_BLUR_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// IPC: Hide (destroy) the settings sidebar window.
+#[tauri::command]
+pub fn hide_settings_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let _ = crate::dyn_windows::destroy_window(&app, "settings-sidebar");
+    Ok(())
+}
+
+/// IPC: Fetch the pending settings backdrop (called by the frontend on mount).
+/// Returns the blurred desktop image as a data URI, or null if none pending.
+/// Clears the pending data after returning. This handles the race condition
+/// where the backdrop is captured before the React app has mounted.
+#[tauri::command]
+pub fn get_pending_settings_backdrop() -> Result<Option<String>, String> {
+    let mut pending = PENDING_SETTINGS_BACKDROP.lock().unwrap();
+    Ok(pending.take())
 }
 
 // ─── Loading indicator window ────────────────────────────────────────
@@ -975,6 +1302,22 @@ pub struct NexusSettings {
     /// Default: en-US-AvaNeural. See full list at Microsoft Speech docs.
     #[serde(default = "default_edge_tts_voice")]
     pub edge_tts_voice: String,
+    /// Orb horizontal position as percentage (0.0 = left, 0.5 = center, 1.0 = right).
+    /// Default 0.5 (center). Saved to settings.json, persists across restarts.
+    #[serde(default = "default_orb_horizontal_pct")]
+    pub orb_horizontal_pct: f64,
+    /// Orb vertical position as percentage (0.0 = top, 1.0 = bottom).
+    /// Default 1.0 (bottom). Saved to settings.json, persists across restarts.
+    #[serde(default = "default_orb_vertical_pct")]
+    pub orb_vertical_pct: f64,
+    /// Orb window size in pixels (100-300).
+    /// Default 200. Saved to settings.json, persists across restarts.
+    #[serde(default = "default_orb_size")]
+    pub orb_size: u32,
+    /// Gemini API key for Google Gemini models.
+    /// When empty, Gemini features are unavailable.
+    #[serde(default)]
+    pub gemini_api_key: String,
 }
 
 fn default_tts_provider() -> String {
@@ -987,6 +1330,18 @@ fn default_tts_volume() -> u8 {
 
 fn default_edge_tts_voice() -> String {
     "en-US-AvaNeural".to_string()
+}
+
+fn default_orb_horizontal_pct() -> f64 {
+    0.5
+}
+
+fn default_orb_vertical_pct() -> f64 {
+    1.0
+}
+
+fn default_orb_size() -> u32 {
+    200
 }
 
 impl Default for NexusSettings {
@@ -1013,8 +1368,79 @@ impl Default for NexusSettings {
             tts_volume: 75,
             groq_api_key: String::new(),
             edge_tts_voice: "en-US-AvaNeural".to_string(),
+            orb_horizontal_pct: 0.5,
+            orb_vertical_pct: 1.0,
+            orb_size: 200,
+            gemini_api_key: String::new(),
         }
     }
+}
+
+/// TTS voice metadata returned by `list_tts_voices`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtsVoiceInfo {
+    pub id: String,
+    pub name: String,
+    pub gender: String,
+    pub provider: String,
+    pub language: String,
+}
+
+/// IPC: List all available TTS voices (Edge TTS cloud + Piper local).
+/// Returns a curated list of en-US voices. The full Edge TTS catalog has
+/// 400+ voices across 140+ locales — we surface the most useful en-US ones
+/// to keep the settings UI manageable.
+#[tauri::command]
+pub fn list_tts_voices() -> Result<Vec<TtsVoiceInfo>, String> {
+    let edge_voices = [
+        ("en-US-AvaNeural",        "Ava",       "Female"),
+        ("en-US-AndrewNeural",     "Andrew",    "Male"),
+        ("en-US-AndrewMultilingualNeural", "Andrew ML", "Male"),
+        ("en-US-EmmaNeural",       "Emma",      "Female"),
+        ("en-US-BrianNeural",      "Brian",     "Male"),
+        ("en-US-ChristopherNeural","Christopher","Male"),
+        ("en-US-EricNeural",       "Eric",      "Male"),
+        ("en-US-GuyNeural",        "Guy",       "Male"),
+        ("en-US-JennyNeural",      "Jenny",     "Female"),
+        ("en-US-MichelleNeural",   "Michelle",  "Female"),
+        ("en-US-RogerNeural",      "Roger",     "Male"),
+        ("en-US-SteffanNeural",    "Steffan",   "Male"),
+        ("en-US-AriaNeural",       "Aria",      "Female"),
+        ("en-US-DavisNeural",      "Davis",     "Male"),
+        ("en-US-NancyNeural",      "Nancy",     "Female"),
+        ("en-US-SaraNeural",       "Sara",      "Female"),
+        ("en-US-NoraNeural",       "Nora",      "Female"),
+        ("en-US-AmberNeural",      "Amber",     "Female"),
+        ("en-US-AshleyNeural",     "Ashley",    "Female"),
+        ("en-US-BrandonNeural",    "Brandon",   "Male"),
+        ("enUS-CoraNeural",        "Cora",      "Female"),
+        ("en-US-ElizabethNeural",  "Elizabeth", "Female"),
+        ("en-US-MonicaNeural",     "Monica",    "Female"),
+        ("en-US-SoniaNeural",      "Sonia",     "Female"),
+    ];
+
+    let mut voices: Vec<TtsVoiceInfo> = edge_voices
+        .iter()
+        .map(|(id, name, gender)| TtsVoiceInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            gender: gender.to_string(),
+            provider: "edge-tts".to_string(),
+            language: "en-US".to_string(),
+        })
+        .collect();
+
+    // Add local Piper voice (always available offline)
+    voices.push(TtsVoiceInfo {
+        id: "piper-amy".to_string(),
+        name: "Amy (Offline)".to_string(),
+        gender: "Female".to_string(),
+        provider: "piper".to_string(),
+        language: "en-US".to_string(),
+    });
+
+    Ok(voices)
 }
 
 /// IPC: Get the current settings (merged with defaults for missing fields).
@@ -1113,7 +1539,7 @@ pub fn save_settings<R: Runtime>(
 
 /// Read the Groq API key from settings.json (non-IPC helper for stt.rs).
 /// Returns empty string if no key is set or settings file doesn't exist.
-pub fn read_groq_api_key(app: &tauri::AppHandle) -> String {
+pub fn read_groq_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
     let dir = app.path().app_data_dir();
     let Ok(dir) = dir else { return String::new(); };
     let path = dir.join("settings.json");
@@ -1131,7 +1557,7 @@ pub fn read_groq_api_key(app: &tauri::AppHandle) -> String {
 /// Read the localSttOnly flag from settings.json (non-IPC helper for stt.rs).
 /// Returns true if the user has enabled "Local STT only" (privacy mode —
 /// audio never leaves the device). Returns false if not set or file missing.
-pub fn read_local_stt_only(app: &tauri::AppHandle) -> bool {
+pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
     let dir = app.path().app_data_dir();
     let Ok(dir) = dir else { return false; };
     let path = dir.join("settings.json");
@@ -1415,5 +1841,16 @@ pub fn pause_wakeword() -> Result<(), String> {
 #[tauri::command]
 pub fn resume_wakeword() -> Result<(), String> {
     crate::wakeword_oww::resume_stream();
+    Ok(())
+}
+
+/// Start Rust-side STT capture from the cpal stream.
+/// Called by the frontend when the user wakes NEXUS or when retrying
+/// after an empty transcript. The cpal stream captures audio directly —
+/// no getUserMedia, no baton pass. This fixes the Intel SST driver issue
+/// where getUserMedia returns silence but cpal is still working.
+#[tauri::command]
+pub fn start_stt_capture() -> Result<(), String> {
+    crate::wakeword_oww::start_stt_capture();
     Ok(())
 }

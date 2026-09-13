@@ -280,28 +280,36 @@ function AudioTab({ settings, update }: { settings: Settings; update: <K extends
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Assistant Voice</span>
-            <span className="nx-row-hint">Curated AI persona voice for spoken answers</span>
+            <span className="nx-row-hint">Cloud TTS (Edge TTS) — free, 0 MB RAM. Falls back to Piper (local) when network is down.</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <select
               className="nx-select"
-              value={settings.ttsVoice}
-              onChange={(e) => update("ttsVoice", e.target.value)}
+              value={settings.edgeTtsVoice || "en-US-AvaNeural"}
+              onChange={(e) => {
+                update("edgeTtsVoice", e.target.value);
+                update("ttsVoice", e.target.value);
+              }}
             >
               {CURATED_VOICES.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.name} ({v.accent})
                 </option>
               ))}
-              <option value="default">System Default (Local)</option>
+              <option value="en-US-EmmaMultilingualNeural">Emma (Female, professional)</option>
+              <option value="en-US-DavisNeural">Davis (Male, calm)</option>
+              <option value="en-US-JennyNeural">Jenny (Female, friendly)</option>
+              <option value="en-US-AriaNeural">Aria (Female, expressive)</option>
+              <option value="en-US-AndrewNeural">Andrew (Male, warm)</option>
+              <option value="en-US-BrandonNeural">Brandon (Male, casual)</option>
             </select>
             <button
               type="button"
               className="nx-btn"
               style={{ padding: "6px 12px", fontSize: "var(--nx-text-xs)" }}
-              onClick={() => handlePreview(settings.ttsVoice)}
+              onClick={() => handlePreview(settings.edgeTtsVoice || "en-US-AvaNeural")}
             >
-              {playingVoice === settings.ttsVoice ? "⏹ Stop" : "▶ Play Sample"}
+              {playingVoice === (settings.edgeTtsVoice || "en-US-AvaNeural") ? "⏹ Stop" : "▶ Play Sample"}
             </button>
           </div>
         </div>
@@ -536,26 +544,26 @@ function BackendTab({ settings, update, connected }: { settings: Settings; updat
       </section>
 
       <section className="nx-section">
-        <div className="nx-section-title">Cloud TTS (edge-tts)</div>
+        <div className="nx-section-title">TTS Engine Status</div>
         <div className="nx-row">
           <div className="nx-row-label">
-            <span className="nx-row-name">Voice</span>
-            <span className="nx-row-hint">Microsoft Neural voice (free, no API key needed)</span>
+            <span className="nx-row-name">Primary Engine</span>
+            <span className="nx-row-hint">Edge TTS (Microsoft Neural, cloud, free)</span>
           </div>
-          <select
-            className="nx-input"
-            value={settings.edgeTtsVoice || "en-US-AvaNeural"}
-            onChange={(e) => update("edgeTtsVoice", e.target.value)}
-          >
-            <option value="en-US-AvaNeural">Ava (Female, warm)</option>
-            <option value="en-US-EmmaMultilingualNeural">Emma (Female, professional)</option>
-            <option value="en-US-GuyNeural">Guy (Male, natural)</option>
-            <option value="en-US-DavisNeural">Davis (Male, calm)</option>
-            <option value="en-US-JennyNeural">Jenny (Female, friendly)</option>
-            <option value="en-US-AriaNeural">Aria (Female, expressive)</option>
-            <option value="en-US-AndrewNeural">Andrew (Male, warm)</option>
-            <option value="en-US-BrandonNeural">Brandon (Male, casual)</option>
-          </select>
+          <span className="nx-status-indicator">
+            <span className="nx-status-dot nx-status-dot--ok" />
+            Active
+          </span>
+        </div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Fallback Engine</span>
+            <span className="nx-row-hint">Piper (local ONNX, ~80 MB RAM) — used when network is down, unloaded after 10 min recovery</span>
+          </div>
+          <span className="nx-status-indicator">
+            <span className="nx-status-dot nx-status-dot--ok" />
+            Standby
+          </span>
         </div>
         <div className="nx-row">
           <div className="nx-row-label">
