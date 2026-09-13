@@ -5,6 +5,52 @@
 
 ---
 
+## BERT-Mini Dataset and Model Deep Audit (2026-09-14)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-14 | fix(nlu): repair slot loss, tokenizer-offset alignment, conflicts, leakage, corrupt ASR rows, and complete test coverage | [BERT-Mini audit](../research/nlu-model-and-dataset-deep-audit-2026-09-14.md) |
+| — | 2026-09-14 | feat(nlu): add `nexus audit`, machine-readable report, canonical dataset repair, post-training quality audit, and 0.85 confidence gate | [Latest audit](../research/nlu-model-data-audit-latest.md) |
+| — | 2026-09-14 | docs(testing): add permanent NLU future-testing, model-promotion, and rollback playbook | [Testing playbook](../testing/nlu-future-testing-and-model-promotion-playbook.md) |
+
+## NLU Training Pipeline + Voice Collection + Auto-Cleanup (2026-09-12)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-12 | feat(nlu): `nexus collect` — interactive voice sample collector with Groq auto-load | [33-nlu-training-voice-collection-cleanup.md](./33-nlu-training-voice-collection-cleanup.md) |
+| — | 2026-09-12 | feat(nlu): `nexus train` — 7-step pipeline with auto-cleanup of temp files | [33-nlu-training-voice-collection-cleanup.md](./33-nlu-training-voice-collection-cleanup.md) |
+| — | 2026-09-12 | feat(nlu): expand synthetic data generator (478 → 1097 examples + 58 negative examples) | [33-nlu-training-voice-collection-cleanup.md](./33-nlu-training-voice-collection-cleanup.md) |
+| — | 2026-09-12 | docs(nlu): complete training guide (1100+ lines) + change log | [33-nlu-training-voice-collection-cleanup.md](./33-nlu-training-voice-collection-cleanup.md), [51-nlu-training-and-voice-collection.md](../features/51-nlu-training-and-voice-collection.md) |
+
+## Admin Brain + PR-List + STT Capture + TTS Fallback + NLU Expansion (2026-09-05 → 2026-09-06)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| `d780ff4` | 2026-09-06 | fix(brain+stt): try brain before NLU + upgrade STT to base.en + admin config path | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `04fd346` | 2026-09-06 | fix(brain+parser): enable admin-brain in builds + fuzzy list fallback | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `fcea326` | 2026-09-06 | fix(stt): capture audio from cpal stream directly — bypass getUserMedia | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `9999856` | 2026-09-06 | feat(pr-analysis): structured 4-section output — impact, bugs, stats, merge conflicts | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `4fc8bce` | 2026-09-06 | fix(pr-list): match sidebar height to 1000px | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `2ff4814` | 2026-09-05 | feat(pr-list): voice-driven PR list sidebar with Merge + Analyse buttons | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `103faf4` | 2026-09-05 | fix(mic): silence-recovery skips restart during baton pass + STT corrections | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `0122ee7` | 2026-09-05 | fix(brain): wire up complete training pipeline — 6 broken links fixed | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `f502910` | 2026-09-05 | perf(parser): cache all regexes + add 8 missing command patterns (177× faster) | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `050ef82` | 2026-09-05 | fix(tts): use cloud Edge TTS as primary, Piper only when network is down | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `894f1f5` | 2026-09-05 | feat(brain): negative training + verbal 'wrong' feedback + execution failure reporting | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `efc6416` | 2026-09-05 | feat(brain): admin isolation + compile-time gate + lazy_brain + negative training | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `ba58d4a` | 2026-09-05 | feat(brain): wire brain monitor into transcript pipeline + auto-retrain script | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `9454e3d` | 2026-09-05 | feat(brain): Qwen 0.5B brain server + pronunciation learning + auto-train monitor | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+| `9b3f983` | 2026-09-05 | feat(nlu): expand intent labels 7→46 + seed 2185 balanced examples | [32-brain-prlist-stt-tts-overhaul.md](./32-brain-prlist-stt-tts-overhaul.md) |
+
+## Central Orchestrator + GitHub OAuth + Sub-Command System (2026-09-04)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| `c22f6a3` | 2026-09-04 | feat(github): add typed GitHub sub-command system (Phase 2A) | [31-github-subcommand-system.md](./31-github-subcommand-system.md) |
+| `a5005bd` | 2026-09-04 | fix(github): wire conflict panel + confirmation flow | [31-github-subcommand-system.md](./31-github-subcommand-system.md) |
+| `d2a802f` | 2026-09-04 | docs: add architecture, feature, and changelog docs for orchestrator + OAuth | [29-central-orchestrator.md](./29-central-orchestrator.md), [30-github-oauth-fix.md](./30-github-oauth-fix.md) |
+| `ac0373b` | 2026-09-04 | feat: add central orchestrator module in Rust | [29-central-orchestrator.md](./29-central-orchestrator.md) |
+
 ## Voice Pipeline Performance + Native App Resolution (2026-08-23)
 
 | Commit | Date | Summary | Details |

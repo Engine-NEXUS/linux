@@ -1341,6 +1341,8 @@ pub fn reset_grace_period() {
 
 /// Mock-wake stubs for non-OWW builds.
 #[cfg(feature = "mock-wake")]
+pub fn start_stt_capture() {}
+#[cfg(feature = "mock-wake")]
 pub fn pause_stream() {}
 #[cfg(feature = "mock-wake")]
 pub fn resume_stream() {}

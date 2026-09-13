@@ -13,6 +13,8 @@ target/
 # Contains: brain_server.py, Qwen GGUF model (398MB), pronunciation map,
 # gaps/approved/rejected training data, admin config.
 server/admin/
+src-tauri/server/admin/
+server/nlu/audit_report.json
 
 # Reference repo for Windows 11 Start Menu theme research (liquidglass, aero, etc.)
 # Cloned from https://github.com/ramensoftware/windows-11-start-menu-styling-guide

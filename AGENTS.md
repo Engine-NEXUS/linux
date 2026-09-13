@@ -1,5 +1,198 @@
 # NEXUS — Project Notes
 
+## Diagnostic Fixes — 2026-09-12
+
+### NLU Server ONNX Export (build integration)
+
+The BERT-Mini retraining produced `best_model.pt` but the ONNX export step
+was missing. The NLU server requires `nexus_nlu.onnx` to start — without
+it, `sys.exit(1)` and every unparseable command blocked for 30s.
+
+**Fix:** `nexus.mjs` now calls `syncNluModel()` before every build. This
+copies the ONNX model, `labels.json`, and tokenizer from
+`server/nlu/model/` to `src-tauri/resources/server/nlu/model/` so the
+Tauri installer bundles the latest trained model automatically.
+
+**`tauri.conf.json` resources** now includes `labels.json`:
+```json
+"resources/server/nlu/model/labels.json"
+```
+
+**To retrain and bundle:**
+```bash
+cd server/nlu
+python train.py           # trains → best_model.pt
+python export_onnx.py    # exports → nexus_nlu.onnx (max_length=64)
+# Then: nexus build      # syncs model to resources + bundles in installer
+```
+
+### NLU Training Commands (`nexus train` + `nexus collect` + `nexus audit`)
+
+**`nexus train`** performs cleaning, generation, merge, canonical conflict/slot/leakage repair, BERT-Mini training, stable ONNX export, resource sync, post-training audit, and temporary-file cleanup.
+
+```bash
+nexus train                    # full pipeline (with audit + cleanup)
+nexus train --clean-only       # just clean the dataset
+nexus train --skip-train       # data generation/repair without training
+nexus train --keep-temp        # keep generated data and checkpoint (~17 MB)
+```
+
+**`nexus audit`** validates both data and model quality:
+
+```bash
+nexus audit                    # structural checks + ONNX evaluation
+nexus audit --dataset-only     # structural checks only
+```
+
+It writes `server/nlu/audit_report.json` and `docs/research/nlu-model-data-audit-latest.md`.
+
+**`nexus collect`** prompts for 23 intent families, waits for Enter, records two seconds, transcribes with Groq/Moonshine, and requires save/retry/edit/skip/end review before adding a sample.
+
+```bash
+nexus collect
+nexus collect --intent type_text
+nexus collect --count 20
+nexus collect --text-only
+nexus collect --list
+```
+
+Output: `server/admin/data/collected_samples.jsonl` (gitignored, admin-only). `nexus train` merges approved samples and then deletes the temporary collection file unless `--keep-temp` is supplied.
+
+Requirements: working microphone and `sounddevice`/`numpy`/`scipy` (auto-installed). Groq is auto-loaded from NEXUS settings; local STT is the fallback.
+
+### NLU Server Startup Cooldown
+
+Was: 30s wait per failed startup, no cooldown → "loading non stop".
+Now: 15s timeout + 60s cooldown after failure. If the NLU server can't
+start (missing model, missing deps), it won't block subsequent commands.
+
+### Brain Server Non-Blocking Spawn
+
+Was: `ensure_brain_running()` blocked for 12s while Qwen loaded.
+Now: spawns process + background thread. First command falls back to
+NLU/deterministic while brain loads in background.
+
+### Wake Word Grace Period (10s after restart)
+
+Was: 5s grace period after stream restart. Intel SST driver produces
+transient audio bursts 5-10s after restart that false-trigger the model.
+Now: 10s grace period. See `wakeword_oww.rs::detect_chunk()`.
+
+### NLU Model Dimension Fix
+
+The ONNX export used `max_length=32` but the server tokenizes with
+`max_length=64` (MAX_LEN). Fixed `export_onnx.py` to use `max_length=64`.
+
+### Live-Mode Intent Mapping
+
+`nlu_client.rs` now maps all 11 live-mode intents to `NluResult`:
+`type_text`, `press_key`, `press_hotkey`, `confirm_send`, `cancel_action`,
+`browser_new_tab`, `browser_navigate`, `browser_search`,
+`whatsapp_open`, `whatsapp_search`, `focus_app`.
+
+### Known Issue: NLU Model Accuracy
+
+The current model has low accuracy (5-9% confidence) because the
+training dataset (`dataset.json`) contains malformed intent labels
+from the previous merge (e.g., `OpenArchitect` instead of
+`open_architect`, debug objects as intent labels). The deterministic
+parser handles most commands correctly — the NLU is a fallback only.
+**To fix:** clean the dataset labels, retrain, re-export ONNX, rebuild.
+
+## Live Mode — Phase 1 Implementation (2026-09-11)
+
+**Live mode is the always-listening, STT-only, full-laptop control
+capability.** It adds keyboard simulation, WhatsApp full flow, browser
+navigation, window focus, and a state machine for sequential commands.
+
+### New Dependencies
+
+```toml
+enigo = "0.5"     # Cross-platform keyboard/mouse simulation
+arboard = "3.4"   # Clipboard for paste-text pattern (avoids autocomplete corruption)
+```
+
+### New Module: `src-tauri/src/live/`
+
+| File | Purpose |
+|------|---------|
+| `mod.rs` | Module root, LiveResult, LiveIntent, 14 Tauri commands |
+| `state.rs` | State machine (Idle → AppOpen → ChatActive → TextTyped) |
+| `safety.rs` | Whitelist, denylist, confirmation gates |
+| `commands/keyboard.rs` | Type text, press keys, hotkey combos, clipboard paste |
+| `commands/whatsapp.rs` | Open → search contact → type → send (with confirmation) |
+| `commands/browser.rs` | New tab, navigate, search, open site by name |
+| `commands/window.rs` | Window focus with AttachThreadInput trick (Windows) |
+
+### New Tauri Commands (14)
+
+`live_type_text`, `live_press_key`, `live_press_hotkey`,
+`live_whatsapp_open`, `live_whatsapp_search`, `live_whatsapp_send`,
+`live_whatsapp_type_message`, `live_browser_new_tab`,
+`live_browser_navigate`, `live_browser_search`, `live_open_site`,
+`live_focus_app`, `live_cancel`, `live_get_state`
+
+### New Intent Parser Patterns
+
+- `type <text>` → type_text
+- `press <key>` → press_key
+- `press <key1> <key2>` → press_hotkey
+- `send` / `send it` → confirm_send
+- `stop` → cancel_action
+- `new tab` / `open new tab` → browser_new_tab
+
+### Safety Layer
+
+- **Whitelist:** Only allowed tools can execute (type_text, press_key,
+  open_app, whatsapp_send, etc.)
+- **Denylist:** Banking apps, password managers, crypto wallets are blocked
+  (1password, bitwarden, bank, paypal, coinbase, metamask, etc.)
+- **Confirmation gates:** `whatsapp_send` and `confirm_send` always require
+  user confirmation before execution
+
+### State Machine
+
+The state machine tracks context across sequential voice commands:
+```
+Idle → AppOpen { app } → ChatActive { app, contact } → TextTyped { app, contact, text }
+```
+Auto-resets to Idle after 30s of silence.
+
+### Clipboard Paste Pattern (from OpenDex)
+
+For text > 50 chars, uses clipboard paste (Ctrl+V) instead of
+character-by-character typing. This avoids autocomplete corruption in
+WhatsApp/search boxes. Previous clipboard contents are restored after
+pasting.
+
+### Window Focus: AttachThreadInput Trick (from ghost-hands)
+
+`SetForegroundWindow` silently fails from background processes on Windows.
+The workaround: attach our input queue to the foreground thread's using
+`AttachThreadInput`, call `SetForegroundWindow`, then detach.
+
+### NLU Model Update
+
+**New intents:** 47 → 58 (added 11 live-mode intents)
+**New training examples:** 1,960 → 2,438 (+478 new examples)
+**New slot types:** `B-text`, `I-text`, `B-key`, `I-key`, `B-keys`,
+`I-keys`, `B-target`, `I-target`
+
+To retrain:
+```bash
+cd server/nlu
+python generate_live_data.py     # generate new examples
+python merge_live_data.py         # merge into dataset.json
+python train.py                   # retrain BERT-Mini
+```
+
+### Test Results
+
+- 323 Rust tests pass (29 new live-mode tests)
+- `cargo check` clean, 0 warnings
+- 18 live-mode unit tests (state, safety, keyboard, browser)
+- 11 live-mode intent parser tests
+
 ## Multi-Worker Optimization — Cloud-First Architecture (2026-09-01)
 
 **Single Worker, internally modularized.** No separate Workers — one deploy,
@@ -71,31 +264,62 @@ tests covering quota, cache keys, search question detection, and dedup.
 **Rust test suite:** `cargo test --test offline_commands` runs 10 tests
 for close_app and whatsapp_chat parsing.
 
-## STT Architecture — faster-whisper Python Sidecar (2026-08-31)
+## STT Architecture — Groq Primary + Moonshine Fallback (2026-09-06)
 
-**STT uses faster-whisper tiny.en via a lazy-started Python sidecar.**
+**STT uses Groq Whisper Large v3 Turbo (cloud) as primary, with Moonshine
+Small Streaming (local) as fallback when network is unavailable.**
 
-The STT server (`server/stt_server.py`) runs on `127.0.0.1:39217` and is
-started lazily by `src-tauri/src/lazy_stt.rs` when the wake word or hotkey
-fires. This was the working architecture before the Moonshine experiment
-and has been restored because Moonshine Tiny (39M params) produced garbage
-transcripts on real speech.
+### Primary: Groq Cloud STT
+- **Model:** `whisper-large-v3-turbo` (809M params, cloud, ~247ms latency)
+- **Free tier:** 20 RPM, 2,000 RPD, 28,800 audio sec/day, 25MB file limit
+- **Code:** `src-tauri/src/stt_groq.rs` — sends WAV as multipart to
+  `https://api.groq.com/openai/v1/audio/transcriptions`
+- **Config:** `localSttOnly: false` in settings.json + valid `groqApiKey`
+- **Fallback trigger:** network error, 429 rate limit, 401 auth error,
+  or any Groq API error → falls back to local Moonshine
 
-- **Files:** `src-tauri/src/stt.rs` (HTTP proxy), `src-tauri/src/lazy_stt.rs`
-  (lazy manager), `server/stt_server.py` (Python server)
-- **Model:** faster-whisper `tiny.en` (auto-downloads from HuggingFace on
-  first transcription, ~40MB)
+### Fallback: Moonshine Local STT (replaces faster-whisper)
+- **Model:** Moonshine Small Streaming (123M params, 7.84% WER, ~165ms CPU)
+- **Engine:** `moonshine-voice` Python package (ONNX Runtime, no PyTorch)
+- **Code:** `server/stt_server.py` — FastAPI server on `127.0.0.1:39217`
 - **Port:** 39217 (`POST /transcribe`, `GET /health`)
 - **Audio format:** multipart/form-data with WAV (16kHz, mono, 16-bit PCM)
-- **Latency:** ~0.5s per transcription after model load; first call ~10-15s
-  (model loading). `stt.rs` waits up to 20s for the server to be ready.
-- **Hotwords:** built-in list + dynamic file at
-  `%APPDATA%/com.nexus.assistant/stt_hotwords.txt`
-- **Hallucination filter:** applied in `stt.rs` — catches
-  "thank you for watching", < 2 alphabetic chars, etc.
-- **Idle timeout:** server killed after 5 min of no requests (saves ~340MB RAM)
+- **Latency:** ~165ms per transcription after model load; first call ~2s
+  (model loading). Model loads in ~1.8s at startup.
+- **RAM:** ~150-300MB (model + runtime)
+- **Idle timeout:** server killed after 5 min of no requests (saves RAM)
 - **Installer:** server files bundled in `resources/server/` via Tauri
   resources config. Production path: `exe_dir/resources/server/stt_server.py`.
+- **Requirements:** `pip install moonshine-voice fastapi uvicorn python-multipart`
+- **Model download:** automatic on first run via `get_model_for_language("en")`
+- **Config:** `MOONSHINE_MODEL` env var (default: `small_streaming`)
+  Options: `tiny_streaming` (34M, 12% WER), `small_streaming` (123M, 7.84%),
+  `medium_streaming` (245M, 6.65%)
+
+### Why Moonshine over faster-whisper
+- Moonshine Small (123M) has 7.84% WER vs Whisper tiny.en's ~18%
+- Moonshine is 10-100x faster than Whisper for real-time speech
+- Moonshine uses ONNX Runtime (same as wake word engine)
+- Moonshine is designed for voice command recognition (streaming, low latency)
+- Moonshine MIT license, no restrictions
+
+### Routing logic (`src-tauri/src/stt.rs`)
+```
+if localSttOnly:
+    → local Moonshine (privacy mode, audio never leaves device)
+elif groq_key available:
+    → try Groq cloud first
+    → on error/timeout/429: fall back to local Moonshine
+else:
+    → local Moonshine directly
+```
+
+### Historical: faster-whisper era (pre-2026-09-06)
+The previous architecture used faster-whisper `tiny.en` (39M params, ~18% WER)
+via a Python sidecar. It was replaced by Moonshine Small Streaming which has
+2.3x better accuracy (7.84% vs 18% WER) at similar RAM and faster latency.
+- **Hallucination filter:** applied in `stt.rs` — catches
+  "thank you for watching", < 2 alphabetic chars, etc.
 
 ## NLU Server — Lazy Python Sidecar (2026-08-31)
 
