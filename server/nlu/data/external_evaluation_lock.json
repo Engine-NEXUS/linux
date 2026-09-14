@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "benchmarks": [
+    {
+      "id": "clinc150_oos_test",
+      "path": "server/nlu/data/evaluation/clinc150_oos_test.jsonl",
+      "rows": 984,
+      "sha256": "4b558b9847f9386fefe3267ef1c751ef91ddc7d2e99b345fad4eea6c955add93",
+      "never_train": true,
+      "source_dataset_sha256": "36923c3705a59e08fe9c3883d8bc2dd966ef93e22cb78ac41171782a698d56e0"
+    },
+    {
+      "id": "clinc150_oos_reviewed_test",
+      "path": "server/nlu/data/evaluation/clinc150_oos_reviewed_test.jsonl",
+      "rows": 852,
+      "sha256": "df631459aaaaaba9dfbedb86b78e5f4915677abe5abba0e0aad8400fa337e042",
+      "never_train": true,
+      "mapping_version": "clinc-nexus-capability-v1"
+    },
+    {
+      "id": "clinc150_supported_mappings",
+      "path": "server/nlu/data/evaluation/clinc150_supported_mappings.jsonl",
+      "rows": 5,
+      "sha256": "ee117a88a7585b2c754a64ff33fa867de7a49ac069ecc96139814338df634844",
+      "never_train": true,
+      "mapping_version": "clinc-nexus-capability-v1"
+    }
+  ]
+}
