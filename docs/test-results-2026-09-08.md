@@ -70,7 +70,7 @@ GET /oauth/status?user_id=user_f9b8689fdffc444e81ee275c602eb1a3
 ### GitHub Token Retrieval
 ```
 GET /oauth/github-token?user_id=user_f9b8689fdffc444e81ee275c602eb1a3
-→ {"token":"***REVOKED***"}
+→ {"token":"ghu_************************************"}
 ```
 **Status: PASS — token is returned despite `expired=true` flag**
 

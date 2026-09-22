@@ -185,7 +185,7 @@ NEXUS already supports Fish Audio! The code is in `frontend/src/audio/ttsPlayer.
 
 ### The problem with the current setup
 
-1. **Gemini Flash TTS is the default** but uses a hardcoded API key (`AQ.Ab8RN6IQHjANZWrQJn2AgOee37Sqln_aYlEOJUraqW1L54Lkug`) — this is a free Google AI key with strict rate limits. It will stop working eventually.
+1. **Gemini Flash TTS is the default** but uses a free Google AI key with strict rate limits (`<GEMINI_API_KEY>`). It will stop working eventually.
 2. **Fish Audio uses `s2.1-pro` (paid)** — costs $15/M bytes. Should use `s2.1-pro-free` instead.
 3. **ElevenLabs requires a paid plan** ($5/mo minimum for API access).
 4. **Web Speech is the fallback** — works offline but sounds robotic.
