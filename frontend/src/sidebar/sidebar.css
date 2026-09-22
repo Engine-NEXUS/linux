@@ -36,21 +36,11 @@
   --apple-border-strong:   rgba(255, 255, 255, 0.16);
   --apple-focus-ring:      #fa586a;
 
-  /* ── Liquid Glass Parameters ─────────────────────────────────── */
-  /* Specular edge sheen intensity — how bright the rim light is */
-  --lg-sheen-opacity: 0.35;
-  /* Edge highlight width */
-  --lg-rim-width: 1.5px;
-
-  /* Rich Category Gradients */
-  --gradient-crimson: linear-gradient(135deg, #e52d27 0%, #b31217 100%);
-  --gradient-sunset:  linear-gradient(135deg, #ff9966 0%, #ff5e62 100%);
-  --gradient-royal:   linear-gradient(135deg, #2b5876 0%, #4e4376 100%);
-  --gradient-purple:  linear-gradient(135deg, #8e2de2 0%, #4a00e0 100%);
-  --gradient-emerald: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-  --gradient-amber:   linear-gradient(135deg, #f7971e 0%, #ffd200 100%);
-  --gradient-violet:  linear-gradient(135deg, #654ea3 0%, #eaafc8 100%);
-  --gradient-rose:    linear-gradient(135deg, #fa709a 0%, #fee140 100%);
+  /* ── Liquid Glass Parameters (retired) ───────────────────────── */
+  /* The specular sheen + gradient chrome was removed for a flat minimal
+     look (2026-09-18). Params kept as no-ops so old rules don't break. */
+  --lg-sheen-opacity: 0;
+  --lg-rim-width: 0px;
 }
 
 * {
@@ -136,23 +126,30 @@ html, body, #root {
      occurred when background-image was set directly on .sidebar-card.
      --sidebar-backdrop-image is set on <html> from JS (SidebarApp.tsx)
      when the "sidebar:backdrop" event arrives from Rust. */
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, transparent 40%);
-  background-size: auto;
-  background-position: center;
-  background-color: rgba(20, 20, 22, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-top: 1px solid rgba(255, 255, 255, 0.25);
+  background-color: rgba(20, 20, 22, 0.60);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 18px;
-  box-shadow:
-    0 24px 64px rgba(0, 0, 0, 0.6),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-    inset 0 0 6px 0 rgba(255, 255, 255, 0.04),
-    inset 0 2px 4px -2px rgba(255, 255, 255, 0.28),
-    inset 0 -2px 4px -2px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
   padding: 16px 18px 12px 18px;
   gap: 12px;
   overflow: hidden;
   isolation: isolate;
+}
+
+/* ── Minimal Confirmation Mode Sizing ───────────────────────────── */
+.sidebar-card.mode--confirmation {
+  height: auto;
+  max-height: max-content;
+  padding: 18px 20px;
+  gap: 0;
+  justify-content: flex-start;
+}
+
+.mode--confirmation .sidebar-response {
+  height: auto;
+  max-height: max-content;
+  overflow: visible;
+  padding: 0;
 }
 
 /* Blurred backdrop layer — renders the live-capture JPEG behind all
@@ -165,6 +162,7 @@ html, body, #root {
   position: absolute;
   inset: 0;
   border-radius: 18px;
+  background-color: rgba(8, 8, 10, 0.45);
   background-image: var(--sidebar-backdrop-image, none);
   background-size: cover;
   background-position: center;
@@ -178,34 +176,6 @@ html, body, #root {
   transition: opacity 0.3s ease-out;
   pointer-events: none;
   z-index: 0;
-}
-
-/* Specular edge sheen — the bright rim where light catches the glass.
-   A gradient border via ::before, masked to show only the rim. */
-.sidebar-card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 18px;
-  padding: var(--lg-rim-width);
-  background: linear-gradient(
-    135deg,
-    rgba(255, 255, 255, var(--lg-sheen-opacity)) 0%,
-    rgba(255, 255, 255, 0.04) 25%,
-    rgba(255, 255, 255, 0) 50%,
-    rgba(255, 255, 255, 0.04) 75%,
-    rgba(255, 255, 255, calc(var(--lg-sheen-opacity) * 0.7)) 100%
-  );
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  pointer-events: none;
-  z-index: 1;
 }
 
 /* ── Fallback ──────────────────────────────────────────────────── */
@@ -271,7 +241,6 @@ html, body, #root {
   background: var(--apple-surface-muted);
   border: 1px solid var(--apple-border-default);
   border-radius: 9999px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .sidebar-brand-dot {
@@ -279,13 +248,6 @@ html, body, #root {
   height: 7px;
   border-radius: 50%;
   background: var(--apple-text-accent);
-  box-shadow: 0 0 10px var(--apple-text-accent);
-  animation: apple-pulse-dot 2.2s infinite ease-in-out;
-}
-
-@keyframes apple-pulse-dot {
-  0%, 100% { transform: scale(1); opacity: 0.9; }
-  50% { transform: scale(1.35); opacity: 1; box-shadow: 0 0 14px var(--apple-text-accent); }
 }
 
 .sidebar-brand-name {
@@ -329,7 +291,6 @@ html, body, #root {
   gap: 4px;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
 }
 
 .sidebar-action-btn:hover,
@@ -337,19 +298,12 @@ html, body, #root {
   background: var(--apple-surface-raised);
   border-color: var(--apple-border-strong);
   color: var(--apple-text-primary);
-  transform: translateY(-1px);
-}
-
-.sidebar-action-btn:active,
-.sidebar-close-btn:active {
-  transform: translateY(0);
 }
 
 .sidebar-action-btn--active {
   background: rgba(250, 88, 106, 0.2) !important;
   border-color: var(--apple-text-accent) !important;
   color: var(--apple-text-accent) !important;
-  box-shadow: 0 0 14px rgba(250, 88, 106, 0.35);
 }
 
 .sidebar-action-btn--success {
@@ -367,9 +321,9 @@ html, body, #root {
 }
 
 .sidebar-close-btn:hover {
-  background: rgba(255, 69, 58, 0.25);
-  border-color: var(--apple-diff-hard);
-  color: var(--apple-diff-hard);
+  background: var(--apple-surface-raised);
+  border-color: var(--apple-border-strong);
+  color: var(--apple-text-primary);
 }
 
 .sidebar-font-size-icon {
@@ -559,7 +513,7 @@ html, body, #root {
 .nexus-hr {
   border: none;
   height: 1px;
-  background: linear-gradient(90deg, transparent, var(--apple-border-strong), transparent);
+  background: var(--apple-border-default);
   margin: 18px 0;
 }
 
@@ -780,7 +734,6 @@ html, body, #root {
   align-items: center;
   gap: 4px;
   background: rgba(0, 0, 0, 0.75);
-  backdrop-filter: blur(10px);
   border: 1px solid var(--apple-border-strong);
   border-radius: 6px;
   color: #ffffff;
@@ -884,7 +837,6 @@ html, body, #root {
   height: 32px;
   border-radius: 50%;
   background: var(--apple-surface-strong);
-  backdrop-filter: blur(14px);
   border: 1px solid var(--apple-border-strong);
   color: var(--apple-text-primary);
   display: flex;
@@ -899,8 +851,6 @@ html, body, #root {
   background: var(--apple-text-accent);
   border-color: var(--apple-text-accent);
   color: #ffffff;
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(250, 88, 106, 0.4);
 }
 
 /* ── Header Heading ───────────────────────────────────────────── */
@@ -1208,8 +1158,6 @@ html, body, #root {
   width: 100vw;
   height: 100vh;
   background: rgba(0, 0, 0, 0.88);
-  backdrop-filter: blur(30px);
-  -webkit-backdrop-filter: blur(30px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1515,3 +1463,232 @@ html, body, #root {
 .retry-btn:hover {
   background: #0066d6;
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Confirmation Panel (Action Confirmation in Sidebar)
+   ═══════════════════════════════════════════════════════════════ */
+.confirmation-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px 4px;
+}
+
+.confirmation-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.confirmation-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.badge-whatsapp {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(37, 211, 102, 0.18);
+  color: #25d366;
+  border: 1px solid rgba(37, 211, 102, 0.3);
+}
+
+.badge-swiggy {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(252, 128, 25, 0.18);
+  color: #fc8019;
+  border: 1px solid rgba(252, 128, 25, 0.3);
+}
+
+.badge-amazon {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 153, 0, 0.18);
+  color: #ff9900;
+  border: 1px solid rgba(255, 153, 0, 0.3);
+}
+
+.badge-github {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(137, 87, 229, 0.18);
+  color: #a371f7;
+  border: 1px solid rgba(137, 87, 229, 0.3);
+}
+
+.badge-general {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(10, 132, 255, 0.18);
+  color: #0a84ff;
+  border: 1px solid rgba(10, 132, 255, 0.3);
+}
+
+.badge-req {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--apple-text-secondary, #8e8e93);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.confirmation-title {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--apple-text-primary, #ffffff);
+}
+
+.confirmation-prompt {
+  font-size: 13.5px;
+  color: var(--apple-text-secondary, #a1a1aa);
+  line-height: 1.5;
+}
+
+.confirmation-details {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+.confirmation-field {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+
+.confirmation-field.message-field {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--apple-text-tertiary, #636366);
+}
+
+.field-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--apple-text-primary, #ffffff);
+}
+
+.field-recipient {
+  font-weight: 600;
+  color: #25d366;
+}
+
+.field-message-bubble {
+  width: 100%;
+  background: rgba(37, 211, 102, 0.1);
+  border-left: 3px solid #25d366;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  color: var(--apple-text-primary, #ffffff);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.confirmation-status {
+  font-size: 12.5px;
+  color: #ff9f0a;
+  text-align: center;
+}
+
+.confirmation-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.btn-confirmation {
+  flex: 1;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.btn-confirm {
+  background: #30d158;
+  color: #ffffff;
+  border: none;
+  box-shadow: 0 4px 14px rgba(48, 209, 88, 0.3);
+}
+
+.btn-confirm:hover:not(:disabled) {
+  background: #28b84d;
+  box-shadow: 0 6px 18px rgba(48, 209, 88, 0.45);
+}
+
+.btn-confirm:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.btn-cancel {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--apple-text-primary, #ffffff);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.btn-cancel:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.confirmation-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--apple-text-tertiary, #636366);
+  margin-top: 4px;
+}
+

@@ -108,6 +108,15 @@ async-trait = "0.1"
 enigo = "0.5"
 arboard = "3.4"
 
+# Auth vault: OS credential store (Windows Credential Manager / macOS
+# Keychain / Linux Secret Service) for MCP OAuth tokens. Used by
+# auth_vault.rs — one login per service group, auto-refresh on 401.
+keyring = "3"
+
+# Telegram remote (owner-only bridge, long-polling, no public IP needed).
+teloxide = { version = "0.17", default-features = false, features = ["macros", "native-tls"] }
+webrtc-vad = "0.4.0"
+
 
 # Windows-specific: EnumWindows + SetForegroundWindow + ShellExecuteW
 [target.'cfg(windows)'.dependencies]

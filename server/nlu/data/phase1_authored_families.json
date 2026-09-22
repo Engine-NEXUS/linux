@@ -1,0 +1,919 @@
+{
+  "schema_version": 1,
+  "source": "nexus_synthetic",
+  "review_status": "approved_for_split_construction",
+  "policy": "Independently structured command families; not slot-only substitutions",
+  "families_per_intent": {
+    "analyse_pr": {
+      "existing": 3,
+      "added": 12,
+      "target": 15
+    },
+    "analyse_repo": {
+      "existing": 3,
+      "added": 12,
+      "target": 15
+    },
+    "check_branch": {
+      "existing": 7,
+      "added": 8,
+      "target": 15
+    },
+    "create_pr": {
+      "existing": 2,
+      "added": 13,
+      "target": 15
+    },
+    "list_pr_files": {
+      "existing": 2,
+      "added": 13,
+      "target": 15
+    },
+    "open_url": {
+      "existing": 3,
+      "added": 12,
+      "target": 15
+    },
+    "remove_collaborator": {
+      "existing": 2,
+      "added": 13,
+      "target": 15
+    },
+    "update_branch": {
+      "existing": 7,
+      "added": 8,
+      "target": 15
+    },
+    "whatsapp_chat": {
+      "existing": 4,
+      "added": 11,
+      "target": 15
+    },
+    "add_collaborator": {
+      "existing": 15,
+      "added": 0,
+      "target": 15
+    },
+    "add_org_member": {
+      "existing": 15,
+      "added": 0,
+      "target": 15
+    },
+    "approve_pr": {
+      "existing": 15,
+      "added": 0,
+      "target": 15
+    },
+    "cancel_workflow": {
+      "existing": 15,
+      "added": 0,
+      "target": 15
+    },
+    "close_pr": {
+      "existing": 15,
+      "added": 0,
+      "target": 15
+    },
+    "comment_pr": {
+      "existing": 15,
+      "added": 0,
+      "target": 15
+    },
+    "create_release": {
+      "existing": 16,
+      "added": 0,
+      "target": 15
+    },
+    "delete_branch": {
+      "existing": 16,
+      "added": 0,
+      "target": 15
+    },
+    "get_pr": {
+      "existing": 16,
+      "added": 0,
+      "target": 15
+    },
+    "merge_pr": {
+      "existing": 16,
+      "added": 0,
+      "target": 15
+    },
+    "remove_org_member": {
+      "existing": 15,
+      "added": 0,
+      "target": 15
+    },
+    "rerun_workflow": {
+      "existing": 16,
+      "added": 0,
+      "target": 15
+    },
+    "revert_pr": {
+      "existing": 15,
+      "added": 0,
+      "target": 15
+    }
+  },
+  "examples": [
+    {
+      "text": "inspect pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "please analyze pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "I need you to review pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "go ahead and inspect pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "can we analyze pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "would you review pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "perform the action to inspect pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "on GitHub analyze pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "for this repository review pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "take care of this and inspect pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "the next task is to analyze pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "use the repository controls to review pull request 42 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "inspect the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "please analyze the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "I need you to examine the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "go ahead and inspect the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "can we analyze the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "would you examine the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "perform the action to inspect the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "on GitHub analyze the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "for this repository examine the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "take care of this and inspect the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "the next task is to analyze the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "use the repository controls to examine the architecture of repository owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "check branch feature-login in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "please inspect branch feature-login in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "I need you to verify branch feature-login in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "go ahead and check branch feature-login in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "can we inspect branch feature-login in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "would you verify branch feature-login in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "perform the action to check branch feature-login in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "on GitHub inspect branch feature-login in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "create a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "please open a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "I need you to prepare a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "go ahead and create a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "can we open a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "would you prepare a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "perform the action to create a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "on GitHub open a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "for this repository prepare a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "take care of this and create a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "the next task is to open a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "use the repository controls to prepare a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "from the project page create a pull request in owner/project titled improve login from feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "list files from pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "please show changed files for pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "I need you to retrieve the file list for pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "go ahead and list files from pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "can we show changed files for pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "would you retrieve the file list for pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "perform the action to list files from pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "on GitHub show changed files for pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "for this repository retrieve the file list for pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "take care of this and list files from pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "the next task is to show changed files for pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "use the repository controls to retrieve the file list for pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "from the project page list files from pull request 42 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "I need you to load https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "go ahead and open https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "can we visit https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "would you load https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "perform the action to open https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "on GitHub visit https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "for this repository load https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "take care of this and open https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "the next task is to visit https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "use the repository controls to load https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "from the project page open https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "when ready visit https://docs.example.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "https://docs.example.com"
+      }
+    },
+    {
+      "text": "remove collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "please revoke access for collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "I need you to drop collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "go ahead and remove collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "can we revoke access for collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "would you drop collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "perform the action to remove collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "on GitHub revoke access for collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "for this repository drop collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "take care of this and remove collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "the next task is to revoke access for collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "use the repository controls to drop collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "from the project page remove collaborator alex from owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "update the branch for pull request 42 in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "please synchronize pull request 42 in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "I need you to bring up to date pull request 42 in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "go ahead and update the branch for pull request 42 in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "can we synchronize pull request 42 in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "would you bring up to date pull request 42 in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "perform the action to update the branch for pull request 42 in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "on GitHub synchronize pull request 42 in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "start a WhatsApp chat with alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "I need you to open a WhatsApp conversation with alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "go ahead and start a WhatsApp chat with alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "can we message alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "would you open a WhatsApp conversation with alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "perform the action to start a WhatsApp chat with alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "on GitHub message alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "for this repository open a WhatsApp conversation with alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "take care of this and start a WhatsApp chat with alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "the next task is to message alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    },
+    {
+      "text": "use the repository controls to open a WhatsApp conversation with alex",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "alex"
+      }
+    }
+  ]
+}

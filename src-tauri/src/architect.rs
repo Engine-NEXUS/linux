@@ -1083,8 +1083,11 @@ fn show_architect_sidebar_inner<R: Runtime>(
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
                 while win_clone.is_visible().unwrap_or(false) {
-                    // 1 FPS — 1000ms between captures
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    // 4 FPS live blur — shared interval, see sidebar_backdrop.
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        crate::sidebar_backdrop::LIVE_BLUR_INTERVAL_MS,
+                    ))
+                    .await;
 
                     if !win_clone.is_visible().unwrap_or(false) {
                         break;
@@ -1118,11 +1121,12 @@ fn show_architect_sidebar_inner<R: Runtime>(
                         *prev_hash_guard = Some(current_hash);
                         drop(prev_hash_guard);
 
-                        // Step 3: only run the expensive pipeline if changed
+                        // Step 3: only run the pipeline if changed —
+                        // half-res fast blur keeps 4 FPS affordable.
                         if should_emit {
                             // We already have the raw BGRA — blur + encode it
                             // without re-capturing (reuse the bytes we have).
-                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg(&raw_bgra, phys_w, phys_h, 32.0) {
+                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg_fast(&raw_bgra, phys_w, phys_h, 32.0) {
                                 tracing::debug!("architect-sidebar: live blur frame changed, emitting ({} bytes)", data_uri.len());
                                 let _ = app_clone.emit("sidebar:backdrop", data_uri);
                             }

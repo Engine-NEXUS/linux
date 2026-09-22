@@ -1,0 +1,39 @@
+{"text": "What's up dad saying on my website.", "intent": "send_whatsapp_message", "slots": {"contact": "What's up dad", "message": "on my website."}}
+{"text": "Open the ghost mode", "intent": "ghostwriter_start", "slots": {}}
+{"text": "flows go straight up", "intent": "ghostwriter_stop", "slots": {}}
+{"text": "Stop Ghostwriter", "intent": "ghostwriter_stop", "slots": {}}
+{"text": "Stop listening.", "intent": "ghostwriter_stop", "slots": {}}
+{"text": "Twitch goes to mode.", "intent": "ghostwriter_stop", "slots": {}}
+{"text": "All done.", "intent": "ghostwriter_stop", "slots": {}}
+{"text": "command mode", "intent": "ghostwriter_stop", "slots": {}}
+{"text": "Exit ghost mode.", "intent": "ghostwriter_stop", "slots": {}}
+{"text": "Exit Ghost Mode", "intent": "ghostwriter_stop", "slots": {}}
+{"text": "Exit the ghost mode.", "intent": "ghostwriter_stop", "slots": {}}
+{"text": "Order biryani from paradise.", "intent": "order_food", "slots": {"food_item": "Order biryani", "restaurant": "paradise."}}
+{"text": "scribe mode", "intent": "ghostwriter_start", "slots": {}}
+{"text": "Search for earbuds on Amazon.", "intent": "search_product", "slots": {"query": "Search for earbuds on Amazon."}}
+{"text": "for a notebook on Amazon.", "intent": "search_product", "slots": {"query": "for a notebook on Amazon."}}
+{"text": "ghost writer", "intent": "ghostwriter_start", "slots": {}}
+{"text": "Order Biryani.", "intent": "order_food", "slots": {}}
+{"text": "Open the ghost mode.", "intent": "ghostwriter_start", "slots": {}}
+{"text": "Bring me noodles.", "intent": "order_food", "slots": {}}
+{"text": "ghost mode", "intent": "ghostwriter_start", "slots": {}}
+{"text": "I want dosa.", "intent": "order_food", "slots": {}}
+{"text": "Ghost Rider", "intent": "ghostwriter_start", "slots": {}}
+{"text": "order biriyanik", "intent": "order_food", "slots": {"food_item": "biriyanik"}}
+{"text": "Scott Ghostwriter", "intent": "ghostwriter_start", "slots": {}}
+{"text": "Tell Sister Happy Diwali on WhatsApp", "intent": "send_whatsapp_message", "slots": {"contact": "Tell", "message": "Sister Happy Diwali on WhatsApp"}}
+{"text": "Text Isha saying call me back", "intent": "send_whatsapp_message", "slots": {"contact": "Text Isha", "message": "call me back"}}
+{"text": "What's up dad saying on my way?", "intent": "send_whatsapp_message", "slots": {"contact": "What's up dad", "message": "on my way?"}}
+{"text": "Send mom a WhatsApp message saying I will be late", "intent": "send_whatsapp_message", "slots": {"contact": "Send mom a WhatsApp message", "message": "I will be late"}}
+{"text": "WhatsUp, Mummy, Saying Goodnight", "intent": "send_whatsapp_message", "slots": {"contact": "WhatsUp,", "message": "Mummy, Saying Goodnight"}}
+{"text": "Send mom my WhatsApp message saying I will be late", "intent": "send_whatsapp_message", "slots": {"contact": "Send mom my WhatsApp message", "message": "I will be late"}}
+{"text": "Buy a webcam on Amazon", "intent": "search_product", "slots": {"query": "Buy a webcam on Amazon"}}
+{"text": "Search for Earbuds on Amazon", "intent": "search_product", "slots": {"query": "Search for Earbuds on Amazon"}}
+{"text": "Check the price of a monitor on Amazon", "intent": "search_product", "slots": {"query": "Check the price of a monitor on Amazon"}}
+{"text": "Find a power bank on Amazon", "intent": "search_product", "slots": {"query": "Find a power bank on Amazon"}}
+{"text": "Search for Headphones on Amazon", "intent": "search_product", "slots": {"query": "Search for Headphones on Amazon"}}
+{"text": "Find a laptop on Amazon", "intent": "search_product", "slots": {"query": "Find a laptop on Amazon"}}
+{"text": "Order Biryani from Paradise", "intent": "order_food", "slots": {"food_item": "Order Biryani", "restaurant": "Paradise"}}
+{"text": "Order Pizza from Domino's", "intent": "order_food", "slots": {"food_item": "Order Pizza", "restaurant": "Domino's"}}
+{"text": "fetch pasta from oven storey", "intent": "order_food", "slots": {"food_item": "pasta", "restaurant": "oven storey"}}

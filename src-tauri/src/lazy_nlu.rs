@@ -21,13 +21,20 @@ static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
 /// Cooldown after a failed NLU startup — don't retry for 60s to avoid
 /// blocking every command that misses the deterministic parser.
 static NLU_LAST_FAILURE: Mutex<Option<Instant>> = Mutex::new(None);
+/// Set once the server has ever become responsive. First-ever spawn gets a
+/// generous budget (cold disk + Defender + 7s tokenizer load blows past 15s);
+/// later spawns use the fast budget.
+static NLU_EVER_READY: AtomicBool = AtomicBool::new(false);
 
-const NLU_IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes (was 60s)
+const NLU_IDLE_TIMEOUT: Duration = Duration::from_secs(60); // 60s idle timeout
 const NLU_PORT: u16 = 39218;
 /// How long to wait for the NLU server to become responsive (was 30s —
 /// too long, caused "loading non stop" when the ONNX model was missing).
-/// The BERT-Mini ONNX model loads in ~8-12s; 15s is enough.
+/// First-ever spawn gets 40s (cold disk + Defender + ~8s model load exceeds
+/// 15s in the field and caused a permanent dead fallback); once the server
+/// has proven it can start, 15s is enough.
 const NLU_STARTUP_TIMEOUT_SECS: u64 = 15;
+const NLU_FIRST_STARTUP_TIMEOUT_SECS: u64 = 40;
 /// Cooldown after a failed startup attempt (60s).
 const NLU_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
 
@@ -198,26 +205,36 @@ pub fn ensure_nlu_running() {
     };
 
     // Spawn: python nlu_server.py
-    let child = Command::new(&python_cmd)
-        .arg(&script)
+    // If a newer admin-trained model was downloaded to app data (via
+    // nlu_update), point the server at it via NEXUS_NLU_MODEL_DIR.
+    let mut cmd = Command::new(&python_cmd);
+    cmd.arg(&script)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
+        .stderr(std::process::Stdio::piped());
+    if let Some(dir) = crate::nlu_update::downloaded_model_dir_envless() {
+        cmd.env("NEXUS_NLU_MODEL_DIR", &dir);
+        tracing::info!("[lazy_nlu] using downloaded NLU model: {:?}", dir);
+    }
+    let child = cmd.spawn();
 
     match child {
         Ok(c) => {
             *NLU_CHILD.lock().unwrap() = Some(c);
             NLU_RUNNING.store(true, Ordering::Relaxed);
             tracing::info!("[lazy_nlu] NLU server spawned, waiting for it to be ready...");
-            // Wait for the server to be responsive (up to 15 seconds — was 30s).
-            // The BERT-Mini ONNX model + transformers tokenizer takes ~8-12s
-            // to load on first spawn. 15s gives a small margin.
+            // First-ever spawn gets the generous budget; later spawns the fast one.
+            let budget = if NLU_EVER_READY.load(Ordering::Relaxed) {
+                NLU_STARTUP_TIMEOUT_SECS
+            } else {
+                NLU_FIRST_STARTUP_TIMEOUT_SECS
+            };
             let poll_interval = Duration::from_millis(500);
-            let max_polls = (NLU_STARTUP_TIMEOUT_SECS * 1000) / poll_interval.as_millis() as u64;
+            let max_polls = (budget * 1000) / poll_interval.as_millis() as u64;
             for _ in 0..max_polls {
                 std::thread::sleep(poll_interval);
                 if is_nlu_responsive() {
                     tracing::info!("[lazy_nlu] NLU server is ready");
+                    NLU_EVER_READY.store(true, Ordering::Relaxed);
                     // Clear any previous failure time
                     *NLU_LAST_FAILURE.lock().unwrap() = None;
                     // Start the idle killer thread
@@ -225,15 +242,29 @@ pub fn ensure_nlu_running() {
                     return;
                 }
             }
-            tracing::warn!("[lazy_nlu] NLU server did not become responsive in {}s", NLU_STARTUP_TIMEOUT_SECS);
+            tracing::warn!("[lazy_nlu] NLU server did not become responsive in {}s", budget);
             NLU_RUNNING.store(false, Ordering::Relaxed);
             // Record the failure time so we don't retry for 60s
             *NLU_LAST_FAILURE.lock().unwrap() = Some(Instant::now());
-            // Kill the failed child process
+            // Kill the failed child process — then drain its stderr so the
+            // actual reason (missing dep, bad model, port clash) lands in
+            // our logs instead of vanishing into a piped void. Reading
+            // AFTER kill+wait guarantees EOF (no blocking on a live pipe).
             let mut child_guard = NLU_CHILD.lock().unwrap();
             if let Some(mut child) = child_guard.take() {
                 let _ = child.kill();
                 let _ = child.wait();
+                if let Some(stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    let mut total = String::new();
+                    let _ = stderr.take(4096).read_to_string(&mut total);
+                    if !total.trim().is_empty() {
+                        tracing::error!(
+                            "[lazy_nlu] NLU child stderr (startup failure): {}",
+                            total.chars().take(1500).collect::<String>()
+                        );
+                    }
+                }
             }
         }
         Err(e) => {
@@ -246,6 +277,23 @@ pub fn ensure_nlu_running() {
 /// Mark that an NLU request was just made (resets the idle timer).
 pub fn mark_nlu_request() {
     *LAST_REQUEST.lock().unwrap() = Some(Instant::now());
+}
+
+/// Pre-warm the NLU server shortly after boot so the first unparseable
+/// command doesn't pay the cold-start cost (or worse, hit the 15s budget
+/// and disable the ML fallback for a whole session — the exact failure
+/// seen in the field). Background thread, never blocks startup.
+#[allow(dead_code)]
+pub fn spawn_prewarm() {
+    std::thread::Builder::new()
+        .name("nlu-prewarm".into())
+        .spawn(move || {
+            // Let boot settle (wake engine + first paint win the race).
+            std::thread::sleep(Duration::from_secs(25));
+            tracing::info!("[lazy_nlu] pre-warming NLU server for zero-delay first fallback");
+            ensure_nlu_running();
+        })
+        .ok();
 }
 
 /// Start a background thread that kills the NLU server after idle timeout.

@@ -1,6 +1,8 @@
 # NEXUS Wake Word v3 — Training Plan
 
 > Target: **>=95% recall at <=1 false alarm per hour** (Alexa/Jarvis-level)
+>
+> Workspace verification (2026-09-14): the v3 notebook and local wake recordings referenced here are not present in this workspace. Restore or recreate them and pass the data-foundation gates before training.
 
 ## Current State (v2)
 

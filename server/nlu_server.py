@@ -27,16 +27,25 @@ from pydantic import BaseModel
 # ─── Config ────────────────────────────────────────────────────────────────
 
 PORT = 39218
-# Dev: server/nlu/model/ (removed — duplicate of resources copy)
-# Fallback: src-tauri/resources/server/nlu/model/ (production copy, always present)
+# Model directory resolution order:
+#   1. NEXUS_NLU_MODEL_DIR env var — downloaded update dir (app data).
+#      Set by lazy_nlu.rs when a family device has pulled a newer
+#      admin-trained model via /models/nlu/* on the Worker.
+#   2. Dev: server/nlu/model/ (removed — duplicate of resources copy)
+#   3. Fallback: src-tauri/resources/server/nlu/model/ (bundled)
 _local_model_dir = Path(__file__).parent / "nlu" / "model"
 _resources_model_dir = Path(__file__).parent.parent / "src-tauri" / "resources" / "server" / "nlu" / "model"
+_env_model_dir = os.environ.get("NEXUS_NLU_MODEL_DIR")
+_env_model_dir = Path(_env_model_dir) if _env_model_dir else None
 # Pick the dir that actually has the ONNX model file, not just exists.
 # Training creates the local dir with only best_model.pt (no ONNX yet),
 # which would cause "ONNX model not found" errors if selected blindly.
 _local_onnx = _local_model_dir / "nexus_nlu.onnx"
 _resources_onnx = _resources_model_dir / "nexus_nlu.onnx"
-if _local_onnx.exists():
+_env_onnx = _env_model_dir / "nexus_nlu.onnx" if _env_model_dir else None
+if _env_onnx is not None and _env_onnx.exists():
+    MODEL_DIR = _env_model_dir
+elif _local_onnx.exists():
     MODEL_DIR = _local_model_dir
 elif _resources_onnx.exists():
     MODEL_DIR = _resources_model_dir
@@ -104,6 +113,10 @@ INTENTS = [
     "whatsapp_open",
     "whatsapp_search",
     "focus_app",
+    # Commerce + social MCP commands (3) — NEW (must match train.py order)
+    "order_food",
+    "search_product",
+    "send_whatsapp_message",
     # Fallback (1)
     "unknown",
 ]
@@ -141,6 +154,10 @@ SLOT_TYPES = [
     "B-key", "I-key",
     "B-keys", "I-keys",
     "B-target", "I-target",
+    # Commerce + social slots (NEW — must match train.py order)
+    "B-food_item", "I-food_item",
+    "B-restaurant", "I-restaurant",
+    "B-message", "I-message",
 ]
 ID_TO_SLOT = {i: slot for i, slot in enumerate(SLOT_TYPES)}
 

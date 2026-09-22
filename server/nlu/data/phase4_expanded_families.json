@@ -1,0 +1,3539 @@
+{
+  "schema_version": 1,
+  "source": "nexus_synthetic_phase4",
+  "review_status": "approved_for_candidate_training",
+  "policy": "Structurally diverse command forms that do not share phrase families with the frozen final test. Additional OOS examples target false-positive patterns discovered in Phase 3.",
+  "total_examples": 455,
+  "unique_families": 421,
+  "intent_counts": {
+    "unknown": 70,
+    "approve_pr": 30,
+    "close_pr": 30,
+    "add_org_member": 30,
+    "remove_org_member": 30,
+    "revert_pr": 30,
+    "merge_pr": 30,
+    "cancel_workflow": 30,
+    "add_collaborator": 30,
+    "create_release": 30,
+    "delete_branch": 30,
+    "get_pr": 30,
+    "rerun_workflow": 30,
+    "comment_pr": 25
+  },
+  "examples": [
+    {
+      "text": "mark pull request 42 in {repo} as approved",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "give approval for pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "sign off on pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "greenlight pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "accept the review for pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "lgtm pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "ok the pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "approve the changes in pr 42 for {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "mark pr 42 in {repo} as good to merge",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "give the thumbs up to pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "sign off pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "approve review on pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "accept pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "greenlight pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "mark pull request 42 in {repo} approved",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "give pr 42 in {repo} the go ahead",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "approve the code review for pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "sign off on the review for pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "lgtm pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "ok pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "accept the pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "approve review for pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "mark the pull request 42 in {repo} as approved",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "give a thumbs up to pr 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "sign off the pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "approve the code changes in pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "give your approval to pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "mark pr 42 in {repo} as good",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "accept the changes in pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "ok the review for pull request 42 in {repo}",
+      "intent": "approve_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "dismiss pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reject pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "shut pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "close out pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "dismiss pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reject pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "shut pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "close out pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "terminate pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "cancel pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "dismiss the pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reject the pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "close down pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "shut down pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "terminate pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "cancel pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "dismiss the pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reject the pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "close down pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "terminate the pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "cancel the pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "close the pull request 42 in {repo} without merging",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "dismiss pr 42 in {repo} as not needed",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reject pr 42 in {repo} as invalid",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "shut down the pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "close pull request 42 in {repo} without merge",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "terminate the pr 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "cancel the pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "close out the pull request 42 in {repo}",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "dismiss the pull request 42 in {repo} as resolved",
+      "intent": "close_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "leave a comment on pull request 42 in {repo} saying good job",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "good job"
+      }
+    },
+    {
+      "text": "write a review comment on pr 42 in {repo} saying needs tests",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "needs tests"
+      }
+    },
+    {
+      "text": "add a review note to pull request 42 in {repo} saying looks fine",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "looks fine"
+      }
+    },
+    {
+      "text": "post a comment on pr 42 in {repo} saying ship it",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "ship it"
+      }
+    },
+    {
+      "text": "leave a note on pull request 42 in {repo} saying fix the lint",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "fix the lint"
+      }
+    },
+    {
+      "text": "write a comment for pull request 42 in {repo} saying approved",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "approved"
+      }
+    },
+    {
+      "text": "add a comment to pr 42 in {repo} saying rebase needed",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "rebase needed"
+      }
+    },
+    {
+      "text": "post a review on pull request 42 in {repo} saying good work",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "good work"
+      }
+    },
+    {
+      "text": "leave feedback on pr 42 in {repo} saying minor changes",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "minor changes"
+      }
+    },
+    {
+      "text": "write a note on pull request 42 in {repo} saying lgtm",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "lgtm"
+      }
+    },
+    {
+      "text": "add review feedback to pr 42 in {repo} saying looks solid",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "looks solid"
+      }
+    },
+    {
+      "text": "post feedback on pull request 42 in {repo} saying needs docs",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "needs docs"
+      }
+    },
+    {
+      "text": "leave a review on pr 42 in {repo} saying good to go",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "good to go"
+      }
+    },
+    {
+      "text": "write feedback for pull request 42 in {repo} saying merge after ci",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "merge after ci"
+      }
+    },
+    {
+      "text": "add a note to pull request 42 in {repo} saying update the readme",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "update the readme"
+      }
+    },
+    {
+      "text": "post a note on pr 42 in {repo} saying looks great",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "looks great"
+      }
+    },
+    {
+      "text": "leave a review comment for pull request 42 in {repo} saying nit pick",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "nit pick"
+      }
+    },
+    {
+      "text": "write a review note for pr 42 in {repo} saying question here",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "question here"
+      }
+    },
+    {
+      "text": "add review comments to pull request 42 in {repo} saying suggest refactor",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "suggest refactor"
+      }
+    },
+    {
+      "text": "post a review note on pr 42 in {repo} saying blocking issue",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "blocking issue"
+      }
+    },
+    {
+      "text": "leave a remark on pull request 42 in {repo} saying nice cleanup",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "nice cleanup"
+      }
+    },
+    {
+      "text": "write a remark for pr 42 in {repo} saying consider renaming",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "consider renaming"
+      }
+    },
+    {
+      "text": "add a remark to pull request 42 in {repo} saying test coverage low",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "test coverage low"
+      }
+    },
+    {
+      "text": "post a remark on pr 42 in {repo} saying good approach",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "good approach"
+      }
+    },
+    {
+      "text": "leave a review remark for pull request 42 in {repo} saying edge case missing",
+      "intent": "comment_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42",
+        "body": "edge case missing"
+      }
+    },
+    {
+      "text": "bring sarah into the {org} organization",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "sarah"
+      }
+    },
+    {
+      "text": "add mike to the {org} organization as a member",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "mike",
+        "role": "member"
+      }
+    },
+    {
+      "text": "invite laura to join the {org} organization",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "laura"
+      }
+    },
+    {
+      "text": "welcome tom as a new member of org {org}",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "tom",
+        "role": "member"
+      }
+    },
+    {
+      "text": "bring jenny into org {org} with admin access",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "jenny",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "add frank to the {org} organization with member role",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "frank",
+        "role": "member"
+      }
+    },
+    {
+      "text": "invite grace to become a member of org {org}",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "grace",
+        "role": "member"
+      }
+    },
+    {
+      "text": "welcome alex into the {org} organization as an admin",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "alex",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "bring nina to org {org} as a member",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "nina",
+        "role": "member"
+      }
+    },
+    {
+      "text": "add owen to the {org} org with push access",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "owen",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "invite rita to the {org} organization as admin",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "rita",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "welcome sam to org {org} as a regular member",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "sam",
+        "role": "member"
+      }
+    },
+    {
+      "text": "bring tina into the {org} organization with member privileges",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "tina",
+        "role": "member"
+      }
+    },
+    {
+      "text": "add victor to org {org} and give him admin rights",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "victor",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "invite wendy to join org {org} as a member",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "wendy",
+        "role": "member"
+      }
+    },
+    {
+      "text": "welcome yuki into org {org} with admin privileges",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "yuki",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "bring zara to the {org} organization as a new member",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "zara",
+        "role": "member"
+      }
+    },
+    {
+      "text": "add charlie to the {org} organization and grant admin",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "charlie",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "invite dana to org {org} with member access",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "dana",
+        "role": "member"
+      }
+    },
+    {
+      "text": "welcome evan into the {org} organization as admin",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "evan",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "bring fiona to org {org} and make her a member",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "fiona",
+        "role": "member"
+      }
+    },
+    {
+      "text": "add george to the {org} org as an administrator",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "george",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "invite helen to become an admin of org {org}",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "helen",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "welcome ivan to the {org} organization with member status",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "ivan",
+        "role": "member"
+      }
+    },
+    {
+      "text": "bring julia into org {org} as an admin member",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "julia",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "add kevin to the {org} organization granting member access",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "kevin",
+        "role": "member"
+      }
+    },
+    {
+      "text": "invite lily to the {org} org and assign admin role",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "lily",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "welcome mark into the {org} organization as a new admin",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "mark",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "bring nora to the {org} organization with admin rights",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "nora",
+        "role": "admin"
+      }
+    },
+    {
+      "text": "add oscar to org {org} as a regular member",
+      "intent": "add_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "oscar",
+        "role": "member"
+      }
+    },
+    {
+      "text": "drop sarah from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "sarah"
+      }
+    },
+    {
+      "text": "take mike out of org {org}",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "mike"
+      }
+    },
+    {
+      "text": "revoke laura from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "laura"
+      }
+    },
+    {
+      "text": "remove tom from the {org} org roster",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "tom"
+      }
+    },
+    {
+      "text": "drop jenny from org {org}",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "jenny"
+      }
+    },
+    {
+      "text": "take frank out of the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "frank"
+      }
+    },
+    {
+      "text": "revoke grace from org {org}",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "grace"
+      }
+    },
+    {
+      "text": "remove alex from the {org} organization membership",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "alex"
+      }
+    },
+    {
+      "text": "drop nina from the {org} org",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "nina"
+      }
+    },
+    {
+      "text": "take owen out of the {org} organization roster",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "owen"
+      }
+    },
+    {
+      "text": "revoke rita from the {org} org membership",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "rita"
+      }
+    },
+    {
+      "text": "remove sam from org {org} membership",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "sam"
+      }
+    },
+    {
+      "text": "drop tina from the {org} organization member list",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "tina"
+      }
+    },
+    {
+      "text": "take victor out of the {org} org",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "victor"
+      }
+    },
+    {
+      "text": "revoke wendy from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "wendy"
+      }
+    },
+    {
+      "text": "remove yuki from the {org} org member list",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "yuki"
+      }
+    },
+    {
+      "text": "drop zara from org {org} membership",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "zara"
+      }
+    },
+    {
+      "text": "take charlie out of the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "charlie"
+      }
+    },
+    {
+      "text": "revoke dana from the {org} org",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "dana"
+      }
+    },
+    {
+      "text": "remove evan from org {org}",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "evan"
+      }
+    },
+    {
+      "text": "drop fiona from the {org} organization roster",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "fiona"
+      }
+    },
+    {
+      "text": "take george out of the {org} org membership",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "george"
+      }
+    },
+    {
+      "text": "revoke helen from the {org} organization member list",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "helen"
+      }
+    },
+    {
+      "text": "remove ivan from the {org} org roster",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "ivan"
+      }
+    },
+    {
+      "text": "drop julia from org {org} member list",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "julia"
+      }
+    },
+    {
+      "text": "take kevin out of the {org} organization membership",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "kevin"
+      }
+    },
+    {
+      "text": "revoke lily from the {org} org roster",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "lily"
+      }
+    },
+    {
+      "text": "remove mark from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "mark"
+      }
+    },
+    {
+      "text": "drop nora from the {org} org membership list",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "nora"
+      }
+    },
+    {
+      "text": "take oscar out of org {org}",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "oscar"
+      }
+    },
+    {
+      "text": "undo the changes from pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "roll back pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reverse pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "undo pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "revert the changes in pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "roll back the pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reverse pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "undo the pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "revert the merge of pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "roll back the changes from pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reverse the pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "undo the pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "revert the commit from pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "roll back pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reverse the changes from pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "undo the merge of pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "revert the pull request 42 merge in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "roll back the merge of pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reverse the merge of pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "undo the commit from pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "revert changes from pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "roll back changes from pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reverse changes from pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "undo changes from pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "revert the code from pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "roll back the code from pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "reverse the code from pull request 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "undo the code from pr 42 in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "revert what pull request 42 did in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "roll back what pr 42 changed in {repo}",
+      "intent": "revert_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine pull request 42 into {repo}",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate pr 42 into {repo}",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge the pull request 42 into {repo}",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine pr 42 into {repo}",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate pull request 42 into {repo}",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge the pr 42 into {repo}",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine the pull request 42 into {repo}",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate the pr 42 into {repo}",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge pull request 42 into the {repo} repository",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine pr 42 into the {repo} repository",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate pull request 42 into the {repo} repository",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge the pull request 42 into the {repo} repository",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine the pr 42 into the {repo} repository",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate the pull request 42 into the {repo} repository",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge pr 42 into the {repo} repository",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine the pull request 42 into the {repo} repo",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate pr 42 into the {repo} repo",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge the pr 42 into the {repo} repo",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine pull request 42 into the {repo} repo",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate the pull request 42 into the {repo} repo",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge pull request 42 into {repo} with a merge commit",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine pr 42 into {repo} using squash",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate pull request 42 into {repo} with rebase",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge the pr 42 into {repo} using a squash merge",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine the pull request 42 into {repo} with a rebase merge",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate the pr 42 into {repo} with a merge commit",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge pull request 42 into {repo} main branch",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "combine pr 42 into {repo} default branch",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "integrate pull request 42 into {repo} develop branch",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "merge the pr 42 into {repo} master branch",
+      "intent": "merge_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "terminate workflow 789 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "cancel workflow 456 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "kill workflow 123 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "end workflow 789 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "terminate the workflow 456 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "cancel the workflow 123 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "kill the workflow 789 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "end the workflow 456 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "terminate workflow run 123 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "cancel workflow run 789 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "kill workflow run 456 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "end workflow run 123 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "terminate the workflow run 789 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "cancel the workflow run 456 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "kill the workflow run 123 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "end the workflow run 789 in {repo}",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "stop the workflow 456 in {repo} immediately",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "abort the workflow 123 in {repo} now",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "halt the workflow 789 in {repo} right away",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "terminate workflow 456 in {repo} immediately",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "cancel workflow 123 in {repo} now",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "kill workflow 789 in {repo} right away",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "end workflow 456 in {repo} as soon as possible",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "terminate the workflow run 123 in {repo} now",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "cancel the workflow run 789 in {repo} immediately",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "kill the workflow run 456 in {repo} right now",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "end the workflow run 123 in {repo} right away",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "stop workflow 789 in {repo} and discard changes",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "abort workflow 456 in {repo} and clean up",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "halt workflow 123 in {repo} and remove artifacts",
+      "intent": "cancel_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "grant sarah push access to {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "sarah",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "give mike write access to {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "mike",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "add laura as a collaborator on {repo} with pull access",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "laura",
+        "permission": "pull"
+      }
+    },
+    {
+      "text": "grant tom admin access to {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "tom",
+        "permission": "admin"
+      }
+    },
+    {
+      "text": "give jenny triage access to {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "jenny",
+        "permission": "triage"
+      }
+    },
+    {
+      "text": "add frank as a collaborator to {repo} with maintain access",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "frank",
+        "permission": "maintain"
+      }
+    },
+    {
+      "text": "grant grace push permissions on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "grace",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "give alex write permissions on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "alex",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "add nina as a collaborator on {repo} with admin access",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "nina",
+        "permission": "admin"
+      }
+    },
+    {
+      "text": "grant owen pull permissions on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "owen",
+        "permission": "pull"
+      }
+    },
+    {
+      "text": "give rita maintain access on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "rita",
+        "permission": "maintain"
+      }
+    },
+    {
+      "text": "add sam as a collaborator to {repo} with triage access",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "sam",
+        "permission": "triage"
+      }
+    },
+    {
+      "text": "grant tina admin permissions on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "tina",
+        "permission": "admin"
+      }
+    },
+    {
+      "text": "give victor push access on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "victor",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "add wendy as a collaborator to {repo} with write access",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "wendy",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "grant yuki pull access on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "yuki",
+        "permission": "pull"
+      }
+    },
+    {
+      "text": "give zara maintain permissions on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "zara",
+        "permission": "maintain"
+      }
+    },
+    {
+      "text": "add charlie as a collaborator on {repo} with push access",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "charlie",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "grant dana triage access on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "dana",
+        "permission": "triage"
+      }
+    },
+    {
+      "text": "give evan admin access on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "evan",
+        "permission": "admin"
+      }
+    },
+    {
+      "text": "add fiona as a collaborator to {repo} with pull permissions",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "fiona",
+        "permission": "pull"
+      }
+    },
+    {
+      "text": "grant george write access on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "george",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "give helen maintain access on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "helen",
+        "permission": "maintain"
+      }
+    },
+    {
+      "text": "add ivan as a collaborator on {repo} with admin permissions",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "ivan",
+        "permission": "admin"
+      }
+    },
+    {
+      "text": "grant julia push access on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "julia",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "give kevin triage permissions on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "kevin",
+        "permission": "triage"
+      }
+    },
+    {
+      "text": "add lily as a collaborator to {repo} with maintain permissions",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "lily",
+        "permission": "maintain"
+      }
+    },
+    {
+      "text": "grant mark pull access on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "mark",
+        "permission": "pull"
+      }
+    },
+    {
+      "text": "give nora write permissions on {repo}",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "nora",
+        "permission": "push"
+      }
+    },
+    {
+      "text": "add oscar as a collaborator on {repo} with triage permissions",
+      "intent": "add_collaborator",
+      "slots": {
+        "repo": "octo/tools",
+        "username": "oscar",
+        "permission": "triage"
+      }
+    },
+    {
+      "text": "cut a new release v1.2.3 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.2.3"
+      }
+    },
+    {
+      "text": "tag a release v2.0.0 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v2.0.0"
+      }
+    },
+    {
+      "text": "publish version v1.5.0 as a release in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.5.0"
+      }
+    },
+    {
+      "text": "create a github release for v3.0.0 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v3.0.0"
+      }
+    },
+    {
+      "text": "cut release v1.0.0 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.0.0"
+      }
+    },
+    {
+      "text": "tag version v2.1.0 as a release in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v2.1.0"
+      }
+    },
+    {
+      "text": "publish the release v1.4.0 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.4.0"
+      }
+    },
+    {
+      "text": "create a new release for v2.2.0 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v2.2.0"
+      }
+    },
+    {
+      "text": "cut a release for v1.3.0 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.3.0"
+      }
+    },
+    {
+      "text": "tag a new release v3.1.0 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v3.1.0"
+      }
+    },
+    {
+      "text": "publish version v1.6.0 as a github release in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.6.0"
+      }
+    },
+    {
+      "text": "create the release for v2.3.0 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v2.3.0"
+      }
+    },
+    {
+      "text": "cut a github release v1.1.0 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.1.0"
+      }
+    },
+    {
+      "text": "tag the release v3.2.0 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v3.2.0"
+      }
+    },
+    {
+      "text": "publish a new release v1.7.0 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.7.0"
+      }
+    },
+    {
+      "text": "create release v2.4.0 for the {repo} repository",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v2.4.0"
+      }
+    },
+    {
+      "text": "cut version v1.8.0 as a release for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.8.0"
+      }
+    },
+    {
+      "text": "tag a github release v3.3.0 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v3.3.0"
+      }
+    },
+    {
+      "text": "publish the version v1.9.0 as a release in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.9.0"
+      }
+    },
+    {
+      "text": "create a release tagged v2.5.0 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v2.5.0"
+      }
+    },
+    {
+      "text": "cut a new version v1.0.5 as a release in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.0.5"
+      }
+    },
+    {
+      "text": "tag the version v2.6.0 as a release for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v2.6.0"
+      }
+    },
+    {
+      "text": "publish a github release for v3.4.0 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v3.4.0"
+      }
+    },
+    {
+      "text": "create the github release v1.2.0 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.2.0"
+      }
+    },
+    {
+      "text": "cut the release v2.7.0 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v2.7.0"
+      }
+    },
+    {
+      "text": "tag a new version v1.3.5 as a release in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.3.5"
+      }
+    },
+    {
+      "text": "publish the github release v3.5.0 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v3.5.0"
+      }
+    },
+    {
+      "text": "create a new github release for v1.4.5 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.4.5"
+      }
+    },
+    {
+      "text": "cut a release tagged v2.8.0 in {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v2.8.0"
+      }
+    },
+    {
+      "text": "tag the github release v1.5.5 for {repo}",
+      "intent": "create_release",
+      "slots": {
+        "repo": "octo/tools",
+        "release_tag": "v1.5.5"
+      }
+    },
+    {
+      "text": "drop the feature-x branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "feature-x"
+      }
+    },
+    {
+      "text": "get rid of the hotfix-1 branch in {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "hotfix-1"
+      }
+    },
+    {
+      "text": "eliminate the dev branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "dev"
+      }
+    },
+    {
+      "text": "remove the bugfix-2 branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "bugfix-2"
+      }
+    },
+    {
+      "text": "drop branch feature-y from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "feature-y"
+      }
+    },
+    {
+      "text": "get rid of branch hotfix-3 in {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "hotfix-3"
+      }
+    },
+    {
+      "text": "eliminate branch dev-branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "dev-branch"
+      }
+    },
+    {
+      "text": "remove branch test-branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "test-branch"
+      }
+    },
+    {
+      "text": "drop the old-branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "old-branch"
+      }
+    },
+    {
+      "text": "get rid of the stale-branch in {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "stale-branch"
+      }
+    },
+    {
+      "text": "eliminate the temp-branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "temp-branch"
+      }
+    },
+    {
+      "text": "remove the wip-branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "wip-branch"
+      }
+    },
+    {
+      "text": "drop branch cleanup from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "cleanup"
+      }
+    },
+    {
+      "text": "get rid of branch experiment in {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "experiment"
+      }
+    },
+    {
+      "text": "eliminate branch refactor from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "refactor"
+      }
+    },
+    {
+      "text": "remove branch migration from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "migration"
+      }
+    },
+    {
+      "text": "drop the legacy-branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "legacy-branch"
+      }
+    },
+    {
+      "text": "get rid of the deprecated-branch in {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "deprecated-branch"
+      }
+    },
+    {
+      "text": "eliminate the unused-branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "unused-branch"
+      }
+    },
+    {
+      "text": "remove the merged-branch from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "merged-branch"
+      }
+    },
+    {
+      "text": "drop branch old-feature from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "old-feature"
+      }
+    },
+    {
+      "text": "get rid of branch old-hotfix in {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "old-hotfix"
+      }
+    },
+    {
+      "text": "eliminate branch old-dev from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "old-dev"
+      }
+    },
+    {
+      "text": "remove branch old-test from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "old-test"
+      }
+    },
+    {
+      "text": "drop the branch feature-abc from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "feature-abc"
+      }
+    },
+    {
+      "text": "get rid of the branch hotfix-xyz in {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "hotfix-xyz"
+      }
+    },
+    {
+      "text": "eliminate the branch dev-123 from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "dev-123"
+      }
+    },
+    {
+      "text": "remove the branch test-456 from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "test-456"
+      }
+    },
+    {
+      "text": "drop branch release-candidate from {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "release-candidate"
+      }
+    },
+    {
+      "text": "get rid of branch patch-1 in {repo}",
+      "intent": "delete_branch",
+      "slots": {
+        "repo": "octo/tools",
+        "branch": "patch-1"
+      }
+    },
+    {
+      "text": "pull up pull request 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "display pr 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show me the pull request 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "fetch the pr 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "pull up pr 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "display the pull request 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show me pr 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "fetch pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "pull up the pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "display pr 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show me the pr 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "fetch the pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "pull up the pr 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "display the pr 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show me pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "fetch pr 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "pull up pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "display the pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show me the pr 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "fetch the pr 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "bring up pull request 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "look at pr 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "bring up pr 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "look at pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "bring up the pull request 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "look at the pr 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "bring up the pr 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "look at the pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "open up pull request 42 in {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "check out pr 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "run workflow 789 again in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute workflow 456 in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger workflow 123 again in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "run the workflow 789 again in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute the workflow 456 in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger the workflow 123 again in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "run workflow 789 once more in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute workflow 456 once more in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger workflow 123 once more in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "run the workflow 789 once more in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute the workflow 456 once more in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger the workflow 123 once more in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "run workflow 789 from the start in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute workflow 456 from scratch in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger workflow 123 from the beginning in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "run the workflow 789 from the start in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute the workflow 456 from scratch in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger the workflow 123 from the beginning in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "run workflow 789 a second time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute workflow 456 a second time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger workflow 123 a second time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "run the workflow 789 a second time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute the workflow 456 a second time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger the workflow 123 a second time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "run workflow 789 one more time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute workflow 456 one more time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger workflow 123 one more time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "run the workflow 789 one more time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "re-execute the workflow 456 one more time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "trigger the workflow 123 one more time in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "put into words what you want",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "put words on the paper about what you want",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what do i put on my feet",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "do i have to put my mouth on theirs when doing cpr",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "where should i put my keys",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "put the book on the shelf",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "put the milk in the fridge",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what words rhyme with orange",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how many words are in a page",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "write a poem about the ocean",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "write a letter to my grandmother",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "write down my dreams from last night",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "put together a grocery list for the week",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what should i write in a birthday card",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "words that start with the letter q",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how do you spell accommodation",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "put the leftovers in the container",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "write a thank you note for the gift",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "put the puzzle pieces together",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "words with double letters in them",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me a cool nintendo switch game",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save my text on my laptop hard drive",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me pictures of cute puppies",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save the document to my desktop",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me how to tie a tie",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save my progress in the game",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me the weather forecast",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save the file to my documents folder",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me a map of downtown",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save the screenshot to my pictures",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me the latest news headlines",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save the email to my drafts folder",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me a recipe for chocolate cake",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save the webpage as a bookmark",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me the score of the game",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save my notes from the meeting",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me directions to the airport",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save the receipt for my taxes",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "show me the time in tokyo",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "save the presentation to my drive",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "program my new robot to bring me snacks",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "i want to install new tiles in my kitchen",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "i need a new pair of shoes",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how do i program my thermostat",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "where can i buy a new phone case",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "i want to learn a new language",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "program the garage door opener",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "new restaurants near my house",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "i need to install a new battery",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how do i program my tv remote",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "new movies coming out this weekend",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "i want to try a new recipe",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "program the sprinkler system",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "new books by my favorite author",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "i need to install new software",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how do i program a calculator",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "new games for the playstation",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "i want to buy a new car",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "program the coffee maker",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "new songs on the radio",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "report outage to my electric provider",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how much is an overdraft fee for bank",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what size wipers does this car take",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "where is the dipstick",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how much is 1 share of aapl",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what time does the louvre open",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how many sides are in a hexagon",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "why are exponents performed before multiplication",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what is the capital of mongolia",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how does a microwave work",
+      "intent": "unknown",
+      "slots": {}
+    }
+  ]
+}

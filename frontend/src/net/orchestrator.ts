@@ -91,10 +91,66 @@ interface GitHubResultPayload {
 
 let initialized = false;
 let currentRequestId: string | null = null;
+let confirmListeningTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearConfirmListeningTimer(): void {
+  if (confirmListeningTimer) {
+    clearTimeout(confirmListeningTimer);
+    confirmListeningTimer = null;
+  }
+}
+
+/** Open the 5-second voice approval listening window for pending confirmations. */
+export function openConfirmVoiceWindow(): void {
+  const curStore = useAssistant.getState();
+  if (curStore.pendingGithubCommand) {
+    console.log("[NEXUS] orchestrator: prompt spoken — opening 5s voice approval window");
+    curStore.setState("listening");
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("start_stt_capture"))
+      .catch(() => {});
+
+    clearConfirmListeningTimer();
+    confirmListeningTimer = setTimeout(() => {
+      confirmListeningTimer = null;
+      const latest = useAssistant.getState();
+      if (latest.state === "listening" && latest.pendingGithubCommand) {
+        console.log("[NEXUS] orchestrator: 5s voice window timed out — mic back to idle, sidebar remains interactive");
+        latest.setState("idle");
+      }
+    }, 5000);
+  }
+}
 
 /** Current request ID (for debugging / diagnostics). */
 export function getCurrentRequestId(): string | null {
   return currentRequestId;
+}
+
+/** Test hook: set the in-flight request id (vitest only). */
+export function __testSetCurrentRequestId(id: string | null): void {
+  currentRequestId = id;
+}
+
+/**
+ * Complete a spoken result turn. Called when result TTS finishes (or fails).
+ * Returns true when this turn was still current and the orb was reset;
+ * false when a barge-in already moved on (stale onEnd must never touch the
+ * new turn's state — the cancel flow owns that path).
+ */
+export function finishSpokenResult(spokenFor: string): boolean {
+  if (currentRequestId !== spokenFor) return false;
+  currentRequestId = null;
+  clearLongRunningInFlight();
+  clearConfirmListeningTimer();
+  const store = useAssistant.getState();
+  store.setLoadingVisible(false);
+  store.setVisible(true); // brief beat, mirrors the `done` handler
+  setTimeout(() => {
+    if (currentRequestId === null) useAssistant.getState().reset();
+  }, 550);
+  void signalOrchestratorDone(spokenFor);
+  return true;
 }
 
 /**
@@ -183,15 +239,27 @@ export async function initOrchestratorListener(): Promise<void> {
         // Show the orb again for speaking the result
         store.setVisible(true);
         store.setState("speaking");
+        store.setAwaitingInput(false);
 
         // Add to transcript
         if (ev.text) {
           store.addAssistantMessage(ev.text);
         }
 
-        // Speak the result
+        // Speak the result, then close the handshake: the backend
+        // withholds `done` on success (emitting it would cancel TTS), so
+        // the frontend must signal completion itself. Without this the orb
+        // parks in `speaking` forever after long replies.
+        // Guarded by request id: a barged-in turn must never reset the new
+        // turn's state (barge-in abort skips onEnd; the cancel flow owns it).
         if (ev.text) {
-          void speak(ev.text);
+          const spokenFor = ev.request_id;
+          speak(ev.text, () => {
+            finishSpokenResult(spokenFor);
+          }).catch((err) => {
+            console.warn("[NEXUS] orchestrator: result TTS failed:", err);
+            finishSpokenResult(spokenFor);
+          });
         }
 
         // If there's analysis data, we could show it in the sidebar
@@ -210,8 +278,15 @@ export async function initOrchestratorListener(): Promise<void> {
         currentRequestId = null;
         clearLongRunningInFlight();
         store.setLoadingVisible(false);
-        store.setVisible(true); // Show orb briefly before reset
-        setTimeout(() => store.reset(), 550);
+        store.setAwaitingInput(false);
+        const curStore = useAssistant.getState();
+        if (curStore.pendingGithubCommand) {
+          console.log("[NEXUS] orchestrator: done event with pending confirmation — opening voice approval window");
+          openConfirmVoiceWindow();
+        } else {
+          store.setVisible(true); // Show orb briefly before reset
+          setTimeout(() => store.reset(), 550);
+        }
         break;
       }
 
@@ -221,6 +296,7 @@ export async function initOrchestratorListener(): Promise<void> {
         store.setLoadingVisible(false);
         store.setVisible(true);
         store.setState("speaking");
+        store.setAwaitingInput(false);
         const errMsg = ev.message || "Something went wrong sir.";
         store.addAssistantMessage(`Error: ${errMsg}`);
         void speak(errMsg);
@@ -233,20 +309,29 @@ export async function initOrchestratorListener(): Promise<void> {
       }
 
       case "confirm": {
-        // GitHub destructive operation needs confirmation.
-        // Store the pending command so when the user says "yes",
+        // Operation needs confirmation.
+        // Store the pending command so when the user says "yes" / "approved" / "proceed",
         // processViaOrchestrator can re-invoke with confirmed=true.
         clearLongRunningInFlight();
+        clearConfirmListeningTimer();
         store.setLoadingVisible(false);
         store.setVisible(true);
         store.setState("speaking");
-        if (ev.prompt) {
-          store.addAssistantMessage(ev.prompt);
-          void speak(ev.prompt);
-        }
-        // Store the pending command for the "yes" confirmation flow
+        // The prompt speech ends but the turn stays open waiting for
+        // "yes" — mark it so the orb holds + glows instead of looping
+        // over silence (or going dead).
+        store.setAwaitingInput(true);
         store.setPendingGithubCommand(ev.command ?? null);
         console.log("[NEXUS] orchestrator: confirm needed for command", ev.command);
+
+        if (ev.prompt) {
+          store.addAssistantMessage(ev.prompt);
+          void speak(ev.prompt, () => {
+            openConfirmVoiceWindow();
+          }).catch(() => {
+            openConfirmVoiceWindow();
+          });
+        }
         break;
       }
 
@@ -323,20 +408,46 @@ export async function processViaOrchestrator(
 
   const { invoke } = await import("@tauri-apps/api/core");
 
-  // ─── GitHub confirmation flow ───
-  // If there's a pending GitHub command awaiting confirmation, check if
-  // the user said "yes" (confirm) or "no"/"cancel" (abort).
+  // ─── Confirmation flow ───
+  // If there's a pending command awaiting confirmation, check if
+  // the user said "yes"/"approved"/"proceed" (confirm) or "no"/"cancel" (abort).
   const store = useAssistant.getState();
   const pendingCmd = store.pendingGithubCommand;
   if (pendingCmd) {
+    clearConfirmListeningTimer();
     const lower = transcript.trim().toLowerCase();
-    const isYes = /^(yes|yeah|yep|yup|confirm|ok|okay|sure|go ahead|do it|proceed)\b/.test(lower);
-    const isNo = /^(no|nope|cancel|abort|stop|don't|dont|never)\b/.test(lower);
+    const isYes = /^(yes|yeah|yep|yup|confirm|ok|okay|sure|go ahead|do it|proceed|approved?|agreed?|approve)\b/i.test(lower);
+    const isNo = /^(no|nope|cancel|abort|stop|don't|dont|never|disapproved?|disapprove)\b/i.test(lower);
 
     if (isYes) {
       // Clear the pending command first, then re-execute with confirmed=true
       store.setPendingGithubCommand(null);
       useAssistant.getState().addUserMessage(transcript);
+
+      // MCP confirmations carry kind:"mcp" + {server, tool, params} —
+      // route them to orchestrator_mcp_confirm instead of github_execute.
+      const isMcp = (pendingCmd as any)?.kind === "mcp";
+      if (isMcp) {
+        console.log("[NEXUS] orchestrator: confirming pending MCP call", pendingCmd);
+        try {
+          const result = await invoke<unknown>("orchestrator_mcp_confirm", {
+            requestId: currentRequestId ?? "mcp-confirm",
+            confirmed: true,
+            pending: pendingCmd,
+          });
+          console.log("[NEXUS] orchestrator: mcp_confirm result", result);
+          await invoke("hide_sidebar").catch(() => {});
+          return {
+            request_id: "mcp-confirmed",
+            subsystem: "mcp",
+            handled_locally: false,
+          };
+        } catch (err) {
+          console.error("[NEXUS] orchestrator: mcp_confirm failed:", err);
+          return null;
+        }
+      }
+
       console.log("[NEXUS] orchestrator: confirming pending GitHub command", pendingCmd);
       try {
         const result = await invoke<unknown>("orchestrator_github_execute", {
@@ -344,6 +455,7 @@ export async function processViaOrchestrator(
           confirmed: true,
         });
         console.log("[NEXUS] orchestrator: github_execute confirmed result", result);
+        await invoke("hide_sidebar").catch(() => {});
         // The result events are emitted by Rust on the orchestrator:event channel
         // and handled by the listener above.
         return {
@@ -357,17 +469,35 @@ export async function processViaOrchestrator(
       }
     } else if (isNo) {
       // User declined — clear the pending command
+      const wasMcp = (pendingCmd as any)?.kind === "mcp";
       store.setPendingGithubCommand(null);
       useAssistant.getState().addUserMessage(transcript);
+      if (wasMcp) {
+        try {
+          await invoke<unknown>("orchestrator_mcp_confirm", {
+            requestId: currentRequestId ?? "mcp-cancel",
+            confirmed: false,
+            pending: pendingCmd,
+          });
+        } catch (err) {
+          console.warn("[NEXUS] orchestrator: mcp cancel failed:", err);
+        }
+      }
+      await invoke("hide_sidebar").catch(() => {});
       const abortMsg = "Okay, I've cancelled that operation, sir.";
       useAssistant.getState().addAssistantMessage(abortMsg);
       void speak(abortMsg);
       setTimeout(() => useAssistant.getState().reset(), 2000);
-      return { request_id: "github-aborted", subsystem: "github", handled_locally: true };
+      return {
+        request_id: wasMcp ? "mcp-aborted" : "github-aborted",
+        subsystem: wasMcp ? "mcp" : "github",
+        handled_locally: true,
+      };
     }
     // If it's neither yes nor no, fall through to normal processing
     // (the user may have said a completely different command)
     store.setPendingGithubCommand(null);
+    void invoke("hide_sidebar").catch(() => {});
   }
 
   try {

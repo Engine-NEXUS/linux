@@ -140,6 +140,10 @@ INTENTS = [
     "whatsapp_open",
     "whatsapp_search",
     "focus_app",
+    # Commerce + social MCP commands (3) — NEW
+    "order_food",
+    "search_product",
+    "send_whatsapp_message",
     # Fallback (1)
     "unknown",
 ]
@@ -179,6 +183,10 @@ SLOT_TYPES = [
     "B-key", "I-key",            # for press_key
     "B-keys", "I-keys",          # for press_hotkey
     "B-target", "I-target",      # for focus_app
+    # Commerce + social slots (NEW)
+    "B-food_item", "I-food_item",    # for order_food (dish to order)
+    "B-restaurant", "I-restaurant",  # for order_food (restaurant name)
+    "B-message", "I-message",        # for send_whatsapp_message (message body)
 ]
 SLOT_TO_ID = {slot: i for i, slot in enumerate(SLOT_TYPES)}
 ID_TO_SLOT = {i: slot for i, slot in enumerate(SLOT_TYPES)}
@@ -195,10 +203,14 @@ torch.manual_seed(SEED)
 # ─── Dataset ───────────────────────────────────────────────────────────────
 
 def load_dataset():
-    """Load training data from dataset.json."""
+    """Load independent training, validation, calibration, and final-test splits."""
     with open(DATASET_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return data["train"], data.get("test", [])
+    required = ("train", "validation", "calibration", "test")
+    missing = [name for name in required if not data.get(name)]
+    if missing:
+        raise ValueError(f"dataset is missing required independent splits: {missing}")
+    return tuple(data[name] for name in required)
 
 
 def annotate_slots(text: str, slots: dict) -> list[str]:
@@ -333,19 +345,11 @@ class JointNLUModel(nn.Module):
 
 def train():
     print("Loading dataset...")
-    train_data, test_data = load_dataset()
-    print(f"  Train: {len(train_data)} examples")
-    print(f"  Test:  {len(test_data)} examples")
-
-    # Split test into validation + test (50/50) so we don't overfit to test
-    if len(test_data) >= 4:
-        random.shuffle(test_data)
-        split = len(test_data) // 2
-        val_data = test_data[:split]
-        test_data = test_data[split:]
-    else:
-        val_data = test_data
-    print(f"  Val:   {len(val_data)} examples")
+    train_data, val_data, calibration_data, test_data = load_dataset()
+    print(f"  Train:       {len(train_data)} examples")
+    print(f"  Validation:  {len(val_data)} examples")
+    print(f"  Calibration: {len(calibration_data)} examples (reserved; no gradient or checkpoint use)")
+    print(f"  Final test:  {len(test_data)} examples (evaluation only)")
 
     print(f"Loading tokenizer: {MODEL_NAME}")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -389,7 +393,7 @@ def train():
     slot_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     print(f"Training for {EPOCHS} epochs...")
-    best_test_acc = 0.0
+    best_validation_acc = 0.0
 
     for epoch in range(EPOCHS):
         model.train()
@@ -443,8 +447,8 @@ def train():
         print(f"  Epoch {epoch+1:2d}/{EPOCHS}: loss={avg_loss:.4f}, train_acc={train_acc:.3f}, val_acc={val_acc:.3f}")
 
         # Save best model (based on validation accuracy)
-        if val_acc > best_test_acc:
-            best_test_acc = val_acc
+        if val_acc > best_validation_acc:
+            best_validation_acc = val_acc
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             torch.save(model.state_dict(), OUTPUT_DIR / "best_model.pt")
             print(f"    -> saved best model (val_acc={val_acc:.3f})")
@@ -469,7 +473,7 @@ def train():
                 total += len(intent_labels)
         final_test_acc = correct / total
 
-    print(f"\nBest validation accuracy: {best_test_acc:.3f}")
+    print(f"\nBest validation accuracy: {best_validation_acc:.3f}")
     print(f"Final test accuracy: {final_test_acc:.3f}")
 
     tokenizer.save_pretrained(OUTPUT_DIR / "tokenizer")

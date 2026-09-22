@@ -23,9 +23,50 @@ const FRAME_HOLD_SMILE = 300;
 
 type AnimMode = "wake-loading" | "wake-smile" | "idle-smile" | "loading-loop" | "holding";
 
+export interface AvatarAnim {
+  segment: [number, number] | null; // null = hold current frame
+  loop: boolean;
+  speed: number;
+  mode: AnimMode;
+}
+
+/** Pure state → animation mapping (unit-tested). */
+export function resolveAvatarAnim(st: AssistantState): AvatarAnim {  const speed: Record<AssistantState, number> = {
+    idle: 1.0,
+    listening: 1.5,
+    thinking: 1.5,
+    speaking: 1.2,
+  };
+  if (st === "listening") {
+    return { segment: SEG_LOADING, loop: false, speed: speed[st], mode: "wake-loading" };
+  }
+  if (st === "thinking" || st === "speaking") {
+    return { segment: SEG_LOADING, loop: true, speed: speed[st], mode: "loading-loop" };
+  }
+  return { segment: SEG_SMILE_ARRIVE, loop: false, speed: speed[st], mode: "idle-smile" };
+}
+
+/**
+ * Pure speaking-animation decision (unit-tested).
+ *
+ * The loading loop runs ONLY while TTS audio is actually playing.
+ * Silent `speaking` (meeting suppression, inter-chunk gaps, waits) holds
+ * the current frame instead of looping over dead air. `listening` and
+ * `thinking` are unaffected — mic/network feedback has no audio
+ * counterpart and keeps its segments via resolveAvatarAnim.
+ */
+export function shouldHoldSpeakingFrame(
+  st: AssistantState,
+  ttsActive: boolean,
+): boolean {
+  return st === "speaking" && !ttsActive;
+}
+
 export function Avatar() {
   const state = useAssistant((s) => s.state);
   const visible = useAssistant((s) => s.visible);
+  const ttsActive = useAssistant((s) => s.ttsActive);
+  const awaitingInput = useAssistant((s) => s.awaitingInput);
   const [animationData, setAnimationData] = useState<object | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const animRef = useRef<AnimationItem | null>(null);
@@ -41,30 +82,20 @@ export function Avatar() {
 
   // Apply state-based animation to a given AnimationItem.
   // Called both on initial load and on state changes.
+  // Guard: if the resolved mode is already active (e.g. thinking → speaking
+  // are both "loading-loop"), only update speed — restarting the segment
+  // on every tick is what made rapid sequences look possessed.
   function applyState(anim: AnimationItem, st: AssistantState) {
-    const speed: Record<AssistantState, number> = {
-      idle: 1.0,
-      listening: 1.5,
-      thinking: 1.5,
-      speaking: 1.2,
-    };
-    anim.setSpeed(speed[st]);
-
-    if (st === "listening") {
-      // Wake sequence: loading (~1s at 1.5x) → smile arrives → hold
-      modeRef.current = "wake-loading";
-      anim.loop = false;
-      anim.playSegments(SEG_LOADING, true);
-    } else if (st === "thinking" || st === "speaking") {
-      // Loading circles loop continuously
-      modeRef.current = "loading-loop";
-      anim.loop = true;
-      anim.playSegments(SEG_LOADING, true);
-    } else {
-      // idle: smile arrives → hold
-      modeRef.current = "idle-smile";
-      anim.loop = false;
-      anim.playSegments(SEG_SMILE_ARRIVE, true);
+    const resolved = resolveAvatarAnim(st);
+    if (modeRef.current === resolved.mode) {
+      anim.setSpeed(resolved.speed);
+      return;
+    }
+    modeRef.current = resolved.mode;
+    anim.setSpeed(resolved.speed);
+    anim.loop = resolved.loop;
+    if (resolved.segment) {
+      anim.playSegments(resolved.segment, true);
     }
   }
 
@@ -119,11 +150,20 @@ export function Avatar() {
     };
   }, [animationData]);
 
-  // React to state changes — apply correct segment/speed/mode.
+  // React to state AND audio-activity changes.
+  // Speaking without audio holds the current frame (no looping over
+  // silence); listening/thinking keep their segments (mic/network
+  // feedback has no audio counterpart).
   useEffect(() => {
     if (!animRef.current) return;
+    if (shouldHoldSpeakingFrame(state, ttsActive)) {
+      modeRef.current = "holding";
+      animRef.current.loop = false;
+      animRef.current.pause();
+      return;
+    }
     applyState(animRef.current, state);
-  }, [state]);
+  }, [state, ttsActive]);
 
   // Play/pause animation based on visibility.
   // When hiding, delay the pause so the Lottie stays alive during the
@@ -140,10 +180,11 @@ export function Avatar() {
     }
   }, [visible]);
 
+  const waiting = state === "speaking" && awaitingInput;
   return (
     <div
       data-interactive
-      className={`avatar-wrap avatar-wrap--${state}`}
+      className={`avatar-wrap avatar-wrap--${state}${waiting ? " avatar-wrap--waiting" : ""}`}
       style={{
         width: 180,
         height: 180,

@@ -165,6 +165,11 @@ export function PrListApp() {
 
   const handleAnalyse = async (pr: PrSummary) => {
     setActionInProgress({ prNumber: pr.number, action: "analyse" });
+    // Hide the PR list FIRST: the analysis renders in the response sidebar
+    // (AnalysisDashboard) and the loading indicator covers the wait.
+    // Same close path as Ctrl+Space.
+    hide();
+    tauriInvoke("hide_pr_list_sidebar").catch(() => {});
     try {
       // Trigger the same analysis flow as "analyse pr N in repo"
       await tauriInvoke("orchestrator_process", {

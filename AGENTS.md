@@ -1,5 +1,607 @@
 # NEXUS — Project Notes
 
+## Apex Wake Word Evolution, Data Poisoning Quarantine & Adaptive Microphone DSP (2026-09-22)
+
+- **Automated ASR Poisoning Quarantine (`audit_positive_samples.py`)**:
+  Audited 592 positive recordings with `faster-whisper` and RMS filters. Identified and quarantined 135 poisoned clips
+  (conversational sentences, YouTube background audio, near-silence) into `quarantined_bad_positive/`, leaving 456
+  pristine acoustic NEXUS recordings.
+- **Multilingual Negative & Multi-Source Background Augmentation**:
+  Synthesized 1,442 negative samples across English soundalikes (*"next"*, *"texas"*, *"lexus"*, *"necklace"*),
+  Indian languages (Hindi: `hi-IN-Madhur`, `hi-IN-Swara`; Telugu: `te-IN-Mohan`, `te-IN-Shruti`), and assistant names.
+  Generated 400 multi-source background sound clips (`generate_background_sounds.py`) for HVAC fans, mechanical
+  keyboard typing, mouse clicks, and room ambience.
+- **BCEWithLogitsLoss & SigmoidWrapper ONNX Export**:
+  Upgraded classifier training with `pos_weight=8.0` penalty on negatives and exported calibrated ONNX graph.
+- **Adaptive Microphone Hardware Prober (`nexus wake probe` / `acoustic_profile.rs`)**:
+  Created 1.5s FFT ambient spectral scan in `scripts/probe_microphone.py` and Rust `src-tauri/src/acoustic_profile.rs`.
+  Detected chassis fan resonance at 113.3 Hz (+22.3 dB) on Intel Smart Sound mic array; dynamically auto-tunes high-pass
+  filter to 128.3 Hz, hardware pre-gain to 2.50x, adaptive silence gate to 0.00300 RMS, and impulsive gate to 8.0x (rejecting coughs/throat-clears).
+- **Phantom Cascade Elimination**:
+  Added `reset_after_trigger()` across Rust and Python to immediately flush the 16-frame embedding buffer on trigger confirmation.
+- **Batch Evaluation & Verification**:
+  Batch benchmark on 2,298 files: **92.3% True Positive Recall**, **98.9% Negative Rejection** (1.1% FA), and **99.8% Background Noise Rejection** (0.2% FA).
+- **Docs**: Architecture spec in `docs/features/57-apex-wake-word-evolution-and-hardware-adaptation.md` and changelog in
+  `docs/changes/38-apex-wake-word-evolution-and-hardware-adaptation.md`.
+
+## Targeted Intent Training, Category Drill-Down & MCP Data Promotion (2026-09-22)
+
+- **Targeted CLI Voice Collection (`nexus collect`)**:
+  Added `-i` / `--intent` and `-c` / `--category` flags with combined scope validation. Developers can directly
+  target single intents (`nexus collect --category github --intent create_pr` or `nexus collect --intent create_pr`)
+  or drill down interactively by choosing a category and selecting individual sub-intents from a numbered terminal menu.
+- **Complete Phrase Catalogs (All 55 BERT-Mini Intents)**:
+  Expanded `PHRASES` in `scripts/collect_nlu_samples.py` with realistic spoken templates for all 23 missing GitHub,
+  workflow, release, collaborator, and local mode intents (57 total registered intents including live dictation modes).
+  Extended `extract_slots()` with rule-based entity extractors for `create_pr` (`repo`, `title`, `head`, `base`),
+  `comment_pr` (`pr_number`, `repo`, `body`), `analyse_pr` (`owner`, `repo`, `pr_number`), `add_collaborator`, etc.
+- **Zero-Quarantine MCP Split Promotion (`dataset.json`)**:
+  Diagnosed the Step 3d quarantine cause (missing test rows in locked evaluation set for new intents). Promoted
+  25 phrase families for `order_food` (99 rows), 12 for `search_product` (68 rows), and 12 for `send_whatsapp_message` (127 rows)
+  into `dataset.json` with strict zero phrase-family cross-split leakage. Re-minted `split_lock.json` and `evaluation_lock.json`
+  (481 test rows). Validation passes cleanly (`python server/nlu/data_foundation.py validate`).
+- **Category Coverage Alignment (`nlu_stats.py`)**:
+  Aligned category schema with the 55 production intents. Verified that all MCP intents now display full trained rows
+  (`order_food`: 77, `send_whatsapp_message`: 72, `search_product`: 32, `whatsapp_search`: 107) and active `◐ Good` / `● Strong`
+  mastery status.
+- **Docs**: Architecture spec in `docs/features/56-targeted-intent-training-and-mcp-data-promotion.md` and changelog in
+  `docs/changes/37-targeted-intent-training-and-mcp-data-promotion.md`.
+
+## NLU Data Foundation, STT Conditioning & Voice Scaling (2026-09-22)
+
+- **Acoustic STT vs. Language NLU Decoupling**:
+  Untangled speech acoustic transcription from text intent classification. Resolved multilingual Whisper
+  hallucinations (Urdu/Russian/Spanish on short <2s clips) by adding `language="en"`, `temperature="0.0"`,
+  and domain prompt biasing (`NEXUS, WhatsApp, Biryani, Dosa, Ghostwriter, VS Code, PR, GitHub...`) to
+  `scripts/collect_nlu_samples.py`.
+- **Data Foundation & Evaluation Lock Fix (`data_foundation.py`)**:
+  Fixed `ERROR: external benchmark hash mismatch` by updating `server/nlu/data/external_evaluation_lock.json`
+  with canonical SHA-256 hashes for sorted evaluation benchmark files (`clinc150_oos_test.jsonl`). Preflight
+  validation passes cleanly.
+- **The 70/30 Data Principle**:
+  Enforces 70% anti-poisoning guardrails (cryptographic test locks, slot consistency, conflict repair, split quarantine)
+  and 30% zero-waste user effort preservation (all clean recorded voice samples from `collected_samples.jsonl`
+  automatically audited and merged into `dataset.json` — 3,108 training rows).
+- **Voice Scaling Science**:
+  Empirical research demonstrates 100–500 voice samples is the optimal sweet spot (~96.5%–98.2% standalone BERT accuracy;
+  99%+ real-world command success when backed by the 3-tier Regex/BERT-Mini/Qwen cascade).
+- **Speaker Independence & One-Login Google Contacts**:
+  Documented text-token speaker invariance (1 global BERT-Mini model works for all users/devices via Worker R2 OTA updates).
+  Integrated Google OAuth scope union (`contacts`, `gmail`, `calendar`) with local `contacts.json` resolution.
+- **Docs**: Comprehensive spec in `docs/features/55-nlu-data-perfection-voice-scaling-and-mcp-bridge-research.md`
+  and changelog in `docs/changes/36-nlu-data-foundation-stt-conditioning-and-voice-scaling.md`.
+
+## Interactive Voice Approval & Confirmation Sidebar (2026-09-21)
+
+Full interactive voice approval workflow with smart 5-second listening window
+and persistent Response Sidebar confirmation card:
+- **Response Sidebar Confirmation Card (`ConfirmationPanel.tsx`)**:
+  Renders structured details for actions requiring approval (WhatsApp recipient & message bubble,
+  GitHub repo/PR#/danger warning, Swiggy/Amazon MCP tools/parameters). Displays 1-click
+  `[✓ Confirm]` and `[✕ Cancel]` buttons with loading state.
+- **Automatic 5-Second Voice Listening Window (`orchestrator.ts`)**:
+  Once prompt TTS finishes speaking, the microphone automatically opens into `listening` mode
+  and starts STT audio capture without needing a hotkey or wake word.
+- **Instant Early Reaction (< 2s)**:
+  Speaking an approval phrase (*"proceed"*, *"approved"*, *"yes"*, *"confirm"*, *"go ahead"*, *"do it"*)
+  or rejection phrase (*"cancel"*, *"no"*, *"abort"*) clears the 5s timer immediately and executes
+  or aborts without waiting for the full 5s window.
+- **Graceful Timeout & Sidebar Persistence**:
+  If 5 seconds elapse with no speech, the mic returns to idle while the sidebar remains open on screen
+  for manual review and 1-click approval.
+- **Rust Backend Integration (`commands.rs`, `orchestrator.rs`, `lib.rs`)**:
+  `show_sidebar_with_confirmation` captures blurred desktop backdrop and stores confirmation JSON
+  race-free in `PENDING_SIDEBAR`.
+- **Docs & Verification**: Detailed architecture spec in
+  `docs/features/54-interactive-voice-approval-and-confirmation-sidebar.md`.
+  Verified across 585 tests (519 Rust + 17 Vitest + 49 Worker).
+
+## MCP Connect System — Best-of-Combine Build (2026-09-20)
+
+Industry research in `docs/research/mcp-connection/` (7 files) drove a
+three-stack implementation, each phase verified twice:
+
+**Phase 1 — shared connect infrastructure:**
+- `mcp_client.rs`: `McpConnectState` (unknown/down/auth-required/ready),
+  `pairing_status` parser (`parse_pairing_state`, case-insensitive,
+  garbage → Error, never fake green), `normalize_qr_payload`
+  (data-URI / raw-b64 / pairing-code), `mcp_connect_state` command +
+  `connect_card_for` per server (WhatsApp fuses transport + pairing;
+  vault services fuse transport + `token_status`; Amazon transport-only).
+- `orchestrator.rs`: MCP failure → voice guidance (existing) + Connect
+  card opens in the sidebar ONCE per server per session
+  (`SHOWN_CONNECT_CARDS` gate; `open_mcp_connect_card` +
+  `connect_card_markdown` — status, numbered steps, QR image, /pair
+  link, ToS-burner + 20-day-rotation notes). Failed call is stashed
+  (`PENDING_MCP_RETRY`) and a 5s-poll ready monitor
+  (`spawn_ready_monitor`, ~10min cap) auto-retries it once when the
+  server turns Ready (Composio WAIT_FOR_CONNECTIONS shape); drops
+  silently if a newer turn is active. Wired into `Subsystem::Mcp` Err,
+  `dispatch_to_mcp` Err, and `orchestrator_mcp_confirm` Err.
+
+**Phase 2 — Swiggy spec-OAuth (Worker + vault + frontend):**
+- `server/worker/src/index.ts`: SWIGGY_TOKEN_URL/AUTH_URL/SCOPES +
+  Env secrets; `handleAuthUrl`, `handleOAuthBrowserCallback`,
+  `handleOAuthExchange` each gained a swiggy branch (PKCE S256, form-
+  encoded token exchange, D1 storage, shared `/oauth/callback` +
+  `nexus://oauth/` deep link); `refreshSwiggyToken` +
+  `getValidSwiggyToken` (silent refresh, null-on-failure like Google);
+  `GET /oauth/swiggy-token`; `/config/check` lists swiggy.
+- `auth_vault.rs`: `fetch_swiggy_token_from_worker` + swiggy arm in
+  `refresh_service_token` (silent refresh on-device).
+- `setup/oauth.ts` + `SetupApp.tsx`: provider union widened to
+  `"swiggy"` (flow is fully generic). Connections tab: "Login with
+  Swiggy" button (`handleSwiggyLogin` → connectOAuth → vault refresh),
+  updated hint.
+- Setup needs: `wrangler secret put SWIGGY_CLIENT_ID/SWIGGY_CLIENT_SECRET`
+  (Builders-Club approval required for production; localhost dev free).
+
+**Phase 3 — long-tail + proactive rotation:**
+- Spotify/Vercel/Render cards: numbered 3-step hints + "Get token"
+  buttons (`shell.open` provider pages, window.open fallback).
+- Vault idle monitor (90s) now also probes WhatsApp `pairing_status`
+  (inner call — no breaker trip, no audit) so the scheduled ~20-day
+  session rotation surfaces before a send fails.
+
+**Verify x2 results:** cargo check clean; `cargo test --lib
+--test-threads=1` 499/499; Worker `npm test` 49/49 ×2 + tsc; frontend
+vitest 14/14 ×2 + tsc. Live bridges test (`test_connect_state_live_bridges`)
+pins card shape invariants (pair URL, steps present on auth-required,
+no nag on ready) against live 5-server probe.
+
+**Round-2 deep audit (same day, `docs/research/mcp-connection/08-...`):**
+live sources (Anthropic trackers #744/#54649/#60572/#35, Novu connect-card
+PR, AutoGPT MCP fix commit, 2026-07-28 OAuth security spec) exposed 5
+gaps — all fixed + verified ×2 (Rust now 500/500 serial): monitor
+re-renders the open card when the QR payload changes (WhatsApp rotates
+its QR every 20-30s; a static card was unscannable after 30s) and renders
+the Connected card on Ready; `getValidSwiggyToken` persists rotated
+refresh tokens (OAuth 2.1 public-client MUST); RFC 8707 `resource` param
+added to Swiggy authorize/exchange/refresh; `audit_line()` choke point +
+test pins tokens out of the audit log; `mcp_connect_state` probes run in
+parallel (25s → 5s worst case).
+
+## Stuck Animations + PR Analyse Flow + Minimal Sidebar + Phase 11 (2026-09-18)
+
+**Stuck wakeup animation — root cause was a missing `done` handshake.**
+`WorkerBackend` Ok withholds `Done` (would cancel TTS), but the frontend
+`result` handler spoke with no `onEnd` and `signalOrchestratorDone()` had
+zero call-sites — the orb parked in `speaking`/loading-loop forever after
+long replies. NOT any "ghost mode" (no ghost CSS/setting exists anywhere;
+"ghost" = Ghostwriter dictation only). Fixes:
+- `net/orchestrator.ts::finishSpokenResult` — TTS onEnd → guarded reset +
+  `orchestrator_done` (barge-in-safe via request-id check). 3 vitest tests.
+- `App.tsx` 60s speaking failsafe — silent 60s in `speaking` (checked via
+  `isRustTtsPlaying()`) forces the `done`-equivalent reset; long replies
+  re-arm instead of cutting.
+- `show_loading` runs inline (spawn removed) — create always completes
+  before the paired destroy; kills the spinner re-creation race.
+- Known flake: `test_install_and_cancel` fails under parallel threads
+  (shared ACTIVE_REQUEST global); passes isolated ×2 and 43/43 serial.
+
+**Analyse-PR flow:** pr-list `Analyse` now hides the list first
+(`hide()` + `hide_pr_list_sidebar`); `WorkerBackend` Ok with non-null
+`analysis` opens the response sidebar via `show_sidebar_with_analysis`
+(PENDING_SIDEBAR race-free path) AFTER emitting `Result` (TTS not blocked).
+No new AI call — the Worker already returned `analysis`, it was
+`console.log`-dropped.
+
+**Minimal sidebar:** removed container top-highlight gradients, inset
+stacks, specular `::before` rims, gradient overlays (flat dim kept),
+dead `backdrop-filter`s, dot pulse, button lift/glow, red close hover,
+`nexus-hr` gradient, unused `--gradient-*` vars. PR buttons now flat
+solid (green Merge, grey Analyse). Settings sidebar untouched (still glossy).
+
+**list_prs "pull requests and alll":** data was fine (64 train rows) — the
+deterministic regex had no `pull request` alternative and `$`-anchored out
+trailing words. Pattern now accepts the noun + `and all/all of them/
+everything` + optional `the` after state. `add_phase11_pr_verbs.py` adds
+45 fresh rows (39 list_prs + 6 OOS) → candidate train 3482, test intent
+**0.9004** (was 0.8850), gated OOS 0.9871. Production dataset.json
+untouched (2765 rows) — promotion is a separate merge+retrain decision.
+`collect_nlu_samples.py`: duplicate `list_prs` key merged (21 phrases were
+silently dropped), 32-phrase list; interactive category menu (github, mcp,
+apps, messages, live, random) + `--category`; no google/research category
+(no such intents exist yet). Say-it-your-way paraphrase option built then
+REVERTED per user (need is same-word/many-sounds, not rewording) —
+replaced by `canonical_repo_name()` sound-alias map (`cervix/srvx/service
+→ servx`, zinc/sync → zync, per-segment, unknown pass-through), wired
+into `clean_repo_name` (all deterministic repo intents) + `nlu_client`
+`repo_slot` (all 22 repo arms). "analyse pr 254 in zink" now exact 1.0
+instead of fuzzy 0.8.
+
+## Qwen Brain — Admin-Only Local Reasoning (2026-09-17)
+
+**Phase 6 status: the brain stack already existed** — `admin_config.rs`
+(`is_admin` runtime gate + `admin-brain` compile gate), `lazy_brain.rs`
+(non-blocking spawn on port 39219), `brain_client.rs` (classify /
+generate_phrasings / pronunciation_map / health), `brain_monitor.rs`
+(continuous learning), `server/admin/brain_server.py` (Qwen2.5-0.5B
+GGUF, 480 MB, present at `server/admin/model/`). The orchestrator tries
+brain classification BEFORE NLU when the deterministic parser misses.
+
+What Phase 6 added:
+
+### 1. Intent schema coverage for the new MCP intents
+
+The 3 commerce/social intents existed only in the deterministic parser —
+the NLU/brain paths dropped them (`_ => None`). Now wired end-to-end:
+
+- `nlu_client.rs::nlu_to_parsed_intent` — maps `order_food`
+  (`food_item`→query, `restaurant`), `search_product` (`query`),
+  `send_whatsapp_message` (`contact`, `message`). Brain responses reuse
+  this mapping, so both paths benefit.
+- `nlu_server.py` — `INTENTS` + `SLOT_TYPES` updated to match the
+  retrained model (55 intents, 51 slot labels — **must match
+  `train.py` ordering**).
+- `brain_server.py` — `ALL_INTENTS` + `SYSTEM_PROMPT` know the 3 new
+  intents, their slots (`food_item`, `restaurant`, `message`), and
+  few-shot examples.
+
+### 2. Brain-assisted compound planning
+
+`command_center::build_plan_with_brain` (async) — called from
+`process_transcript` in place of the sync `build_plan`:
+
+- Fast path: fully deterministic plan → brain never invoked (zero added latency).
+- If any step fails deterministic parse AND the `admin-brain` feature
+  is on AND `is_admin()` → `brain_classify` fills in that step.
+- Same conservative gates: Architect/None/CommandCenter steps abort the
+  plan; brain-classified steps flow through the same confirmation-gated
+  dispatch.
+- Non-admin devices / brain unavailable → identical `None` fallback
+  (single-intent path), zero risk.
+
+This enables compounds like "remind me to call mom then order biryani"
+where a step phrasing misses the deterministic regexes.
+
+### Gates (unchanged, both required)
+
+1. Compile-time: `cargo build --features admin-brain`
+2. Runtime: `%APPDATA%/com.nexus.assistant/admin.json` (or dev
+   `server/admin/admin_config.json`) with `is_admin: true`,
+   `brain_enabled: true`
+
+Family builds ship without `admin-brain` — all brain code is compiled
+out (`brain_client`, `brain_monitor`, `lazy_brain` don't exist).
+
+## NLU Self-Improvement — Family Model Distribution (2026-09-17)
+
+The admin's Qwen brain continuously improves BERT-Mini (brain_monitor →
+approved_phrasings.jsonl → merge_and_train.py). **Phase 5 adds the
+distribution channel**: family devices pull the improved model over the
+air — no app rebuild needed.
+
+### Architecture
+
+```
+ADMIN                              WORKER (Cloudflare)              FAMILY
+nexus train                        KV: nlu_model_latest manifest    startup +15s:
+  → nexus_nlu.onnx                 R2: nlu/<file> objects           GET /models/nlu/latest
+python publish_nlu.py                                               version differs?
+  → wrangler r2 object put ...        ──────────────────────────→   GET /models/nlu/download?name=
+  → POST /models/nlu/publish                                        per-file sha256 verify
+     (Bearer NEXUS_ADMIN_TOKEN)                                     → %APPDATA%/com.nexus.assistant/nlu_model/
+                                                                    → POST /reload_model (hot-swap)
+                                                                    or NEXUS_NLU_MODEL_DIR on next spawn
+```
+
+### Worker endpoints (`server/worker/src/index.ts`)
+
+| Endpoint | Auth | What it does |
+|----------|------|--------------|
+| `GET /models/nlu/latest` | none | KV manifest `{version, updated_at, files:{name:{sha256,size}}}` |
+| `GET /models/nlu/download?name=<file>` | none | Streams file from R2 `nlu/` prefix; whitelist-guarded names |
+| `POST /models/nlu/publish` | `Bearer NEXUS_ADMIN_TOKEN` | Writes KV manifest (admin publishes blobs via wrangler) |
+
+Returns 503 when `CACHE`/`MODELS` bindings are missing — family clients
+treat that as "no update" and keep the bundled model.
+
+### Client side (`src-tauri/src/nlu_update.rs`)
+
+- `spawn_update_check(app)` — called once at startup (15s after session
+  auto-open, so first paint isn't competing with a 35 MB download)
+- Downloads to a `.staging` dir first; sha256-verifies every file;
+  aborts cleanly on mismatch (old model stays live)
+- File-level manifest (no zip dep): `nexus_nlu.onnx`, `.onnx.data`,
+  `labels.json`, `temperature_calibration.json`, `tokenizer/*`
+- If NLU server is already running → `POST /reload_model` hot-swaps
+- `downloaded_model_dir_envless()` — used by `lazy_nlu.rs` to pass
+  `NEXUS_NLU_MODEL_DIR` at spawn (same `%APPDATA%/com.nexus.assistant`
+  derivation as `lazy_stt.rs::read_moonshine_model`)
+
+### `nlu_server.py` model dir resolution
+
+1. `NEXUS_NLU_MODEL_DIR` env var (downloaded update) — if it has ONNX
+2. `server/nlu/model/` (dev)
+3. `src-tauri/resources/server/nlu/model/` (bundled fallback)
+
+### Admin publish (`server/nlu/publish_nlu.py`)
+
+```bash
+# One-time setup:
+npx wrangler r2 bucket create nexus-models
+# uncomment [[r2_buckets]] MODELS binding in server/worker/wrangler.toml
+npx wrangler secret put NEXUS_ADMIN_TOKEN
+npx wrangler deploy
+
+# After each retrain:
+python server/nlu/publish_nlu.py \
+  --worker https://nexus-worker.chitkullakshya.workers.dev \
+  --token-file ../admin/data/admin_token.txt
+```
+
+### New NLU intents (Phase 8 staged data)
+
+`server/nlu/add_commerce_intents.py` generates 158 staged examples for
+`order_food`, `search_product`, `send_whatsapp_message` (+ 9 OOS
+negatives), wired into `build_candidate_dataset.py` as
+`phase8_commerce_social.json`. `train.py` INTENTS/SLOT_TYPES and
+`model/labels.json` updated (55 intents, 51 slot labels; new slots:
+`food_item`, `restaurant`, `message`). Next `nexus train` /
+candidate build includes them.
+
+**Pre-existing issue found:** `build_candidate_dataset.py` currently
+fails on `"how much is an overdraft fee for bank"` — that CLINC staging
+row was already merged into production train (twice, duplicated), so
+`verify_no_overlap` trips before phase8 is even reached. Fix: remove the
+row from `clinc150_oos_train_reviewed.jsonl` or dedupe train.
+
+## Command Center — Multi-Step Task Orchestration (2026-09-16)
+
+**`src-tauri/src/command_center.rs`** implements the n8n-style command
+center: compound commands ("X then Y") are split into steps, each step
+is parsed + routed to a sub-center, executed sequentially, and results
+are merged into one response.
+
+### How it works
+
+```
+"open chrome then search for cats"
+  → split_compound()    → ["open chrome", "search for cats"]
+  → build_plan()        → TaskPlan { 2 PlanSteps, each routed }
+  → execute_plan()      → step 1: LocalCommand → command_executor
+                        → step 2: WorkerBackend → 9Router/Worker
+  → merge               → "Opened Chrome sir. Found results for cats."
+```
+
+### Split rules (`split_compound`)
+
+Splits on: ` then `, ` and then `, `, then `, ` after that `,
+` afterwards `, `; `. Deliberately does NOT split on bare ` and ` —
+"search and rescue", "mum and dad" would break. Dangling trailing
+connectors ("open chrome then") are stripped before splitting.
+
+### Conservative fallback
+
+`build_plan` returns `None` (falls back to normal single-intent path)
+when:
+- transcript isn't compound (< 2 parts)
+- ANY part fails deterministic parsing — a bad split should never
+  produce a worse outcome than today's path
+- any part routes to `Architect` (window-managed, can't compose)
+
+### Step execution (`execute_step`)
+
+| Subsystem | How it runs |
+|-----------|-------------|
+| LocalCommand | `ParsedIntent` → `command_executor::Intent` → `execute_command` |
+| Mcp | `dispatch_to_mcp` — read ops run; gated ops emit Confirm + pause |
+| WorkerBackend | `dispatch_to_worker` (9Router fast path included) |
+| GitHub | `github_cmd::execute_command` — read ops inline; destructive ops emit Confirm (existing frontend flow) |
+| Architect / CommandCenter | `Unsupported` — can't nest/compose |
+
+### Confirmation gates inside compounds
+
+When a step hits a confirmation gate (e.g. `send_whatsapp_message`),
+the task pauses: the gated step's pending payload is emitted as a
+Confirm event, and the remaining steps are stashed in
+`PENDING_COMPOUND`. `orchestrator_mcp_confirm` calls
+`resume_compound()` after approval — it runs the confirmed call, then
+the remaining steps, and emits the merged result.
+
+Known v1 limit: a destructive **GitHub** step inside a compound emits
+Confirm via the existing github flow, but remaining steps are dropped
+(GitHub resume needs `orchestrator_github_execute` integration).
+
+### Cancellation
+
+Each step checks `is_cancelled` before running — a barge-in mid-plan
+skips remaining steps and reports partial results.
+
+### Sequential only
+
+v1 runs steps in order ("then" implies ordering). Independent parallel
+steps are future work.
+
+### Files
+
+- `src-tauri/src/command_center.rs` — plan/split/execute/resume/merge
+  (~950 lines, 20 unit tests)
+- `src-tauri/src/orchestrator.rs` — `Subsystem::CommandCenter`,
+  compound fast path in `process_transcript`, `run_command_center`,
+  `orchestrator_mcp_confirm` resume hook, pub wrappers
+  (`dispatch_to_mcp_pub`, `dispatch_to_worker_pub`, `is_cancelled_pub`)
+
+## MCP Sub-Center — External Services via Model Context Protocol (2026-09-16)
+
+**`src-tauri/src/mcp_client.rs`** is the MCP client that calls external
+MCP servers (Swiggy, Amazon, WhatsApp) via JSON-RPC 2.0 over streamable
+HTTP. This is Phase 3 of the roadmap — the foundation for commerce and
+social sub-centers.
+
+### Registered MCP Servers
+
+| Server | Endpoint | Auth | Tools |
+|--------|----------|------|-------|
+| `SwiggyFood` | `https://mcp.swiggy.com/food` | OAuth 2.1 PKCE | 17 (restaurants, menu, cart, orders) |
+| `SwiggyInstamart` | `https://mcp.swiggy.com/im` | OAuth 2.1 PKCE | 19 (grocery search, cart, orders) |
+| `SwiggyDineout` | `https://mcp.swiggy.com/dineout` | OAuth 2.1 PKCE | 12 (table reservations) |
+| `WhatsApp` | `http://127.0.0.1:8765/mcp` | QR session | messaging, contacts |
+| `Amazon` | `http://127.0.0.1:8766/mcp` | browser session | product search, details, reviews |
+
+Swiggy MCPs are hosted by Swiggy (free on localhost for dev; production
+requires Builders Club approval + demo video). WhatsApp/Amazon run as
+local stdio/HTTP MCP servers (e.g., whatsmeow bridge, Playwright scraper).
+
+### New Intents (deterministic parser)
+
+| Pattern | Intent | Routes to |
+|---------|--------|-----------|
+| "order pizza from dominos" | `OrderFood { query, restaurant }` | `Subsystem::Mcp` → SwiggyFood `search_restaurants` |
+| "order biryani" / "get food from swiggy" | `OrderFood` | same |
+| "search for X on amazon" / "find X on amazon" | `SearchProduct { query }` | `Subsystem::Mcp` → Amazon `amazon_search` |
+| "amazon search for X" / "search amazon for X" | `SearchProduct` | same |
+| "send <c> a whatsapp message saying <m>" | `SendWhatsAppMessage` | `Subsystem::Mcp` → WhatsApp `send_message` |
+| "whatsapp <c> saying <m>" / "message <c> on whatsapp saying <m>" | `SendWhatsAppMessage` | same |
+
+**Ordering matters:** `parse_send_whatsapp_message` runs BEFORE
+`parse_whatsapp_command` — otherwise "whatsapp mom saying hi" would be
+swallowed as a chat-open with contact "mom saying hi".
+
+### Confirmation Gates
+
+`McpServer::requires_confirmation(tool)` — write ops (update cart,
+send message, book table) emit `OrchestratorEvent::Confirm` with a
+pending payload `{server, tool, params, transcript}` instead of
+executing. The frontend calls `orchestrator_mcp_confirm(request_id,
+confirmed, pending)` to proceed. Read ops (search, list, get) execute
+directly.
+
+`McpServer::is_destructive(tool)` — `place_food_order`, `place_im_order`,
+`book_table` get an irreversible-action warning in the confirm prompt.
+
+### Files
+
+- `src-tauri/src/mcp_client.rs` — MCP client (McpServer registry,
+  JSON-RPC call_tool/list_tools, SSE parsing, extract_text, 12 tests)
+- `src-tauri/src/intent_parser.rs` — 3 new intents + 3 parsers + 16 tests
+- `src-tauri/src/orchestrator.rs` — `Subsystem::Mcp`, `dispatch_to_mcp`,
+  `orchestrator_mcp_confirm` command, 4 routing tests
+- `src-tauri/src/lib.rs` — `pub mod mcp_client` + command registration
+
+### Still needed for production use
+
+- **Swiggy OAuth flow** — `call_tool` currently passes `auth_token=None`;
+  OAuth 2.1 PKCE token storage/refresh needs wiring (store in
+  `settings.json` or keychain).
+- **WhatsApp local bridge** — run a whatsmeow/Cloud-API MCP server on
+  `127.0.0.1:8765/mcp` (e.g., `whatsapp-mcp` Go bridge + Python MCP).
+- **Amazon local server** — run a product-search MCP on
+  `127.0.0.1:8766/mcp` (Creators API needs Associates credentials, or a
+  Playwright scraper variant).
+- **Multi-step flows** — order → cart → checkout chains belong to the
+  Phase 4 command center; today each intent maps to one tool call.
+
+## 9Router — Local AI Gateway (2026-09-16)
+
+**9Router** (`src-tauri/src/router.rs`) routes general AI questions
+directly to free cloud providers (Cerebras → Groq → Gemini), bypassing
+the Worker for 3-7x lower latency (~242ms vs ~2s). The Worker remains
+the fallback for PR analysis, GitHub operations, and tasks requiring
+session/OAuth tokens.
+
+### Architecture
+
+```
+Current (Worker path):
+  Device → Worker (50ms) → Workers AI (500-2000ms) → Worker (50ms) → Device
+  Total: 600-2100ms
+
+With 9Router:
+  Device → localhost (1ms) → Cerebras/Groq (80-120ms) → localhost (1ms) → Device
+  Total: ~242ms  (3-7x faster)
+```
+
+### Provider Cascade
+
+```
+Cerebras (1M tokens/day free, ~80ms, Llama 3.3 70B) — fastest
+  → Groq (14,400 req/day free, ~120ms, Llama 3.3 70B)
+    → Gemini (1,500 req/day free, ~400ms, flash-lite)
+      → Worker (fallback, uses neurons)
+```
+
+### What 9Router Handles
+
+- General questions ("what's the capital of France?")
+- Factual queries ("how tall is the Eiffel Tower?")
+- Conversational responses (when NLU confidence is low)
+
+### What Still Goes Through the Worker
+
+- PR analysis (needs GitHub token + GLM models)
+- GitHub commands (merge, approve, close PR)
+- Architecture mapper
+- Any task requiring session/OAuth tokens
+
+### Routing Logic (`router::can_route`)
+
+Returns `false` (must use Worker) for transcripts containing:
+`analyse pr`, `analyze pr`, `analyse latest pr`, `analyse repo`,
+`architect`, `check branch`, `merge pr`, `approve pr`, `close pr`,
+`github`, `pull request`, `pullrequest`.
+
+Returns `true` (9Router can try) for everything else.
+
+### Integration in Orchestrator
+
+`dispatch_to_worker()` in `orchestrator.rs` now tries 9Router first:
+1. If `can_route(transcript)` → try 9Router (Cerebras → Groq → Gemini)
+2. If 9Router succeeds → return directly (skip Worker entirely)
+3. If 9Router fails or `can_route` returns false → fall back to Worker
+
+### Settings (API Keys)
+
+Stored in `settings.json` (camelCase, same as existing Groq key):
+- `groqApiKey` — Groq API key (already existed for STT, now reused for LLM)
+- `geminiApiKey` — Google Gemini API key (already existed)
+- `cerebrasApiKey` — Cerebras API key (NEW, free at cloud.cerebras.ai)
+
+Settings UI: Settings sidebar → Accounts tab → Cerebras API Key field.
+
+### Files
+
+- `src-tauri/src/router.rs` — 9Router module (~570 lines, 12 unit tests)
+- `src-tauri/src/orchestrator.rs` — `dispatch_to_worker()` modified to try 9Router first
+- `src-tauri/src/commands.rs` — `NexusSettings` + `cerebras_api_key` field
+- `src-tauri/src/lib.rs` — `pub mod router;` registered
+- `frontend/src/settings-sidebar/SettingsSidebarApp.tsx` — Cerebras API key field
+
+## Moonshine Medium v2 — Better Local STT (2026-09-16)
+
+**Default Moonshine model upgraded from Small to Medium v2** for better
+local STT accuracy. Users can switch back to Small in Settings for
+lower RAM on 8GB laptops.
+
+### Model Comparison
+
+| Model | Params | WER | RAM | Latency |
+|-------|--------|-----|-----|---------|
+| tiny_streaming | 34M | 12.0% | ~100 MB | ~50ms |
+| small_streaming | 123M | 7.84% | ~300 MB | ~165ms |
+| **medium_streaming** (new default) | 245M | **6.65%** | ~400 MB | ~269ms |
+
+### Configuration
+
+- **Default:** `medium_streaming` (245M, 6.65% WER) — better accuracy
+- **Family (8GB laptops):** Set to `small_streaming` in Settings for lower RAM
+- **Ultra-low RAM:** Set to `tiny_streaming` (34M, 12% WER)
+
+### How It Works
+
+1. `lazy_stt.rs::read_moonshine_model()` reads `moonshineModel` from
+   `settings.json` (defaults to `medium_streaming`)
+2. Passes it as `MOONSHINE_MODEL` env var when spawning `stt_server.py`
+3. `stt_server.py` reads `MOONSHINE_MODEL` env var (already supported)
+4. Settings UI: Settings sidebar → Audio tab → Moonshine model dropdown
+
+### Files
+
+- `src-tauri/src/commands.rs` — `NexusSettings` + `moonshine_model` field
+- `src-tauri/src/lazy_stt.rs` — `read_moonshine_model()` + env var on spawn
+- `frontend/src/settings-sidebar/SettingsSidebarApp.tsx` — model dropdown
+
 ## Diagnostic Fixes — 2026-09-12
 
 ### NLU Server ONNX Export (build integration)
@@ -45,6 +647,18 @@ nexus audit --dataset-only     # structural checks only
 ```
 
 It writes `server/nlu/audit_report.json` and `docs/research/nlu-model-data-audit-latest.md`.
+
+**Data foundation gates** must pass before external imports or retraining:
+
+```bash
+nexus data nlu validate           # provenance registry + frozen 452-row evaluation lock
+nexus data wake validate          # wake model fingerprints + optional audio manifest
+nexus data wake fingerprint       # explicitly refresh fingerprints after approved model replacement
+```
+
+Staged external NLU payloads belong in ignored `server/nlu/data/staging/`. Local wake audio belongs in ignored `wake_word_data/manifest.jsonl`; speaker, session, and source-group IDs may not span train/validation/test splits. See `docs/testing/data-foundation-and-wake-model-gates.md`.
+
+NLU training data is divided into locked phrase-family-separated `train`, `validation`, `calibration`, and final `test` splits. Rows whose templates overlap final test remain preserved under `quarantine` and must not train the model. Validate with `python server/nlu/prepare_evaluation_splits.py`; see `docs/testing/phase-1-nlu-evaluation-split-analysis-2026-09-14.md`.
 
 **`nexus collect`** prompts for 23 intent families, waits for Enter, records two seconds, transcribes with Groq/Moonshine, and requires save/retry/edit/skip/end review before adding a sample.
 

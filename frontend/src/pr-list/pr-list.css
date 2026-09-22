@@ -6,9 +6,9 @@
    liquid glass effect. */
 
 :root {
-  /* ── Liquid Glass Parameters (same as response sidebar) ────────── */
-  --lg-sheen-opacity: 0.35;
-  --lg-rim-width: 1.5px;
+  /* ── Liquid Glass Parameters (retired — flat minimal look) ─────── */
+  --lg-sheen-opacity: 0;
+  --lg-rim-width: 0px;
 }
 
 * {
@@ -42,19 +42,10 @@ html, body {
      with a CSS opacity transition for smooth crossfading between live
      capture frames. --sidebar-backdrop-image is set on <html> from JS
      (PrListApp.tsx) when the "sidebar:backdrop" event arrives from Rust. */
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, transparent 40%);
-  background-size: auto;
-  background-position: center;
-  background-color: rgba(20, 20, 22, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-top: 1px solid rgba(255, 255, 255, 0.25);
+  background-color: rgba(20, 20, 22, 0.60);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 18px;
-  box-shadow:
-    0 24px 64px rgba(0, 0, 0, 0.6),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-    inset 0 0 6px 0 rgba(255, 255, 255, 0.04),
-    inset 0 2px 4px -2px rgba(255, 255, 255, 0.28),
-    inset 0 -2px 4px -2px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
   padding: 14px 16px 8px 16px;
   gap: 10px;
   overflow: hidden;
@@ -71,6 +62,7 @@ html, body {
   position: absolute;
   inset: 0;
   border-radius: 18px;
+  background-color: rgba(8, 8, 10, 0.45);
   background-image: var(--sidebar-backdrop-image, none);
   background-size: cover;
   background-position: center;
@@ -80,36 +72,7 @@ html, body {
   z-index: 0;
 }
 
-/* Specular edge sheen — the bright rim where light catches the glass.
-   A gradient border via ::before, masked to show only the rim.
-   Identical to the response sidebar's specular sheen. */
-.pr-list-container::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 18px;
-  padding: var(--lg-rim-width);
-  background: linear-gradient(
-    135deg,
-    rgba(255, 255, 255, var(--lg-sheen-opacity)) 0%,
-    rgba(255, 255, 255, 0.04) 25%,
-    rgba(255, 255, 255, 0) 50%,
-    rgba(255, 255, 255, 0.04) 75%,
-    rgba(255, 255, 255, calc(var(--lg-sheen-opacity) * 0.7)) 100%
-  );
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  pointer-events: none;
-  z-index: 1;
-}
-
-/* Ensure content sits above the backdrop and sheen layers */
+/* Ensure content sits above the backdrop layer */
 .pr-list-header,
 .pr-list-loading,
 .pr-list-empty,
@@ -264,23 +227,23 @@ html, body {
 }
 
 .pr-btn-merge {
-  background: rgba(46, 160, 67, 0.25);
-  color: rgba(120, 220, 130, 0.95);
-  border: 1px solid rgba(46, 160, 67, 0.3);
+  background: #2ea043;
+  color: #ffffff;
+  border: 1px solid #2ea043;
 }
 
 .pr-btn-merge:hover:not(:disabled) {
-  background: rgba(46, 160, 67, 0.4);
+  background: #388e3c;
 }
 
 .pr-btn-analyse {
-  background: rgba(100, 160, 255, 0.2);
-  color: rgba(130, 190, 255, 0.95);
-  border: 1px solid rgba(100, 160, 255, 0.25);
+  background: #3a3a3d;
+  color: #ffffff;
+  border: 1px solid #4d4d52;
 }
 
 .pr-btn-analyse:hover:not(:disabled) {
-  background: rgba(100, 160, 255, 0.35);
+  background: #48484c;
 }
 
 /* ─── Footer ─── */

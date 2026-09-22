@@ -54,6 +54,24 @@ def step(msg):
     print(f"{'='*60}")
 
 
+def validate_data_foundation():
+    step("Preflight: Validating provenance and frozen evaluation controls")
+    script = SCRIPT_DIR / "data_foundation.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "validate"],
+        cwd=str(SCRIPT_DIR),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    print(result.stdout)
+    if result.returncode != 0:
+        print(result.stderr)
+        print("  ERROR: Data foundation validation failed")
+        sys.exit(1)
+
+
 def clean_dataset():
     """Fix malformed labels and deduplicate the dataset."""
     step("Step 1: Cleaning dataset")
@@ -185,8 +203,39 @@ def merge_live_data():
         print(f"  No collected voice samples found (run 'nexus collect' to add real voice data)")
 
 
+def _family_key(row):
+    """Phrase-family key (intent + slot-masked normalized text), mirroring
+    build_candidate_dataset.py. Used to keep collected rows out of frozen
+    test families."""
+    import re as _re2
+    fillers = {"please", "could", "would", "you", "kindly", "can"}
+    text = " ".join(str(row.get("text", "")).lower().strip().split())
+    values = []
+    for slot, value in sorted((row.get("slots") or {}).items()):
+        slot_values = value if isinstance(value, list) else [value]
+        for item in slot_values:
+            item_text = " ".join(str(item).lower().strip().split())
+            if item_text:
+                values.append((len(item_text), item_text, f"<{slot}>"))
+    for _, value, replacement in sorted(values, reverse=True):
+        text = text.replace(value, replacement)
+    tokens = _re2.findall(r"<[a-z_]+>|[a-z]+|\d+", text)
+    while tokens and tokens[0] in fillers:
+        tokens.pop(0)
+    tokens = ["<number>" if t.isdigit() else t for t in tokens]
+    return f"{row.get('intent', '')}|{' '.join(tokens)}"
+
+
 def merge_collected_samples(collected_path):
-    """Merge collected voice samples into dataset.json."""
+    """Merge collected voice samples into dataset.json.
+
+    Perfection gate: a flawed recording (empty/hallucinated text, slots
+    not present in the transcript, test-family overlap) can poison the
+    model worse than no data at all. Rejected rows are reported with
+    reasons — never silently trained, never silently dropped.
+    """
+    import re as _re
+
     # Read collected samples
     collected = []
     with open(collected_path, 'r', encoding='utf-8') as f:
@@ -212,6 +261,38 @@ def merge_collected_samples(collected_path):
         data = json.load(f)
 
     train = data.get('train', data) if isinstance(data, dict) else data
+    test_families = {_family_key(row) for row in data.get("test", [])}
+
+    # Perfection audit — keep only flawless rows.
+    perfect, rejected = [], []
+    for ex in collected:
+        text = str(ex.get("text", ""))
+        norm = " ".join(text.lower().strip().split())
+        alpha = sum(1 for c in text if c.isalpha())
+        if not norm:
+            rejected.append((text, "empty transcript")); continue
+        if alpha < 2:
+            rejected.append((text, "too short/hallucination-like")); continue
+        if any(w in norm for w in ("thank you for watching", "thanks for watching")):
+            rejected.append((text, "known STT hallucination")); continue
+        slots = ex.get("slots", {}) or {}
+        bad_slot = False
+        for _k, _v in slots.items():
+            vals = _v if isinstance(_v, list) else [_v]
+            for _item in vals:
+                if str(_item).strip() and str(_item).lower().strip() not in norm:
+                    rejected.append((text, f"slot value absent from text: {_item}")); bad_slot = True; break
+            if bad_slot:
+                break
+        if bad_slot:
+            continue
+        if _family_key({"text": text, "intent": ex.get("intent", ""), "slots": slots}) in test_families:
+            rejected.append((text, "overlaps frozen test family")); continue
+        perfect.append(ex)
+
+    print(f"  Perfection audit: {len(perfect)} perfect, {len(rejected)} rejected")
+    for text, reason in rejected:
+        print(f"    REJECT [{reason}]: {text[:80]}")
 
     # Deduplicate against existing data
     existing_keys = set()
@@ -220,7 +301,7 @@ def merge_collected_samples(collected_path):
         existing_keys.add(key)
 
     added = 0
-    for ex in collected:
+    for ex in perfect:
         key = (ex['text'].lower().strip(), ex['intent'])
         if key not in existing_keys:
             train.append(ex)
@@ -237,7 +318,7 @@ def merge_collected_samples(collected_path):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
     print(f"  Added {added} new voice samples (out of {len(collected)} collected)")
-    print(f"  Skipped {len(collected) - added} duplicates")
+    print(f"  Skipped {len(collected) - added} (rejected by audit or duplicates)")
 
 
 def repair_dataset():
@@ -257,6 +338,72 @@ def repair_dataset():
         print(result.stderr)
         print("  ERROR: Dataset repair failed")
         sys.exit(1)
+
+
+def enforce_split_hygiene():
+    """Quarantine train rows overlapping locked splits; hold new labels.
+
+    Uses prepare_evaluation_splits.family_key (the exact gate algorithm).
+    New-label rows go to data/phase11_new_intents_holding.jsonl for the
+    candidate flow. Re-mints data/split_lock.json. Frozen test untouched.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(SCRIPT_DIR))
+    from prepare_evaluation_splits import family_key, build_lock, SPLIT_NAMES
+
+    with open(DATASET_PATH, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    val_fams = {family_key(r) for r in data.get("validation", [])}
+    cal_fams = {family_key(r) for r in data.get("calibration", [])}
+    test_fams = {family_key(r) for r in data.get("test", [])}
+    test_intents = {r.get("intent", "") for r in data.get("test", [])}
+    bad_fams = val_fams | cal_fams | test_fams
+
+    keep, quar, held = [], [], []
+    for row in data.get("train", []):
+        if family_key(row) in bad_fams:
+            quar.append(row)
+        elif row.get("intent", "") not in test_intents:
+            held.append(row)
+        else:
+            keep.append(row)
+
+    data["train"] = keep
+    seen = {json.dumps(r, sort_keys=True) for r in data.get("quarantine", [])}
+    for row in quar:
+        k = json.dumps(row, sort_keys=True)
+        if k not in seen:
+            data.setdefault("quarantine", []).append(row)
+            seen.add(k)
+
+    if held:
+        holding = SCRIPT_DIR / "data" / "phase11_new_intents_holding.jsonl"
+        existing = set()
+        if holding.exists():
+            for line in holding.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    existing.add(line.strip())
+        from collections import Counter
+        with open(holding, "a", encoding="utf-8") as f:
+            for row in held:
+                line = json.dumps(row, ensure_ascii=False)
+                if line not in existing:
+                    f.write(line + "\n")
+                    existing.add(line)
+        print(f"  Held {len(held)} new-label rows for candidate flow: "
+              + str(dict(Counter(r.get("intent", "") for r in held))))
+
+    with open(DATASET_PATH, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    splits = {**{n: data.get(n, []) for n in SPLIT_NAMES},
+              "quarantine": data.get("quarantine", [])}
+    lock = build_lock(splits)
+    (SCRIPT_DIR / "data" / "split_lock.json").write_text(
+        json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+    print(f"  Train kept: {len(keep)}, quarantined: {len(quar)}, "
+          f"split lock re-minted.")
 
 
 def train_model():
@@ -427,6 +574,8 @@ def main():
     print("  BERT-Mini (google/bert_uncased_L-2_H-128_A-2)")
     print("=" * 60)
 
+    validate_data_foundation()
+
     # Step 1: Clean dataset
     clean_dataset()
 
@@ -446,6 +595,16 @@ def main():
     # Re-clean after merge and repair
     step("Step 3c: Re-cleaning after merge and repair")
     clean_dataset()
+
+    # Enforce split hygiene: quarantine train rows whose phrase family
+    # overlaps validation/calibration/test, and hold rows with labels
+    # absent from the frozen test (new intents train via the candidate
+    # flow after label sync — never production). Then re-mint the lock.
+    # Without this, merged generator rows fail the second preflight.
+    step("Step 3d: Enforcing split hygiene (quarantine + new-label hold)")
+    enforce_split_hygiene()
+
+    validate_data_foundation()
 
     if skip_train:
         print("\n  --skip-train specified, exiting before training.")

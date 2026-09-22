@@ -1,0 +1,452 @@
+{
+  "schema_version": 1,
+  "family_algorithm": "intent-plus-slot-masked-normalized-text-v1",
+  "frozen_test_rows": 452,
+  "frozen_test_families": 348,
+  "ready_intents": 28,
+  "defined_intents": 52,
+  "blocked_intents": [
+    "add_collaborator",
+    "add_org_member",
+    "analyse_latest_pr",
+    "approve_pr",
+    "cancel_workflow",
+    "close_app",
+    "close_pr",
+    "comment_pr",
+    "create_pr",
+    "create_release",
+    "delete_branch",
+    "get_pr",
+    "list_branches",
+    "list_collaborators",
+    "list_pr_files",
+    "merge_pr",
+    "open_url",
+    "remove_collaborator",
+    "remove_org_member",
+    "rerun_workflow",
+    "revert_pr",
+    "search",
+    "update_branch",
+    "whatsapp_chat"
+  ],
+  "intents": {
+    "add_collaborator": {
+      "train_rows": 3,
+      "train_families": 3,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 3,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "add_org_member": {
+      "train_rows": 3,
+      "train_families": 3,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 3,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "analyse_latest_pr": {
+      "train_rows": 19,
+      "train_families": 7,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 7,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "analyse_pr": {
+      "train_rows": 15,
+      "train_families": 10,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 10,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "analyse_repo": {
+      "train_rows": 17,
+      "train_families": 11,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 11,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "approve_pr": {
+      "train_rows": 3,
+      "train_families": 3,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 3,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "browser_navigate": {
+      "train_rows": 102,
+      "train_families": 49,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 49,
+      "target_rows_per_split": 10,
+      "ready": true
+    },
+    "browser_new_tab": {
+      "train_rows": 52,
+      "train_families": 47,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 47,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "browser_search": {
+      "train_rows": 96,
+      "train_families": 45,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 45,
+      "target_rows_per_split": 10,
+      "ready": true
+    },
+    "cancel_action": {
+      "train_rows": 59,
+      "train_families": 59,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 59,
+      "target_rows_per_split": 6,
+      "ready": true
+    },
+    "cancel_workflow": {
+      "train_rows": 3,
+      "train_families": 3,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 3,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "check_branch": {
+      "train_rows": 23,
+      "train_families": 11,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 11,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "close_app": {
+      "train_rows": 16,
+      "train_families": 5,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 5,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "close_pr": {
+      "train_rows": 3,
+      "train_families": 3,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 3,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "comment_pr": {
+      "train_rows": 1,
+      "train_families": 1,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 1,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "confirm_send": {
+      "train_rows": 63,
+      "train_families": 61,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 61,
+      "target_rows_per_split": 6,
+      "ready": true
+    },
+    "create_pr": {
+      "train_rows": 8,
+      "train_families": 8,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 8,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "create_release": {
+      "train_rows": 5,
+      "train_families": 5,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 5,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "delete_branch": {
+      "train_rows": 14,
+      "train_families": 4,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 4,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "focus_app": {
+      "train_rows": 95,
+      "train_families": 64,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 64,
+      "target_rows_per_split": 10,
+      "ready": true
+    },
+    "get_pr": {
+      "train_rows": 6,
+      "train_families": 6,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 6,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "greeting": {
+      "train_rows": 37,
+      "train_families": 37,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 37,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "list_branches": {
+      "train_rows": 19,
+      "train_families": 9,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 9,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "list_collaborators": {
+      "train_rows": 21,
+      "train_families": 7,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 7,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "list_org_members": {
+      "train_rows": 21,
+      "train_families": 11,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 11,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "list_pr_files": {
+      "train_rows": 7,
+      "train_families": 7,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 7,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "list_prs": {
+      "train_rows": 64,
+      "train_families": 62,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 62,
+      "target_rows_per_split": 6,
+      "ready": true
+    },
+    "list_releases": {
+      "train_rows": 32,
+      "train_families": 13,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 13,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "list_workflow_runs": {
+      "train_rows": 25,
+      "train_families": 11,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 11,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "list_workflows": {
+      "train_rows": 25,
+      "train_families": 11,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 11,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "media_next": {
+      "train_rows": 36,
+      "train_families": 36,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 36,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "media_play_pause": {
+      "train_rows": 39,
+      "train_families": 36,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 36,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "media_previous": {
+      "train_rows": 38,
+      "train_families": 38,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 38,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "media_stop": {
+      "train_rows": 35,
+      "train_families": 35,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 35,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "merge_pr": {
+      "train_rows": 5,
+      "train_families": 5,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 5,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "open_app": {
+      "train_rows": 61,
+      "train_families": 21,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 21,
+      "target_rows_per_split": 6,
+      "ready": true
+    },
+    "open_architect": {
+      "train_rows": 39,
+      "train_families": 39,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 39,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "open_settings": {
+      "train_rows": 45,
+      "train_families": 45,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 45,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "open_url": {
+      "train_rows": 23,
+      "train_families": 8,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 8,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "press_hotkey": {
+      "train_rows": 125,
+      "train_families": 76,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 76,
+      "target_rows_per_split": 12,
+      "ready": true
+    },
+    "press_key": {
+      "train_rows": 107,
+      "train_families": 39,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 39,
+      "target_rows_per_split": 11,
+      "ready": true
+    },
+    "remove_collaborator": {
+      "train_rows": 8,
+      "train_families": 8,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 8,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "remove_org_member": {
+      "train_rows": 3,
+      "train_families": 3,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 3,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "rerun_workflow": {
+      "train_rows": 8,
+      "train_families": 8,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 8,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "revert_pr": {
+      "train_rows": 3,
+      "train_families": 3,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 3,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "search": {
+      "train_rows": 10,
+      "train_families": 5,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 5,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "type_text": {
+      "train_rows": 122,
+      "train_families": 47,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 47,
+      "target_rows_per_split": 12,
+      "ready": true
+    },
+    "unknown": {
+      "train_rows": 34,
+      "train_families": 34,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 34,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "update_branch": {
+      "train_rows": 14,
+      "train_families": 3,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 3,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "whatsapp_chat": {
+      "train_rows": 17,
+      "train_families": 8,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 8,
+      "target_rows_per_split": 5,
+      "ready": false
+    },
+    "whatsapp_open": {
+      "train_rows": 52,
+      "train_families": 52,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 52,
+      "target_rows_per_split": 5,
+      "ready": true
+    },
+    "whatsapp_search": {
+      "train_rows": 97,
+      "train_families": 59,
+      "families_overlapping_test": 0,
+      "families_available_for_validation_and_calibration": 59,
+      "target_rows_per_split": 10,
+      "ready": true
+    }
+  }
+}

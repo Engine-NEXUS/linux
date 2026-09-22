@@ -1,0 +1,1169 @@
+{
+  "schema_version": 1,
+  "source": "nexus_synthetic_phase8",
+  "review_status": "approved_for_candidate_training",
+  "policy": "order_food, search_product, send_whatsapp_message intent families for MCP sub-center routing. OOS negatives for near-miss phrasings.",
+  "total_examples": 158,
+  "unique_families": 33,
+  "intent_counts": {
+    "send_whatsapp_message": 61,
+    "order_food": 54,
+    "search_product": 34,
+    "unknown": 9
+  },
+  "examples": [
+    {
+      "text": "order pizza",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pizza"
+      }
+    },
+    {
+      "text": "order biryani",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "biryani"
+      }
+    },
+    {
+      "text": "order burger",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "burger"
+      }
+    },
+    {
+      "text": "order dosa",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "dosa"
+      }
+    },
+    {
+      "text": "order noodles",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "noodles"
+      }
+    },
+    {
+      "text": "order paneer tikka",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "paneer tikka"
+      }
+    },
+    {
+      "text": "order chicken curry",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "chicken curry"
+      }
+    },
+    {
+      "text": "order sushi",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "sushi"
+      }
+    },
+    {
+      "text": "order pasta",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pasta"
+      }
+    },
+    {
+      "text": "order sandwich",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "sandwich"
+      }
+    },
+    {
+      "text": "order pizza from dominos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pizza",
+        "restaurant": "dominos"
+      }
+    },
+    {
+      "text": "order pizza from meghana foods",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pizza",
+        "restaurant": "meghana foods"
+      }
+    },
+    {
+      "text": "order pizza from paradise",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pizza",
+        "restaurant": "paradise"
+      }
+    },
+    {
+      "text": "order pizza from mcdonalds",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pizza",
+        "restaurant": "mcdonalds"
+      }
+    },
+    {
+      "text": "order biryani from dominos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "biryani",
+        "restaurant": "dominos"
+      }
+    },
+    {
+      "text": "order biryani from meghana foods",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "biryani",
+        "restaurant": "meghana foods"
+      }
+    },
+    {
+      "text": "order biryani from paradise",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "biryani",
+        "restaurant": "paradise"
+      }
+    },
+    {
+      "text": "order biryani from mcdonalds",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "biryani",
+        "restaurant": "mcdonalds"
+      }
+    },
+    {
+      "text": "order burger from dominos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "burger",
+        "restaurant": "dominos"
+      }
+    },
+    {
+      "text": "order burger from meghana foods",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "burger",
+        "restaurant": "meghana foods"
+      }
+    },
+    {
+      "text": "order burger from paradise",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "burger",
+        "restaurant": "paradise"
+      }
+    },
+    {
+      "text": "order burger from mcdonalds",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "burger",
+        "restaurant": "mcdonalds"
+      }
+    },
+    {
+      "text": "order dosa from dominos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "dosa",
+        "restaurant": "dominos"
+      }
+    },
+    {
+      "text": "order dosa from meghana foods",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "dosa",
+        "restaurant": "meghana foods"
+      }
+    },
+    {
+      "text": "order dosa from paradise",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "dosa",
+        "restaurant": "paradise"
+      }
+    },
+    {
+      "text": "order dosa from mcdonalds",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "dosa",
+        "restaurant": "mcdonalds"
+      }
+    },
+    {
+      "text": "order noodles from dominos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "noodles",
+        "restaurant": "dominos"
+      }
+    },
+    {
+      "text": "order noodles from meghana foods",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "noodles",
+        "restaurant": "meghana foods"
+      }
+    },
+    {
+      "text": "order noodles from paradise",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "noodles",
+        "restaurant": "paradise"
+      }
+    },
+    {
+      "text": "order noodles from mcdonalds",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "noodles",
+        "restaurant": "mcdonalds"
+      }
+    },
+    {
+      "text": "order paneer tikka from dominos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "paneer tikka",
+        "restaurant": "dominos"
+      }
+    },
+    {
+      "text": "order paneer tikka from meghana foods",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "paneer tikka",
+        "restaurant": "meghana foods"
+      }
+    },
+    {
+      "text": "order paneer tikka from paradise",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "paneer tikka",
+        "restaurant": "paradise"
+      }
+    },
+    {
+      "text": "order paneer tikka from mcdonalds",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "paneer tikka",
+        "restaurant": "mcdonalds"
+      }
+    },
+    {
+      "text": "get me pizza",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pizza"
+      }
+    },
+    {
+      "text": "get me biryani",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "biryani"
+      }
+    },
+    {
+      "text": "get me burger",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "burger"
+      }
+    },
+    {
+      "text": "get me dosa",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "dosa"
+      }
+    },
+    {
+      "text": "get me noodles",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "noodles"
+      }
+    },
+    {
+      "text": "get me paneer tikka",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "paneer tikka"
+      }
+    },
+    {
+      "text": "i want to order chicken curry",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "chicken curry"
+      }
+    },
+    {
+      "text": "i want to order sushi",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "sushi"
+      }
+    },
+    {
+      "text": "i want to order pasta",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pasta"
+      }
+    },
+    {
+      "text": "i want to order sandwich",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "sandwich"
+      }
+    },
+    {
+      "text": "order food",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "order some food",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "get food",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "get me some food",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "order food from swiggy",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "get food from swiggy",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "order lunch",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "order dinner",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "i'm hungry order something",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "order groceries from instamart",
+      "intent": "order_food",
+      "slots": {}
+    },
+    {
+      "text": "search for sony headphones on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "sony headphones"
+      }
+    },
+    {
+      "text": "search for wireless earbuds on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "wireless earbuds"
+      }
+    },
+    {
+      "text": "search for laptop on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "laptop"
+      }
+    },
+    {
+      "text": "search for keyboard on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "keyboard"
+      }
+    },
+    {
+      "text": "search for gaming mouse on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "gaming mouse"
+      }
+    },
+    {
+      "text": "search for monitor on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "monitor"
+      }
+    },
+    {
+      "text": "search for phone case on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "phone case"
+      }
+    },
+    {
+      "text": "search for mechanical keyboard on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "mechanical keyboard"
+      }
+    },
+    {
+      "text": "search for ssd on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "ssd"
+      }
+    },
+    {
+      "text": "search for webcam on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "webcam"
+      }
+    },
+    {
+      "text": "find sony headphones on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "sony headphones"
+      }
+    },
+    {
+      "text": "find wireless earbuds on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "wireless earbuds"
+      }
+    },
+    {
+      "text": "find laptop on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "laptop"
+      }
+    },
+    {
+      "text": "find keyboard on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "keyboard"
+      }
+    },
+    {
+      "text": "find gaming mouse on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "gaming mouse"
+      }
+    },
+    {
+      "text": "find monitor on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "monitor"
+      }
+    },
+    {
+      "text": "amazon search for sony headphones",
+      "intent": "search_product",
+      "slots": {
+        "query": "sony headphones"
+      }
+    },
+    {
+      "text": "amazon search for wireless earbuds",
+      "intent": "search_product",
+      "slots": {
+        "query": "wireless earbuds"
+      }
+    },
+    {
+      "text": "amazon search for laptop",
+      "intent": "search_product",
+      "slots": {
+        "query": "laptop"
+      }
+    },
+    {
+      "text": "amazon search for keyboard",
+      "intent": "search_product",
+      "slots": {
+        "query": "keyboard"
+      }
+    },
+    {
+      "text": "amazon search for gaming mouse",
+      "intent": "search_product",
+      "slots": {
+        "query": "gaming mouse"
+      }
+    },
+    {
+      "text": "amazon search for monitor",
+      "intent": "search_product",
+      "slots": {
+        "query": "monitor"
+      }
+    },
+    {
+      "text": "search amazon for phone case",
+      "intent": "search_product",
+      "slots": {
+        "query": "phone case"
+      }
+    },
+    {
+      "text": "search amazon for mechanical keyboard",
+      "intent": "search_product",
+      "slots": {
+        "query": "mechanical keyboard"
+      }
+    },
+    {
+      "text": "search amazon for ssd",
+      "intent": "search_product",
+      "slots": {
+        "query": "ssd"
+      }
+    },
+    {
+      "text": "search amazon for webcam",
+      "intent": "search_product",
+      "slots": {
+        "query": "webcam"
+      }
+    },
+    {
+      "text": "look for sony headphones on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "sony headphones"
+      }
+    },
+    {
+      "text": "check the price of sony headphones on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "sony headphones"
+      }
+    },
+    {
+      "text": "look for wireless earbuds on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "wireless earbuds"
+      }
+    },
+    {
+      "text": "check the price of wireless earbuds on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "wireless earbuds"
+      }
+    },
+    {
+      "text": "look for laptop on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "laptop"
+      }
+    },
+    {
+      "text": "check the price of laptop on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "laptop"
+      }
+    },
+    {
+      "text": "look for keyboard on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "keyboard"
+      }
+    },
+    {
+      "text": "check the price of keyboard on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "keyboard"
+      }
+    },
+    {
+      "text": "send mom a whatsapp message saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "send mom a whatsapp message saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "send mom a whatsapp message saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "send mom a whatsapp message saying happy birthday",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "happy birthday"
+      }
+    },
+    {
+      "text": "send dad a whatsapp message saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "send dad a whatsapp message saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "send dad a whatsapp message saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "send dad a whatsapp message saying happy birthday",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "happy birthday"
+      }
+    },
+    {
+      "text": "send lakshya a whatsapp message saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "send lakshya a whatsapp message saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "send lakshya a whatsapp message saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "send lakshya a whatsapp message saying happy birthday",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "happy birthday"
+      }
+    },
+    {
+      "text": "send brother a whatsapp message saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "send brother a whatsapp message saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "send brother a whatsapp message saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "send brother a whatsapp message saying happy birthday",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "happy birthday"
+      }
+    },
+    {
+      "text": "send sister a whatsapp message saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "sister",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "send sister a whatsapp message saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "sister",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "send sister a whatsapp message saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "sister",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "send sister a whatsapp message saying happy birthday",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "sister",
+        "message": "happy birthday"
+      }
+    },
+    {
+      "text": "whatsapp mom saying meeting moved to 3",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "meeting moved to 3"
+      }
+    },
+    {
+      "text": "whatsapp mom saying found it",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "found it"
+      }
+    },
+    {
+      "text": "whatsapp mom saying almost there",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "almost there"
+      }
+    },
+    {
+      "text": "whatsapp mom saying good night",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "good night"
+      }
+    },
+    {
+      "text": "whatsapp dad saying meeting moved to 3",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "meeting moved to 3"
+      }
+    },
+    {
+      "text": "whatsapp dad saying found it",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "found it"
+      }
+    },
+    {
+      "text": "whatsapp dad saying almost there",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "almost there"
+      }
+    },
+    {
+      "text": "whatsapp dad saying good night",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "good night"
+      }
+    },
+    {
+      "text": "whatsapp lakshya saying meeting moved to 3",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "meeting moved to 3"
+      }
+    },
+    {
+      "text": "whatsapp lakshya saying found it",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "found it"
+      }
+    },
+    {
+      "text": "whatsapp lakshya saying almost there",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "almost there"
+      }
+    },
+    {
+      "text": "whatsapp lakshya saying good night",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "good night"
+      }
+    },
+    {
+      "text": "whatsapp brother saying meeting moved to 3",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "meeting moved to 3"
+      }
+    },
+    {
+      "text": "whatsapp brother saying found it",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "found it"
+      }
+    },
+    {
+      "text": "whatsapp brother saying almost there",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "almost there"
+      }
+    },
+    {
+      "text": "whatsapp brother saying good night",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "good night"
+      }
+    },
+    {
+      "text": "whatsapp sister saying meeting moved to 3",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "sister",
+        "message": "meeting moved to 3"
+      }
+    },
+    {
+      "text": "whatsapp sister saying found it",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "sister",
+        "message": "found it"
+      }
+    },
+    {
+      "text": "whatsapp sister saying almost there",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "sister",
+        "message": "almost there"
+      }
+    },
+    {
+      "text": "whatsapp sister saying good night",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "sister",
+        "message": "good night"
+      }
+    },
+    {
+      "text": "message boss on whatsapp saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "boss",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "message boss on whatsapp saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "boss",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "message boss on whatsapp saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "boss",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "message prem on whatsapp saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "prem",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "message prem on whatsapp saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "prem",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "message prem on whatsapp saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "prem",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "message eesha on whatsapp saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "eesha",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "message eesha on whatsapp saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "eesha",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "message eesha on whatsapp saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "eesha",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "send mom a message saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "send mom a message saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "send mom a message saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "send dad a message saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "send dad a message saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "send dad a message saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "dad",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "send lakshya a message saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "send lakshya a message saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "send lakshya a message saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "send brother a message saying i'll be late",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "i'll be late"
+      }
+    },
+    {
+      "text": "send brother a message saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "send brother a message saying call me back",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "brother",
+        "message": "call me back"
+      }
+    },
+    {
+      "text": "order a new book",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "order the results alphabetically",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "out of order",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what order should i watch the movies in",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how do i send a message on slack",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "send it back",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "send the file",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what's on the menu",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "where can i buy groceries near me",
+      "intent": "unknown",
+      "slots": {}
+    }
+  ]
+}

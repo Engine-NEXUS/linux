@@ -93,14 +93,17 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
                     // Sidebar is hidden → wake NEXUS, do NOT touch sidebar.
                     tracing::info!("hotkey ({}) → sidebar hidden, waking NEXUS", hk);
 
-                    // Ensure the STT server is running — but DON'T block the hotkey
-                    // handler on this. The STT server only needs to be ready by the
-                    // time the user finishes speaking (several seconds from now).
-                    // Spawning in a background thread saves 2-4s of hotkey latency
-                    // (is_stt_responsive() has a 2s TCP timeout when STT isn't running).
-                    std::thread::spawn(|| {
-                        crate::lazy_stt::ensure_stt_running();
-                    });
+                    // Only pre-start local STT sidecar if cloud STT won't be used
+                    // (saves ~340 MB RAM when Groq cloud STT is active).
+                    let groq_key = crate::commands::read_groq_api_key(&handle);
+                    let local_only = crate::commands::read_local_stt_only(&handle);
+                    if groq_key.is_empty() || local_only {
+                        std::thread::spawn(|| {
+                            crate::lazy_stt::ensure_stt_running();
+                        });
+                    } else {
+                        tracing::info!("hotkey: Groq cloud STT configured, skipping local sidecar pre-start (saves RAM)");
+                    }
 
                     // Start Rust-side STT capture (same as wake word path).
                     // Captures audio from the cpal stream — no getUserMedia needed.

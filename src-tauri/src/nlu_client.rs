@@ -80,10 +80,17 @@ pub async fn parse_via_nlu(transcript: &str) -> Option<ParseResult> {
     })
 }
 
+/// Repo slot with sounding-tolerance: "cervix"/"srvx" resolve to "servx".
+/// Same canonical map the deterministic parser uses (`clean_repo_name`),
+/// so every category — deterministic, NLU, brain — agrees on the entity.
+fn repo_slot(slots: &serde_json::Value) -> String {
+    let raw = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+    crate::intent_parser::canonical_repo_name(raw)
+}
+
 /// Convert NLU server response to ParsedIntent.
 /// Handles all 46 intent labels (ParsedIntent + GitHubCommand variants).
-pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<ParsedIntent> {
-    match intent {
+pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<ParsedIntent> {    match intent {
         // ─── Local commands ───
         "open_app" => {
             let target = slots.get("app_name").and_then(|v| v.as_str()).unwrap_or("");
@@ -126,27 +133,27 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
 
         // ─── Analysis commands ───
         "analyse_repo" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let owner = slots.get("owner").and_then(|v| v.as_str()).map(String::from);
             if repo.is_empty() { return None; }
             Some(ParsedIntent::AnalyseRepo { owner, repo: repo.to_string() })
         }
         "analyse_pr" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let owner = slots.get("owner").and_then(|v| v.as_str()).map(String::from);
             let pr_number = slots.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             if repo.is_empty() || pr_number == 0 { return None; }
             Some(ParsedIntent::AnalysePr { owner, repo: repo.to_string(), pr_number })
         }
         "analyse_latest_pr" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let owner = slots.get("owner").and_then(|v| v.as_str()).map(String::from);
             let author = slots.get("author").and_then(|v| v.as_str()).map(String::from);
             if repo.is_empty() { return None; }
             Some(ParsedIntent::AnalyseLatestPr { owner, repo: repo.to_string(), author })
         }
         "check_branch" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let owner = slots.get("owner").and_then(|v| v.as_str()).map(String::from);
             let author = slots.get("author").and_then(|v| v.as_str()).map(String::from);
             if repo.is_empty() { return None; }
@@ -155,7 +162,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
 
         // ─── GitHub PR operations ───
         "merge_pr" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let pr_number = slots.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0);
             if repo.is_empty() || pr_number == 0 { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -167,7 +174,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "approve_pr" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let pr_number = slots.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0);
             if repo.is_empty() || pr_number == 0 { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -178,7 +185,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "close_pr" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let pr_number = slots.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0);
             if repo.is_empty() || pr_number == 0 { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -189,7 +196,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "list_prs" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             // Read state from slots if provided (open/closed/all/merged)
             // Default to "open" if not specified.
             let raw_state = slots.get("state").and_then(|v| v.as_str()).unwrap_or("open");
@@ -217,7 +224,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "get_pr" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let pr_number = slots.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0);
             if repo.is_empty() || pr_number == 0 { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -228,7 +235,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "update_branch" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let pr_number = slots.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0);
             if repo.is_empty() || pr_number == 0 { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -239,7 +246,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "revert_pr" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let pr_number = slots.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0);
             if repo.is_empty() || pr_number == 0 { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -251,7 +258,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "list_pr_files" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let pr_number = slots.get("pr_number").and_then(|v| v.as_u64()).unwrap_or(0);
             if repo.is_empty() || pr_number == 0 { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -264,7 +271,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
 
         // ─── GitHub collaborator/org ───
         "add_collaborator" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let username = slots.get("username").and_then(|v| v.as_str()).unwrap_or("");
             if repo.is_empty() || username.is_empty() { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -276,7 +283,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "remove_collaborator" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let username = slots.get("username").and_then(|v| v.as_str()).unwrap_or("");
             if repo.is_empty() || username.is_empty() { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -287,7 +294,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "list_collaborators" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             if repo.is_empty() { return None; }
             Some(ParsedIntent::GitHubCommand {
                 command: crate::github_cmd::GitHubCommand::ListCollaborators {
@@ -330,7 +337,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
 
         // ─── GitHub branch/release/workflow ───
         "delete_branch" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let branch = slots.get("branch").and_then(|v| v.as_str()).unwrap_or("");
             if repo.is_empty() || branch.is_empty() { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -341,7 +348,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "list_branches" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             if repo.is_empty() { return None; }
             Some(ParsedIntent::GitHubCommand {
                 command: crate::github_cmd::GitHubCommand::ListBranches {
@@ -350,7 +357,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "list_releases" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             if repo.is_empty() { return None; }
             Some(ParsedIntent::GitHubCommand {
                 command: crate::github_cmd::GitHubCommand::ListReleases {
@@ -359,7 +366,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "list_workflows" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             if repo.is_empty() { return None; }
             Some(ParsedIntent::GitHubCommand {
                 command: crate::github_cmd::GitHubCommand::ListWorkflows {
@@ -368,7 +375,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "list_workflow_runs" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             if repo.is_empty() { return None; }
             Some(ParsedIntent::GitHubCommand {
                 command: crate::github_cmd::GitHubCommand::ListWorkflowRuns {
@@ -378,7 +385,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "rerun_workflow" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let run_id = slots.get("workflow_id").and_then(|v| v.as_u64()).unwrap_or(0);
             if repo.is_empty() || run_id == 0 { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -389,7 +396,7 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
             })
         }
         "cancel_workflow" => {
-            let repo = slots.get("repo").and_then(|v| v.as_str()).unwrap_or("");
+            let repo = repo_slot(slots);
             let run_id = slots.get("workflow_id").and_then(|v| v.as_u64()).unwrap_or(0);
             if repo.is_empty() || run_id == 0 { return None; }
             Some(ParsedIntent::GitHubCommand {
@@ -416,6 +423,34 @@ pub fn nlu_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<P
                 intent: intent.to_string(),
                 slots: slots.clone(),
                 confidence: 0.85,
+            })
+        }
+
+        // ─── Commerce + social MCP commands (3) ───
+        // These route to Subsystem::Mcp — the deterministic parser is the
+        // primary path; these mappings let NLU/brain fallback reach MCP too.
+        "order_food" => {
+            // NLU slot is "food_item"; accept "query" too (brain phrasing)
+            let query = slots.get("food_item").and_then(|v| v.as_str())
+                .or_else(|| slots.get("query").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let restaurant = slots.get("restaurant").and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from);
+            Some(ParsedIntent::OrderFood { query: query.to_string(), restaurant })
+        }
+        "search_product" => {
+            let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            if query.is_empty() { return None; }
+            Some(ParsedIntent::SearchProduct { query: query.to_string() })
+        }
+        "send_whatsapp_message" => {
+            let contact = slots.get("contact").and_then(|v| v.as_str()).unwrap_or("");
+            let message = slots.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            if contact.is_empty() || message.is_empty() { return None; }
+            Some(ParsedIntent::SendWhatsAppMessage {
+                contact: contact.to_string(),
+                message: message.to_string(),
             })
         }
 

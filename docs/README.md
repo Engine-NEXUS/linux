@@ -1,266 +1,130 @@
-# NEXUS Documentation Index
+# NEXUS Documentation Master Index
 
-> Complete technical documentation for the NEXUS floating desktop assistant.
-> A cross-platform, Siri-like, thin-client assistant that talks to a fat server (n8n + Ollama).
-> All documentation reflects the current state of the codebase as of 2026-08-23.
+> **NEXUS Floating Desktop Assistant** — High-performance, local-first voice assistant and multimodal automation agent engineered in Rust (Tauri), TypeScript (React), and Python (BERT-Mini / openWakeWord / FastSTT).
 
 ---
 
-## Start Here
+## 🧭 Master Navigation & Domain Structure
 
-If you're new to the project, read in this order:
-
-1. **[architecture/01-system-overview.md](./architecture/01-system-overview.md)** — the mental model (thin client + fat server, text-only protocol, 3 trigger paths, 3 response paths).
-2. **[architecture/02-data-flow-graphs.md](./architecture/02-data-flow-graphs.md)** — sequence diagrams for every major flow.
-3. **[architecture/03-component-map.md](./architecture/03-component-map.md)** — which file does what.
-4. **[credentials/01-credential-architecture.md](./credentials/01-credential-architecture.md)** — where secrets live and how they flow.
-5. **[features/01-wake-word.md](./features/01-wake-word.md)** — how the always-listening ear works.
-6. **[changes/CHANGELOG.md](./changes/CHANGELOG.md)** — what changed and why, per commit.
-
----
-
-## Table of Contents
-
-### Architecture (How the system is built)
-
-| # | Document | Description |
-|---|----------|-------------|
-| 01 | [system-overview.md](./architecture/01-system-overview.md) | High-level architecture map: thin client + fat server, 5 golden rules, 3 trigger paths, 3 response paths, runtime process topology |
-| 02 | [data-flow-graphs.md](./architecture/02-data-flow-graphs.md) | ASCII sequence diagrams for: general request, Tier 3 fixed command, Tier 3 parameterized command, boot greeting, sleep/wake greeting, meeting suppression, OAuth flow, API key flow, sidecar auto-spawn, cancel/barge-in |
-| 03 | [component-map.md](./architecture/03-component-map.md) | Every source file mapped to its purpose, key exports, and what it talks to (Rust, frontend, Python sidecar, config, models, notebooks) |
-| 04 | [tech-stack.md](./architecture/04-tech-stack.md) | Every crate, library, and tool chosen for NEXUS, with the reason it was picked over alternatives + feature flags + port allocation |
-| 05 | [state-machine.md](./architecture/05-state-machine.md) | Frontend Zustand state machine: states, transitions, side effects per transition, barge-in, Tier 3 bypass, boot greeting bypass, meeting override |
-| 06 | [liquid-glass-screenshot-blur.md](./architecture/06-liquid-glass-screenshot-blur.md) | Liquid glass blur for sidebar and architect windows |
-| 07 | [central-orchestrator.md](./architecture/07-central-orchestrator.md) | Central orchestrator: single owner of request lifecycle, routing, loading state, cancellation, request IDs |
-| 08 | [oauth-github-flow.md](./architecture/08-oauth-github-flow.md) | GitHub OAuth 2.0 PKCE flow: browser redirect, token exchange, deep-link callback, polling detection |
-| 09 | [request-flow-evolution.md](./architecture/09-request-flow-evolution.md) | Evolution of request handling from scattered to centralized (Phase 1 → Phase 4) |
-| 10 | [github-subcommand-system.md](./architecture/10-github-subcommand-system.md) | GitHub sub-command system: 28 typed commands via octocrab, conflict detection, centralized confirmation, token management |
-
-### Features (What each feature does and how)
-
-| # | Document | Description |
-|---|----------|-------------|
-| 01 | [wake-word.md](./features/01-wake-word.md) | openWakeWord KWS engine: 3-stage ONNX pipeline, sound-alikes, speaker verification, meeting suppression |
-| 02 | [tier3-commands.md](./features/02-tier3-commands.md) | Acoustic command classifiers that skip STT for ~200ms latency. 39 commands (30 fixed + 9 parameterized). Type 1 vs Type 2 flow |
-| 03 | [meeting-privacy-mode.md](./features/03-meeting-privacy-mode.md) | 4-layer suppression: manual pause, WASAPI detection, process scan, TTS muting. What gets suppressed, hysteresis, frontend integration |
-| 04 | [boot-greeting.md](./features/04-boot-greeting.md) | "Hello sir, how can I assist you today?" on fresh boot (uptime < 15 min) or sleep/wake. Suppression conditions, non-blocking design |
-| 05 | [sidecar-manager.md](./features/05-sidecar-manager.md) | Auto-spawn Python FastAPI sidecar in background. pythonw.exe, port 49152, log redirection, sidecar reuse, package-qualified invocation |
-| 06 | [mic-permissions.md](./features/06-mic-permissions.md) | WebView2 permission handler: auto-approve mic/camera for NEXUS-owned origins only. No more permission dialog on restart |
-| 07 | [app-registry.md](./features/07-app-registry.md) | Pre-indexed app launcher (Raycast/Alfred style). Disk cache + in-memory HashMap + fuzzy match. ~1ms per command |
-| 08 | [voice-enrollment.md](./features/08-voice-enrollment.md) | Speaker verification: 5 enrollment clips, sherpa-onnx embeddings, cosine similarity, wake variants, sound-alikes |
-| 09 | [audio-pipeline.md](./features/09-audio-pipeline.md) | Complete local audio chain: ScriptProcessorNode capture → Silero VAD → faster-whisper STT (127.0.0.1) → Web Speech API TTS |
-| 10 | [window-overlay.md](./features/10-window-overlay.md) | Transparent, frameless, always-on-top orb. Region-aware click-through. Bottom-center positioning. Slide animation. macOS accessory app |
-| 11 | [system-tray.md](./features/11-system-tray.md) | Tray menu: show, pause/resume, settings, quit. Autostart. Single instance. Deep-link forwarding |
-| 12 | [settings-window.md](./features/12-settings-window.md) | Dedicated tabbed settings window (600x720): General, Audio, Wake Word, Privacy, Backend. White theme. Settings persisted to JSON via Rust IPC |
-| 13 | [response-sidebar.md](./features/13-response-sidebar.md) | Right-edge transparent window (280x500) that shows server responses only. Slides in from right when n8n/Ollama responds. Not for local commands |
-| 14 | [nsis-installer.md](./features/14-nsis-installer.md) | Custom white-themed NSIS installer with NEXUS branding, 220x500 sidebar image, no desktop shortcut (Start Menu only). 40.1 MB LZMA compressed |
-| 15 | [setup-wizard.md](./features/15-setup-wizard.md) | 4-step onboarding wizard (520x680): Welcome → Server → Voice → Accounts. Multi-option Google + GitHub cards with brand icons. API keys section |
-| 45 | [central-orchestrator.md](./features/45-central-orchestrator.md) | Central orchestrator: single owner of request lifecycle, routing, loading, cancellation |
-| 46 | [github-oauth-connect.md](./features/46-github-oauth-connect.md) | GitHub OAuth connect button: browser redirect, one-click authorize, auto-detection |
-| 47 | [loading-indicator-ownership.md](./features/47-loading-indicator-ownership.md) | Loading indicator centralized in orchestrator (Rust owns show/hide) |
-| 48 | [github-subcommand-system.md](./features/48-github-subcommand-system.md) | GitHub sub-command system: 28 typed commands, conflict detection with copy-paste, centralized confirmation, natural language parsing |
-| 51 | [51-nlu-training-and-voice-collection.md](./features/51-nlu-training-and-voice-collection.md) | Complete guide for `nexus collect` (voice sample collector) and `nexus train` (BERT-Mini retraining pipeline) — 52 intents, 45 slot types, data flow, troubleshooting |
-
-### Credentials (How API keys, OAuth, and device tokens work)
-
-| # | Document | Description |
-|---|----------|-------------|
-| 01 | [credential-architecture.md](./credentials/01-credential-architecture.md) | Master doc: 3 credential types (OAuth tokens, API keys, device tokens), where secrets live, credential flow at request time, security properties |
-| 02 | [oauth-flow.md](./credentials/02-oauth-flow.md) | OAuth2 PKCE flow step-by-step for Google + GitHub. Token exchange, refresh, disconnect. Scopes requested |
-| 03 | [api-keys.md](./credentials/03-api-keys.md) | API key management: add/remove/list endpoints. Fernet encryption at rest. How keys are used at request time. Google API keys vs OAuth |
-| 04 | [google-integrations.md](./credentials/04-google-integrations.md) | Which Google APIs NEXUS uses, how each is authenticated (OAuth vs API key), scopes, quotas, setup instructions |
-| 05 | [github-integration.md](./credentials/05-github-integration.md) | GitHub OAuth flow, scopes (repo read:org workflow), token characteristics, what NEXUS can do with GitHub |
-| 06 | [device-registration.md](./credentials/06-device-registration.md) | Device registration and validation. Database schema. Local config. Future hardening plans |
-| 07 | [security-best-practices.md](./credentials/07-security-best-practices.md) | Threat model, secret hygiene rules, production deployment checklist, incident response (if secrets exposed), text-only protocol as security property |
-| 08 | [setup-page-guide.md](./credentials/08-setup-page-guide.md) | UI walkthrough of the setup page: server config, Google/GitHub OAuth, API keys, voice enrollment, save & continue |
-
-### Changes (What changed and why, per commit)
-
-| # | Document | Description |
-|---|----------|-------------|
-| — | [CHANGELOG.md](./changes/CHANGELOG.md) | All commits in reverse chronological order, organized by feature area |
-| 01 | [browser-suppression.md](./changes/01-browser-suppression.md) | Disabled Windows restartable apps + removed Edge auto-launch (no browser on boot) |
-| 02 | [non-blocking-sidecar.md](./changes/02-non-blocking-sidecar.md) | Moved sidecar spawn to background thread (5s → 0.2s to orb visible) |
-| 03 | [boot-greeting.md](./changes/03-boot-greeting.md) | "Hello sir" greeting on fresh boot (uptime < 15 min) |
-| 04 | [sleep-wake-detection.md](./changes/04-sleep-wake-detection.md) | Wall-clock time-jump detection for sleep/wake greeting |
-| 05 | [mic-permission-handler.md](./changes/05-mic-permission-handler.md) | WebView2 permission handler (no more mic prompt on restart) |
-| 06 | [sidecar-port-change.md](./changes/06-sidecar-port-change.md) | Port 8443 → 49152 (IANA dynamic range, no dev conflicts) |
-| 07 | [silent-sidecar.md](./changes/07-silent-sidecar.md) | pythonw.exe instead of python.exe (no terminal window) |
-| 08 | [connection-restart-fix.md](./changes/08-connection-restart-fix.md) | 3 root causes of "connection not found" on restart fixed |
-| 09 | [frontend-embedding.md](./changes/09-frontend-embedding.md) | Frontend not embedded in .exe (ERR_CONNECTION_REFUSED) fixed |
-| 10 | [auto-spawn-sidecar.md](./changes/10-auto-spawn-sidecar.md) | Sidecar auto-spawns on NEXUS startup |
-| 11 | [tier3-commands.md](./changes/11-tier3-commands.md) | Acoustic command classifiers (skip STT, ~200ms latency) |
-| 12 | [expanded-commands.md](./changes/12-expanded-commands.md) | 39 commands (30 fixed + 9 parameterized) |
-| 13 | [colab-training.md](./changes/13-colab-training.md) | Colab notebook fixes (melspectrogram path, disk cleanup, Drive checkpointing, download retries) |
-| 14 | [meeting-privacy-mode.md](./changes/14-meeting-privacy-mode.md) | Meeting detection + wake/TTS suppression |
-| 15 | [oww-kws.md](./changes/15-oww-kws.md) | Migrated from VAD+ASR (~30% recall) to openWakeWord KWS (~100% recall) |
-| 16 | [tts-fixes.md](./changes/16-tts-fixes.md) | Removed comma pause in "Didn't catch that sir" TTS |
-| 17 | [white-theme-ui-overhaul.md](./changes/17-white-theme-ui-overhaul.md) | White theme design tokens, settings window, setup wizard. Orb changes later reverted |
-| 18 | [orb-revert.md](./changes/18-orb-revert.md) | Reverted orb window to original 200x200 after user feedback. Settings + setup kept |
-| 19 | [nsis-installer.md](./changes/19-nsis-installer.md) | Custom white-themed NSIS installer with branded images (220x500 sidebar, 180x68 header) |
-| 20 | [setup-wizard-redesign.md](./changes/20-setup-wizard-redesign.md) | 4-step setup wizard with multi-option Google + GitHub account cards |
-| 21 | [response-sidebar.md](./changes/21-response-sidebar.md) | Right-side response sidebar (280x500) that shows only for server responses |
-| 22 | [installer-desktop-shortcut-removal.md](./changes/22-installer-desktop-shortcut-removal.md) | Removed desktop shortcut option from NSIS installer (Start Menu only) |
-| 23 | [meeting-detection-self-trigger-fix.md](./changes/23-meeting-detection-self-trigger-fix.md) | Fixed NEXUS detecting its own WebView2 as a meeting (wake/TTS deadlock) |
-| 24 | [local-first-intent-routing.md](./changes/24-local-first-intent-routing.md) | Local commands now execute before contacting sidecar (no more n8n dependency for basic commands) |
-| 25 | [stt-server-auto-start.md](./changes/25-stt-server-auto-start.md) | STT server now auto-starts with NEXUS (was the root cause of all command failures) |
-| 26 | [stt-performance-optimization.md](./changes/26-stt-performance-optimization.md) | STT: base→tiny.en, beam_size 5→1, eager loading — 54x faster, 22% less RAM |
-| 27 | [native-app-priority-resolution-cache.md](./changes/27-native-app-priority-resolution-cache.md) | Opens native apps/PWAs/Store apps instead of browser tabs. Resolution cache + daily scan + cross-platform PWA discovery |
-| 28 | [hot-mic-preinit-vad.md](./changes/28-hot-mic-preinit-vad.md) | Eliminates 2s wake-to-listen delay: hot mic + pre-init VAD + parallel init |
-| 29 | [central-orchestrator.md](./changes/29-central-orchestrator.md) | Central orchestrator implementation: single owner of request lifecycle, routing, loading, cancellation |
-| 30 | [github-oauth-fix.md](./changes/30-github-oauth-fix.md) | Fixed GitHub Connect button: shell plugin config, capabilities scope, fallback, macOS deep-link |
-| 31 | [github-subcommand-system.md](./changes/31-github-subcommand-system.md) | GitHub sub-command system (Phase 2A): 28 typed commands via octocrab, conflict detection, centralized confirmation, 114 new tests |
-| 33 | [33-nlu-training-voice-collection-cleanup.md](./changes/33-nlu-training-voice-collection-cleanup.md) | NLU training pipeline + voice collection (`nexus collect`, `nexus train`) + auto-cleanup of temp files + expanded synthetic data (1097 examples) |
-
-### Testing Documentation
-
-| # | Document | Description |
-|---|----------|-------------|
-| T-INDEX | [Testing Documentation Index](./testing/README.md) | Current repeatable testing procedures and links to historical results |
-| T-NLU-01 | [NLU Future Testing and Model Promotion Playbook](./testing/nlu-future-testing-and-model-promotion-playbook.md) | Permanent 1,000-line procedure for dataset integrity, intents, slots, leakage, OOS/safety, real voice, external data, training, promotion gates, rollback, and test reporting |
-
-### NLU Data Research
-
-| # | Document | Description |
-|---|----------|-------------|
-| R-NLU-01 | [External NLU Data Sources and Acquisition Plan](./research/external-nlu-data-sources-and-acquisition-plan-2026-09-13.md) | Extreme comparison of public NLU/speech datasets, opt-in live-user data, custom collection vendors, scraping constraints, privacy, rankings, ingestion design, evaluation gates, and phased implementation plan |
-| R-NLU-02 | [BERT-Mini Model and Dataset Deep Audit](./research/nlu-model-and-dataset-deep-audit-2026-09-14.md) | Complete structural/model audit, root causes, before/after metrics, repaired training pipeline, remaining intent/OOS gaps, external-dataset mapping, and prioritized retraining plan |
-| R-NLU-LIVE | [Latest Generated NLU Audit](./research/nlu-model-data-audit-latest.md) | Automatically regenerated by `nexus audit`; current dataset and ONNX quality metrics |
-
-### Wake Word Detection (Detailed Deep Dive)
-
-The wake word system went through a major architectural change. These 20 documents explain the full journey: research, decision-making, old approach, new approach, training, validation, and every component in detail.
-
-#### Research & Decisions
-
-| # | Document | Description |
-|---|----------|-------------|
-| 01 | [wake-word-research.md](./wake-word/01-wake-word-research.md) | Research into how Alexa, Google, Siri, and open-source projects do wake word detection |
-| 02 | [wake-word-architecture-decision.md](./wake-word/02-wake-word-architecture-decision.md) | Why we chose openWakeWord over VAD+ASR, Porcupine, and other options |
-
-#### Old Approach (Deprecated)
-
-| # | Document | Description |
-|---|----------|-------------|
-| 03 | [vad-asr-old-approach.md](./wake-word/03-vad-asr-old-approach.md) | The original VAD + ASR pipeline and why it failed |
-
-#### New Approach (Current)
-
-| # | Document | Description |
-|---|----------|-------------|
-| 04 | [oww-kws-new-approach.md](./wake-word/04-oww-kws-new-approach.md) | The new openWakeWord KWS pipeline |
-| 05 | [oww-3-stage-pipeline.md](./wake-word/05-oww-3-stage-pipeline.md) | Deep dive: melspectrogram → embedding → classifier |
-
-#### Model Training & Validation
-
-| # | Document | Description |
-|---|----------|-------------|
-| 06 | [model-training.md](./wake-word/06-model-training.md) | How the custom "nexus" ONNX model was trained |
-| 13 | [colab-training-notebook.md](./wake-word/13-colab-training-notebook.md) | Cell-by-cell breakdown of the training notebook |
-| 14 | [model-validation-results.md](./wake-word/14-model-validation-results.md) | Runtime validation results — 7/7 detections, 0 false positives |
-
-#### Speaker & Variants
-
-| # | Document | Description |
-|---|----------|-------------|
-| 07 | [speaker-verification.md](./wake-word/07-speaker-verification.md) | Voice profile system: embeddings, enrollment, verification |
-| 08 | [wake-variants-soundalikes.md](./wake-word/08-wake-variants-soundalikes.md) | Wake variants + sound-alikes for pronunciation tolerance |
-
-#### Implementation
-
-| # | Document | Description |
-|---|----------|-------------|
-| 09 | [audio-pipeline.md](./wake-word/09-audio-pipeline.md) | Audio capture: cpal, downmixing, resampling, chunking |
-| 10 | [rust-integration.md](./wake-word/10-rust-integration.md) | Rust integration: tract-onnx, Cargo features, module wiring |
-
-#### Testing & Performance
-
-| # | Document | Description |
-|---|----------|-------------|
-| 11 | [testing-strategy.md](./wake-word/11-testing-strategy.md) | Test plan: what to verify, how to test, expected results |
-| 12 | [performance-expectations.md](./wake-word/12-performance-expectations.md) | Performance: RAM, CPU, latency comparisons |
-
-#### Tier 3: Direct Command Classification
-
-| # | Document | Description |
-|---|----------|-------------|
-| 15 | [tier3-command-classifiers.md](./wake-word/15-tier3-command-classifiers.md) | Tier 3 architecture: how command classifiers work |
-| 16 | [tier3-decision-comparison.md](./wake-word/16-tier3-decision-comparison.md) | All 6 options considered for latency reduction |
-| 17 | [tier3-resource-analysis.md](./wake-word/17-tier3-resource-analysis.md) | Measured RAM/CPU/latency breakdown |
-| 18 | [tier3-training-approach.md](./wake-word/18-tier3-training-approach.md) | 4 training approaches compared |
-| 19 | [tier3-testing-strategy.md](./wake-word/19-tier3-testing-strategy.md) | Test plan for Tier 3 |
-| 20 | [expanded-command-system.md](./wake-word/20-expanded-command-system.md) | The 39-command system |
-
-### Meeting Protection
-
-| # | Document | Description |
-|---|----------|-------------|
-| 01 | [meeting-detection.md](./meeting-protection/01-meeting-detection.md) | Meeting detection architecture and implementation |
-
-### Top-Level Docs
-
-| Document | Description |
-|----------|-------------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Original principal architecture & implementation specification |
-| [DEPLOYMENT.md](./DEPLOYMENT.md) | Server deployment guide |
+```
+docs/
+├── architecture/          # Core system design, sequence diagrams, state machines, and orchestrator
+├── features/              # Feature specifications, UI choreographies, and UX flows (Features 01–57)
+├── research/              # Deep-dive research across hardware, STT, NLU, live dictation, and MCP
+│   ├── micspecification/  # Laptop mic arrays, acoustic profiling, fan resonance, and DSP gates
+│   ├── wakeword/          # Acoustic training, augmentation, and false alarm suppression
+│   ├── nlu-intent/        # Phrasing catalogs, BERT-Mini audits, and Whisper STT prompt conditioning
+│   ├── live-mode/         # Real-time audio streaming, WebSocket protocol, and live dictation
+│   ├── mcp-connection/    # 9-part research series on Model Context Protocol bridges & OAuth 2.1
+│   └── system-architecture/ # Enterprise patterns, UI motion diagnostics, and sidecar event flows
+├── 9router-research/      # Free LLM manager, 9Router cloud delegation, and latency optimization
+├── mcp/                   # Model Context Protocol servers (WhatsApp, Swiggy, Amazon, Google, etc.)
+├── wake-word/             # openWakeWord 3-stage KWS pipeline, Conv-Attention v3, and Tier-3 models
+├── credentials/           # OAuth 2.1 PKCE, Fernet encryption at rest, and credential security
+├── changes/               # Detailed commit changelogs and architectural migration writeups (01–38)
+├── testing/               # Repeatable testing playbooks, cryptographic evaluation locks, and release gates
+├── meeting-protection/    # 4-layer WASAPI mic session probing and call privacy suppression
+└── reviews/               # Codebase reviews, gap audits, and PR retrospectives
+```
 
 ---
 
-## Quick Reference
+## 🚀 Quick Start Guide
 
-### Architecture Comparison
+If you are exploring the codebase or contributing a new feature, follow this reading sequence:
 
-| Aspect | Old (VAD+ASR) | New (openWakeWord KWS) | Tier 3 (Command Classifiers) |
-|--------|---------------|------------------------|------------------------------|
-| Architecture | VAD gate → ASR → text match | KWS sliding window → probability | OWW classifiers for known commands |
-| Recall | ~30% | ~100% (7/7 in validation) | ~95%+ (trained per command) |
-| Latency | 500-1000ms | ~80ms (wake) | **~200ms (command → action)** |
-| Command latency | 27,000ms (Whisper base) | 27,000ms (still uses Whisper) | **~200ms (skips Whisper entirely)** |
-| RAM | ~143 MB | ~30-50 MB | **~5 MB per command** (shared features) |
-| False positives | Frequent | 0 observed | Controlled by threshold + negatives |
+1. **[architecture/01-system-overview.md](architecture/01-system-overview.md)** — Core mental model: Thin client (Tauri/Rust) + Fat Cloud Server/Worker + Local ONNX fast paths.
+2. **[architecture/02-data-flow-graphs.md](architecture/02-data-flow-graphs.md)** — Sequence diagrams for voice input, local regex routing, NLU intent classification, and MCP execution.
+3. **[architecture/07-central-orchestrator.md](architecture/07-central-orchestrator.md)** — Central request orchestrator: single owner of lifecycle, request routing, LLM cascades, and barge-in cancellation.
+4. **[research/README.md](research/README.md)** — Index of all acoustic, DSP, STT, and NLU research investigations.
+5. **[changes/CHANGELOG.md](changes/CHANGELOG.md)** — Complete chronological history of commits and feature upgrades.
+6. **[testing/README.md](testing/README.md)** — Testing procedures, cryptographic dataset locks, and release verification gates.
 
-### Model Files
+---
 
-| File | Size | Role |
-|------|------|------|
-| `src-tauri/resources/oww/nexus.onnx` | 790 KB | Custom trained wake word classifier |
-| `src-tauri/resources/oww/melspectrogram.onnx` | 1.1 MB | Pre-trained mel spectrogram extractor |
-| `src-tauri/resources/oww/embedding_model.onnx` | 1.3 MB | Pre-trained embedding extractor |
-| `src-tauri/resources/oww/commands/*.onnx` | ~800 KB each | Tier 3 command classifiers |
-| `command_intents.json` | — | Intent mapping for command classifiers |
-| `train_nexus_oww.ipynb` | — | Wake word training notebook (Colab) |
-| `train_nexus_commands.ipynb` | — | Command classifier training notebook (Colab) |
+## 📑 Domain Catalogs
 
-### Ports
+### 1. 🏗️ [Architecture](architecture/README.md)
+*Master architecture specifications, component maps, and state machines.*
+- **[01. System Overview](architecture/01-system-overview.md)** — Process topology, 5 golden rules, and channel separation.
+- **[02. Data Flow Graphs](architecture/02-data-flow-graphs.md)** — Visual ASCII sequence diagrams for all voice and OS flows.
+- **[03. Component Map](architecture/03-component-map.md)** — File-to-subsystem mapping across Rust, TypeScript, and Python.
+- **[04. Tech Stack](architecture/04-tech-stack.md)** — Rationale for every crate and library, port assignments, and feature flags.
+- **[05. State Machine](architecture/05-state-machine.md)** — Frontend Zustand state machine transitions and side-effects.
+- **[06. Liquid Glass Backdrop](architecture/06-liquid-glass-screenshot-blur.md)** — Hardware-accelerated screenshot blur for overlays.
+- **[07. Central Orchestrator](architecture/07-central-orchestrator.md)** — Unified request manager and cancellation engine.
+- **[08. GitHub OAuth Flow](architecture/08-oauth-github-flow.md)** — PKCE browser redirect and token exchange flow.
+- **[09. Request Flow Evolution](architecture/09-request-flow-evolution.md)** — Migration from scattered IPC to centralized orchestration.
+- **[10. GitHub Subcommand System](architecture/10-github-subcommand-system.md)** — 28 typed commands via octocrab with confirmation gates.
+- **[11. Master System Flows](architecture/11-complete-system-flows.md)** — 16 end-to-end visual sequence diagrams.
 
-| Port | Service |
-|------|---------|
-| 49152 | Python sidecar (FastAPI) |
-| 8000 | Local STT server (faster-whisper) |
-| 5678 | n8n (on the server) |
-| 11434 | Ollama (on the server) |
+### 2. ⚡ [Features](features/README.md)
+*Detailed documentation of all implemented features (Features 01–57).*
+- **[01–15. Core Desktop Assistant](features/README.md)** — Wake word, Tier-3 commands, meeting mode, boot greeting, NSIS installer, setup wizard.
+- **[45–50. Subcommands & Settings](features/README.md)** — GitHub subcommands, loading indicators, and settings sidebar.
+- **[51–53. NLU Training & Stability](features/README.md)** — `nexus collect`, `nexus train`, LLM cascades, and mic stability.
+- **[54. Interactive Voice Approval](features/54-interactive-voice-approval-and-confirmation-sidebar.md)** — 5s voice confirmation window with instant early reaction.
+- **[55. NLU Data Foundation & STT Conditioning](features/55-nlu-data-perfection-voice-scaling-and-mcp-bridge-research.md)** — Whisper prompt biasing and speaker-invariant OTA model updates.
+- **[56. Targeted Intent Training & MCP Promotion](features/56-targeted-intent-training-and-mcp-data-promotion.md)** — Interactive category collection (`nexus collect -c -i`) and zero-quarantine promotion.
+- **[57. Apex Wake Word Evolution & Hardware Adaptation](features/57-apex-wake-word-evolution-and-hardware-adaptation.md)** — Mic spectral prober, chassis resonance auto-tuning, and dynamic AGC.
 
-### Current Status (2026-08-19)
+### 3. 🔬 [Research](research/README.md)
+*Comprehensive research knowledge base organized into 6 thematic subdirectories.*
+- **[micspecification/](research/micspecification/apex-wake-word-and-laptop-mic-hardware-adaptation.md)** — Laptop microphone hardware prober, chassis resonance peaks, dynamic AGC, and impulsive noise filters.
+- **[wakeword/](research/wakeword/wake-word-training-production-plan-2026-09-14.md)** — openWakeWord acoustic training, negative augmentation, and loss weighting.
+- **[nlu-intent/](research/nlu-intent/command-phrasing-catalog-2026-09-11.md)** — 55-intent phrasing catalogs, dataset audits, and STT vocabulary bias.
+- **[live-mode/](research/live-mode/live-mode-feasibility-2026-09-11.md)** — Low-latency continuous voice streaming and live dictation.
+- **[mcp-connection/](research/mcp-connection/README.md)** — 9-part research series on MCP bridges, OAuth 2.1, and QR session rotation.
+- **[system-architecture/](research/system-architecture/05-enterprise-patterns-research.md)** — Enterprise patterns, UI animation root causes, and diagnostics.
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Wake word model (nexus.onnx) | TRAINED & VALIDATED | 7/7 detections, 0 false positives |
-| 3-stage KWS pipeline | WORKING | mel → embedding → classifier |
-| Audio capture (cpal) | WORKING | 48kHz stereo → 16kHz mono |
-| Rust integration (tract-onnx) | WORKING | Pure Rust ONNX inference |
-| Hotkey wake (Ctrl+Space) | WORKING | Preserved from before |
-| Spoken wake ("nexus") | WORKING | 7 detections in ~3 min |
-| Speaker verification | PENDING | Ring buffer + verification not yet implemented |
-| Tier 3: Command classifiers (Rust) | IMPLEMENTED | Multi-classifier support in wakeword_oww.rs |
-| Tier 3: Command event listener (frontend) | IMPLEMENTED | main.tsx listens for command-detected events |
-| Tier 3: Training notebook | CREATED | train_nexus_commands.ipynb (run in Colab) |
-| Tier 3: Command models | PENDING | Need to run Colab notebook to train 39 models |
-| Tier 3: Testing | PENDING | Need trained models first, then run test plan |
-| Meeting/privacy mode | IMPLEMENTED | WASAPI + process detection, 4-layer suppression |
-| Boot greeting | IMPLEMENTED | Fresh boot + sleep/wake, non-blocking |
-| Sidecar auto-spawn | IMPLEMENTED | pythonw.exe, port 49152, non-blocking |
-| Mic permission handler | IMPLEMENTED | WebView2 auto-allow for NEXUS origins |
-| App registry | IMPLEMENTED | Pre-indexed, ~1ms per command |
-| Browser suppression | IMPLEMENTED | RestartApps=0, Edge auto-launch removed |
-| Extended testing | PENDING | Multi-speaker, noise, long-running, real reboot |
-| Installer | NOT STARTED | Deferred until all testing complete |
+### 4. 🌐 [9Router Research](9router-research/README.md)
+*Free LLM aggregation, multi-user brain tiers, and Cloudflare Worker AI routing.*
+- **[01–04. Router Brain & Free Models](9router-research/README.md)** — Free model manager, local Qwen thinking brain, and 500MB cloud delegation.
+- **[05–08. MCP Ecosystem & Routing](9router-research/README.md)** — Free MCP servers, Indian consumer apps, and latency-optimized routing.
+- **[09–13. Multi-User Tiers & Roadmap](9router-research/README.md)** — Admin vs Family tiers, continuous training, and n8n command center.
+
+### 5. 🔌 [Model Context Protocol (MCP)](mcp/README.md)
+*Tool-use bridges, Auth Vault, and desktop dictation.*
+- **[00. Overview & Status](mcp/00-overview-and-status.md)** — Server support scorecard and execution breakdown.
+- **[01. Auth Vault & One-Login](mcp/01-auth-vault-one-login.md)** — Centralized token vault and silent refresh.
+- **[02. Server Catalog](mcp/02-server-catalog.md)** — Full 15-server specification and risk profiles.
+- **[03. Scribe Mode & Confirmations](mcp/03-scribe-mode-and-confirmations.md)** — Structured confirmation cards and voice dictation.
+- **[07. Ghostwriter & Echo Modes](mcp/07-ghostwriter-echo-modes.md)** — Ultra-fast direct text injection into active windows.
+
+### 6. 🎙️ [Wake Word Engine](wake-word/README.md)
+*Local ONNX acoustic modeling and Tier-3 command classifiers.*
+- **[01–05. Architecture & Pipeline](wake-word/README.md)** — 3-stage openWakeWord ONNX pipeline in pure Rust.
+- **[06–14. Model Training & Validation](wake-word/README.md)** — Colab training workflows, soundalike dataset mining, and benchmark metrics.
+- **[15–20. Tier-3 Command Classifiers](wake-word/README.md)** — Direct acoustic classification skipping STT for ~200ms latency.
+- **[21–22. v3 Apex Master Blueprints](wake-word/README.md)** — Conv-Attention models, multi-speaker datasets, and hardware adaptation.
+
+### 7. 🔐 [Credentials & Security](credentials/README.md)
+*Token exchange, OAuth 2.1 PKCE, and local Fernet encryption.*
+- **[01–03. Credential Architecture & API Keys](credentials/README.md)** — Storage locations, AES/Fernet encryption at rest, and secret hygiene.
+- **[04–06. Integrations & Device Pairing](credentials/README.md)** — Google, GitHub, and edge device registration.
+- **[07–08. Security Best Practices & Setup Guide](credentials/README.md)** — Zero plain-text rule, sandboxing, and setup wizard walkthrough.
+
+### 8. 🧪 [Testing & Verification](testing/README.md)
+*Repeatable test suites, cryptographic evaluation locks, and model release gates.*
+- **[NLU Testing & Model Promotion Playbook](testing/nlu-future-testing-and-model-promotion-playbook.md)** — Dataset integrity, slot consistency, and OOS promotion gates.
+- **[Data Foundation & Wake-Model Gates](testing/data-foundation-and-wake-model-gates.md)** — SHA-256 evaluation locks and model fingerprints.
+- **[Phases 1–9 Experiment Records](testing/README.md)** — Phased NLU accuracy recovery and OOS elimination experiments.
+- **[Wake Word Phases A–E](testing/README.md)** — Audio preprocessing, SpecAugment, speaker verification, and training decisions.
+
+### 9. 🛡️ [Meeting Protection](meeting-protection/README.md)
+- **[01. Meeting Detection & Audio Privacy](meeting-protection/01-meeting-detection.md)** — 4-layer WASAPI session probe, mic scanning, and zero-interruption suppression.
+
+### 10. 🔍 [Reviews & Retrospectives](reviews/README.md)
+- **[Architecture Mapper Review](reviews/prem224k-architecture-mapper-review.md)** — Independent audit of the interactive codebase visualizer.
+
+---
+
+## ⚙️ Runtime Process & Port Topology
+
+| Service | Port | Process / Technology | Role |
+|---|---|---|---|
+| **Tauri UI & Rust Engine** | — | `nexus.exe` (Rust + WebView2) | Wake word detection, hotkeys, local command execution, audio DSP, and floating UI |
+| **Local STT Server** | `8000` | `faster-whisper` (Python sidecar) | Streaming speech-to-text fallback with domain prompt biasing |
+| **Local NLU Server** | `49152` | `nlu_server.py` (FastAPI + ONNX) | 55-intent classification and BIO slot extraction (BERT-Mini) |
+| **Admin Brain (Admin only)** | `39219` | `brain_server.py` (llama.cpp / Qwen) | Local reasoning, compound command planning, and phrasings generation |
+| **Cloudflare Worker** | Cloud | `server/worker/` (Cloudflare TypeScript) | OAuth token exchange, D1 credential storage, 9Router LLM cascade, and R2 model OTA |

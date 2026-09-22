@@ -45,30 +45,46 @@ interface Env {
   AI: Ai;
   DB: D1Database;
   CACHE?: KVNamespace;  // optional KV namespace for edge caching
+  MODELS?: R2Bucket;    // optional R2 bucket for NLU model distribution
   // Secrets (set via wrangler secret put)
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
+  SWIGGY_CLIENT_ID: string;
+  SWIGGY_CLIENT_SECRET: string;
   NEXUS_ENCRYPTION_KEY: string;
+  NEXUS_ADMIN_TOKEN?: string;  // gates POST /models/nlu/publish
 }
 
 // ---- OAuth configuration ----
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
+const SWIGGY_TOKEN_URL = "https://partner.swiggy.com/oauth/token";
+const SWIGGY_AUTH_URL = "https://partner.swiggy.com/oauth/authorize";
 const OAUTH_REDIRECT_URI = "nexus://oauth/callback";
 
 const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/calendar",
-  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/contacts",
+  "https://www.googleapis.com/auth/drive",
+  "https://www.googleapis.com/auth/spreadsheets",
   "openid",
   "email",
   "profile",
 ].join(" ");
 
 const GITHUB_SCOPES = "repo read:org workflow";
+
+// Swiggy MCP OAuth (Builders Club required for production; localhost dev free)
+const SWIGGY_SCOPES = "read write";
+// RFC 8707 resource indicator: binds the token to the MCP server it's for
+// (2026-07-28 spec makes sending it a client MUST). Base origin covers all
+// three Swiggy MCP endpoints (food/im/dineout).
+const SWIGGY_RESOURCE = "https://mcp.swiggy.com";
 
 // ---- Model constants (re-exported from models.ts for backward compat) ----
 const INTENT_MODEL = "@cf/meta/llama-3.2-1b-instruct";
@@ -312,6 +328,71 @@ async function refreshGoogleToken(env: Env, refreshToken: string): Promise<{ acc
   return { access_token: data.access_token, expires_in: data.expires_in || 3600 };
 }
 
+async function refreshSwiggyToken(env: Env, refreshToken: string): Promise<{ access_token: string; expires_in: number; refresh_token?: string }> {
+  const resp = await fetch(SWIGGY_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: env.SWIGGY_CLIENT_ID,
+      client_secret: env.SWIGGY_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+      resource: SWIGGY_RESOURCE,
+    }),
+  });
+  if (!resp.ok) throw new Error(`Swiggy refresh failed: ${resp.status}`);
+  const data = await resp.json() as any;
+  return { access_token: data.access_token, expires_in: data.expires_in || 3600, refresh_token: data.refresh_token };
+}
+
+/**
+ * Get a valid Swiggy token for MCP vault use. Mirrors Google: refresh
+ * silently when near expiry; null on refresh failure so the client
+ * guides reconnect instead of proceeding with a dead token.
+ */
+async function getValidSwiggyToken(env: Env, userId: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE user_id = ? AND provider = 'swiggy'"
+  ).bind(userId).first();
+
+  if (!row) return null;
+
+  const now = Date.now() / 1000;
+  const expiresAt = row.expires_at as number;
+
+  // Refresh if expired (with 60s buffer) and we have a refresh token
+  if (expiresAt && now > expiresAt - 60 && row.refresh_token) {
+    try {
+      const refreshed = await refreshSwiggyToken(env, row.refresh_token as string);
+      const newExpiresAt = now + refreshed.expires_in;
+      // OAuth 2.1: public clients MUST rotate refresh tokens — persist the
+      // new one when the server rotated, or the next refresh uses a
+      // rotated-away token and dies.
+      if (refreshed.refresh_token) {
+        await env.DB.prepare(
+          "UPDATE oauth_tokens SET access_token = ?, refresh_token = ?, expires_at = ? WHERE user_id = ? AND provider = 'swiggy'"
+        ).bind(refreshed.access_token, refreshed.refresh_token, newExpiresAt, userId).run();
+      } else {
+        await env.DB.prepare(
+          "UPDATE oauth_tokens SET access_token = ?, expires_at = ? WHERE user_id = ? AND provider = 'swiggy'"
+        ).bind(refreshed.access_token, newExpiresAt, userId).run();
+      }
+      return refreshed.access_token;
+    } catch {
+      // Refresh failed (revoked or transient): report disconnected so the
+      // client guides reconnect instead of proceeding with a dead token.
+      return null;
+    }
+  }
+
+  // Expired without a refresh token: unusable — report disconnected.
+  if (expiresAt && now > expiresAt) {
+    return null;
+  }
+
+  return row.access_token as string;
+}
+
 async function getValidGoogleToken(env: Env, userId: string): Promise<string | null> {
   const row = await env.DB.prepare(
     "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE user_id = ? AND provider = 'google'"
@@ -332,9 +413,16 @@ async function getValidGoogleToken(env: Env, userId: string): Promise<string | n
       ).bind(refreshed.access_token, newExpiresAt, userId).run();
       return refreshed.access_token;
     } catch {
-      // Fall back to the stored token (might still work briefly)
-      return row.access_token as string;
+      // Refresh failed (revoked or transient): report disconnected so the
+      // client guides reconnect instead of proceeding with a dead token.
+      // Reconnect heals both cases; a stale token heals neither.
+      return null;
     }
+  }
+
+  // Expired without a refresh token: unusable — report disconnected.
+  if (expiresAt && now > expiresAt) {
+    return null;
   }
 
   return row.access_token as string;
@@ -1803,6 +1891,25 @@ export default {
       return json({ token });
     }
 
+    // ---- OAuth: get google token (for MCP vault: Gmail/Calendar/
+    // Contacts/Drive/Sheets/Meet — one union consent, refreshed here) ----
+    if (path === "/oauth/google-token" && method === "GET") {
+      const userId = url.searchParams.get("user_id") || "";
+      if (!userId) return json({ error: "user_id required" }, 400);
+      const token = await getValidGoogleToken(env, userId);
+      if (!token) return json({ error: "Google not connected" }, 404);
+      return json({ token });
+    }
+
+    // ---- OAuth: get swiggy token (for MCP vault — silently refreshed) ----
+    if (path === "/oauth/swiggy-token" && method === "GET") {
+      const userId = url.searchParams.get("user_id") || "";
+      if (!userId) return json({ error: "user_id required" }, 400);
+      const token = await getValidSwiggyToken(env, userId);
+      if (!token) return json({ error: "Swiggy not connected" }, 404);
+      return json({ token });
+    }
+
     // ---- OAuth: disconnect ----
     if (path === "/oauth/disconnect" && method === "DELETE") {
       return handleOAuthDisconnect(request, env, json);
@@ -1828,8 +1935,69 @@ export default {
       return json({
         google: { configured: !!env.GOOGLE_CLIENT_ID, scopes: GOOGLE_SCOPES },
         github: { configured: !!env.GITHUB_CLIENT_ID, scopes: GITHUB_SCOPES },
+        swiggy: { configured: !!env.SWIGGY_CLIENT_ID, scopes: SWIGGY_SCOPES },
         redirect_uri: OAUTH_REDIRECT_URI,
       });
+    }
+
+    // ---- NLU model distribution (family devices) ----
+    // Admin retrains BERT-Mini locally, uploads files to R2 via
+    // `wrangler r2 object put`, then POSTs the manifest here. Family
+    // devices poll /latest on startup and pull changed files.
+    //
+    // KV key: "nlu_model_latest" -> { version, updated_at, files: {name: {sha256, size}} }
+    // R2 keys: "nlu/<filename>" under MODELS bucket
+    if (path === "/models/nlu/latest" && method === "GET") {
+      if (!env.CACHE) return json({ error: "model distribution not configured" }, 503);
+      const manifest = await env.CACHE.get("nlu_model_latest");
+      if (!manifest) return json({ error: "no model published yet" }, 404);
+      return new Response(manifest, {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      });
+    }
+
+    if (path === "/models/nlu/download" && method === "GET") {
+      if (!env.MODELS) return json({ error: "model storage not configured" }, 503);
+      const name = url.searchParams.get("name") || "";
+      // Whitelist: only known model files can be fetched (path traversal guard)
+      const allowed = new Set([
+        "nexus_nlu.onnx", "nexus_nlu.onnx.data", "labels.json",
+        "temperature_calibration.json",
+        "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json",
+        "tokenizer/vocab.txt", "tokenizer/special_tokens_map.json",
+      ]);
+      if (!allowed.has(name)) return json({ error: "unknown file" }, 400);
+      const obj = await env.MODELS.get(`nlu/${name}`);
+      if (!obj) return json({ error: "file not found" }, 404);
+      return new Response(obj.body, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    if (path === "/models/nlu/publish" && method === "POST") {
+      if (!env.CACHE) return json({ error: "model distribution not configured" }, 503);
+      const adminToken = env.NEXUS_ADMIN_TOKEN;
+      if (!adminToken) return json({ error: "publish disabled (no admin token)" }, 503);
+      const auth = request.headers.get("Authorization") || "";
+      if (auth !== `Bearer ${adminToken}`) return json({ error: "unauthorized" }, 401);
+      try {
+        const body = await request.json() as { version?: string; files?: Record<string, { sha256: string; size: number }> };
+        if (!body.version || !body.files || Object.keys(body.files).length === 0) {
+          return json({ error: "version and files required" }, 400);
+        }
+        const manifest = {
+          version: body.version,
+          updated_at: new Date().toISOString(),
+          files: body.files,
+        };
+        await env.CACHE.put("nlu_model_latest", JSON.stringify(manifest));
+        return json({ ok: true, version: body.version, file_count: Object.keys(body.files).length });
+      } catch (e) {
+        return json({ error: (e as Error).message }, 500);
+      }
     }
 
     // ---- STT: Transcribe audio via Workers AI Whisper ----
@@ -1938,6 +2106,23 @@ async function handleAuthUrl(
     return json({ url: authUrl, redirect_uri: callbackUrl });
   }
 
+  if (provider === "swiggy") {
+    if (!env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
+    const authUrl = (
+      `${SWIGGY_AUTH_URL}`
+      + `?client_id=${encodeURIComponent(env.SWIGGY_CLIENT_ID)}`
+      + `&redirect_uri=${encodeURIComponent(callbackUrl)}`
+      + `&response_type=code`
+      + `&scope=${encodeURIComponent(SWIGGY_SCOPES)}`
+      + (codeChallenge ? `&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256` : "")
+      + `&resource=${encodeURIComponent(SWIGGY_RESOURCE)}`
+      + `&state=${encodeURIComponent(state)}`
+      + `&access_type=offline`
+      + `&prompt=consent`
+    );
+    return json({ url: authUrl, redirect_uri: callbackUrl });
+  }
+
   return json({ error: `unsupported provider: ${provider}` }, 400);
 }
 
@@ -1948,7 +2133,7 @@ function renderOAuthHtml(
   userId: string,
   accountId = "",
 ): string {
-  const providerDisplay = provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider;
+  const providerDisplay = provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider.toLowerCase() === "swiggy" ? "Swiggy" : provider;
   const deepLink = `nexus://oauth/callback?provider=${encodeURIComponent(provider.toLowerCase())}&user_id=${encodeURIComponent(userId)}&status=${success ? "success" : "error"}`;
 
   if (!success) {
@@ -2129,6 +2314,43 @@ async function handleOAuthBrowserCallback(
           accountId = ghUser.login || userId;
         }
       } catch { /* ignore */ }
+    } else if (provider === "swiggy") {
+      if (!env.SWIGGY_CLIENT_ID) return new Response(renderOAuthHtml("Swiggy", false, "Swiggy OAuth not configured", userId), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+      const resp = await fetch(SWIGGY_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: env.SWIGGY_CLIENT_ID,
+          client_secret: env.SWIGGY_CLIENT_SECRET,
+          code,
+          redirect_uri: callbackUrl,
+          grant_type: "authorization_code",
+          resource: SWIGGY_RESOURCE,
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy token exchange failed: ${resp.status} ${errText}`, userId), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+
+      const tokens = await resp.json() as any;
+      if (!tokens.access_token) {
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy exchange error: ${tokens.error_description || tokens.error || "No access token"}`, userId), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+
+      accessToken = tokens.access_token;
+      refreshToken = tokens.refresh_token || null;
+      expiresIn = tokens.expires_in || 3600;
+
+      // Swiggy doesn't have a standard userinfo endpoint we can use
+      accountId = userId;
     } else {
       return new Response(renderOAuthHtml(provider || "Unknown", false, `Unsupported provider: ${provider}`, userId), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -2138,7 +2360,7 @@ async function handleOAuthBrowserCallback(
     // Save in Cloudflare D1
     const now = Date.now() / 1000;
     const expiresAt = expiresIn ? now + expiresIn : 0;
-    const scopes = provider === "google" ? GOOGLE_SCOPES : GITHUB_SCOPES;
+    const scopes = provider === "google" ? GOOGLE_SCOPES : provider === "github" ? GITHUB_SCOPES : SWIGGY_SCOPES;
 
     await env.DB.prepare(
       "INSERT OR REPLACE INTO oauth_tokens (user_id, provider, access_token, refresh_token, expires_at, scopes, account_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
@@ -2147,7 +2369,8 @@ async function handleOAuthBrowserCallback(
       refreshToken, expiresAt, scopes, accountId, now
     ).run();
 
-    return new Response(renderOAuthHtml(provider === "google" ? "Google" : "GitHub", true, "", userId, accountId), {
+    const displayProvider = provider === "google" ? "Google" : provider === "github" ? "GitHub" : "Swiggy";
+    return new Response(renderOAuthHtml(displayProvider, true, "", userId, accountId), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   } catch (err) {
@@ -2230,6 +2453,26 @@ async function handleOAuthExchange(
           accountId = ghUser.login || userId;
         }
       } catch { /* ignore */ }
+    } else if (provider === "swiggy") {
+      if (!env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
+      const resp = await fetch(SWIGGY_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: env.SWIGGY_CLIENT_ID,
+          client_secret: env.SWIGGY_CLIENT_SECRET,
+          code,
+          code_verifier: codeVerifier,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code",
+          resource: SWIGGY_RESOURCE,
+        }),
+      });
+      if (!resp.ok) return json({ error: `Swiggy exchange failed (${resp.status})` }, 502);
+      tokens = await resp.json();
+      if (!tokens.access_token) return json({ error: tokens.error_description || tokens.error || "exchange failed" }, 400);
+      // Swiggy has no userinfo endpoint for account display
+      accountId = userId;
     } else {
       return json({ error: `unsupported provider: ${provider}` }, 400);
     }
@@ -2243,7 +2486,7 @@ async function handleOAuthExchange(
     ).bind(
       userId, provider, tokens.access_token,
       tokens.refresh_token || null, expiresAt,
-      provider === "google" ? GOOGLE_SCOPES : GITHUB_SCOPES,
+      provider === "google" ? GOOGLE_SCOPES : provider === "github" ? GITHUB_SCOPES : SWIGGY_SCOPES,
       accountId, now
     ).run();
 

@@ -5,6 +5,8 @@
 > **Status:** Data collected, augmentation pipeline ready, training notebook created. Ready for Colab training run.
 >
 > **Date:** 2026-09-07
+>
+> **Workspace verification (2026-09-14):** The deployed `nexus.onnx` is 415,224 bytes and is locked by `src-tauri/resources/oww/model_manifest.json`. The v3 notebook and local `wake_word_data` recordings described below are not present in this workspace; restore or recreate them before training. Historical results are not a current production-quality claim.
 
 ---
 

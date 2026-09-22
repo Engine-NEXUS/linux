@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "pipeline": "openwakeword-melspectrogram-embedding-classifier",
+  "sample_rate_hz": 16000,
+  "classifier_input": [
+    1,
+    16,
+    96
+  ],
+  "classifier_output": [
+    1,
+    1
+  ],
+  "runtime": {
+    "wake_threshold": 0.35,
+    "silence_rms_threshold": 0.002,
+    "target_rms": 0.03,
+    "max_gain": 20.0,
+    "restart_grace_seconds": 10,
+    "refractory_milliseconds": 3000
+  },
+  "models": [
+    {
+      "file": "melspectrogram.onnx",
+      "bytes": 1087958,
+      "sha256": "ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f"
+    },
+    {
+      "file": "embedding_model.onnx",
+      "bytes": 1326578,
+      "sha256": "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f"
+    },
+    {
+      "file": "nexus.onnx",
+      "bytes": 415224,
+      "sha256": "7364dc1e834c9bb9bc04a5dac5a54678eb1344d516ff699b2f85d17a20a043c7"
+    }
+  ]
+}

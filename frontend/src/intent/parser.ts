@@ -41,7 +41,16 @@ export type Intent =
   | { action: "media_previous" }
   | { action: "media_stop" }
   | { action: "github_command"; command: unknown }
+  | { action: "order_food"; query: string; restaurant?: string }
+  | { action: "search_product"; query: string }
+  | { action: "send_whatsapp_message"; contact: string; message: string }
+  | { action: "need_more_info"; prompt: string }
+  | { action: "enter_ghostwriter"; contact?: string }
+  | { action: "screen_click"; ordinal: number }
+  | { action: "screen_read"; ordinal: number }
+  | { action: "browser_tab"; index: number }
   | { action: "greeting"; reply: string }
+  | { action: "nlu_result"; intent: string; slots: unknown; confidence: number }
   | { action: "unknown"; raw: string };
 
 /**
@@ -651,13 +660,22 @@ export function parseIntent(transcript: string): Intent {
     }
   }
 
-  // --- "open chat with <name>" / "message <name>" / "whatsapp <name>" ---
+  // --- "open chat with <name>" / "chat with <name>" (chat-open ONLY) ---
+  // Anything send-shaped ("send message to X", anything with "saying",
+  // "message <X> saying ...") is NOT claimed here — it belongs to the Rust
+  // orchestrator (NeedMoreInfo / SendWhatsAppMessage), which asks for
+  // missing slots and gates the send. Claiming it here caused "Ok sir"
+  // + a garbage contact ("mommy in WhatsApp") with no question asked.
+  if (/\bsaying\b/i.test(text)) {
+    return { action: "unknown", raw: text };
+  }
   const whatsappMatch = text.match(
-    /^(?:open\s+(?:my\s+)?chat\s+with|chat\s+with|message|whatsapp|open\s+whatsapp\s+chat\s+with|send\s+message\s+to|send\s+whatsapp\s+to)\s+(.+?)(?:\s+on\s+whatsapp)?$/i,
+    /^(?:open\s+(?:my\s+)?chat\s+with|chat\s+with|message|whatsapp|open\s+whatsapp\s+chat\s+with)\s+(.+?)(?:\s+(?:on|in)\s+whatsapp)?$/i,
   );
   if (whatsappMatch) {
     const contact = whatsappMatch[1].trim();
-    if (contact) {
+    // "send ..." leftovers are send-shaped, not chat opens — defer to Rust.
+    if (contact && !/^send\b/i.test(contact)) {
       return { action: "whatsapp_chat", contact };
     }
   }

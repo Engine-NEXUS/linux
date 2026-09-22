@@ -1,0 +1,3032 @@
+{
+  "schema_version": 1,
+  "source": "nexus_synthetic_phase10",
+  "review_status": "approved_for_candidate_training",
+  "policy": "Thin-intent top-up to >=40 rows. No new labels.",
+  "total_examples": 391,
+  "unique_families": 56,
+  "intent_counts": {
+    "list_pr_files": 33,
+    "create_pr": 32,
+    "remove_collaborator": 32,
+    "search": 30,
+    "close_app": 27,
+    "update_branch": 26,
+    "analyse_pr": 25,
+    "analyse_repo": 24,
+    "analyse_latest_pr": 22,
+    "whatsapp_chat": 21,
+    "list_branches": 21,
+    "check_branch": 17,
+    "list_workflows": 15,
+    "list_workflow_runs": 15,
+    "comment_pr": 14,
+    "list_collaborators": 14,
+    "open_url": 12,
+    "list_org_members": 11
+  },
+  "examples": [
+    {
+      "text": "hunt down hotel deals",
+      "intent": "search",
+      "slots": {
+        "query": "hotel deals"
+      }
+    },
+    {
+      "text": "hunt down weather today",
+      "intent": "search",
+      "slots": {
+        "query": "weather today"
+      }
+    },
+    {
+      "text": "hunt down python tutorial",
+      "intent": "search",
+      "slots": {
+        "query": "python tutorial"
+      }
+    },
+    {
+      "text": "hunt down news headlines",
+      "intent": "search",
+      "slots": {
+        "query": "news headlines"
+      }
+    },
+    {
+      "text": "hunt down cricket score",
+      "intent": "search",
+      "slots": {
+        "query": "cricket score"
+      }
+    },
+    {
+      "text": "hunt down train timings",
+      "intent": "search",
+      "slots": {
+        "query": "train timings"
+      }
+    },
+    {
+      "text": "hunt down best laptop",
+      "intent": "search",
+      "slots": {
+        "query": "best laptop"
+      }
+    },
+    {
+      "text": "hunt down yoga videos",
+      "intent": "search",
+      "slots": {
+        "query": "yoga videos"
+      }
+    },
+    {
+      "text": "dig up hotel deals",
+      "intent": "search",
+      "slots": {
+        "query": "hotel deals"
+      }
+    },
+    {
+      "text": "dig up weather today",
+      "intent": "search",
+      "slots": {
+        "query": "weather today"
+      }
+    },
+    {
+      "text": "dig up python tutorial",
+      "intent": "search",
+      "slots": {
+        "query": "python tutorial"
+      }
+    },
+    {
+      "text": "dig up news headlines",
+      "intent": "search",
+      "slots": {
+        "query": "news headlines"
+      }
+    },
+    {
+      "text": "dig up cricket score",
+      "intent": "search",
+      "slots": {
+        "query": "cricket score"
+      }
+    },
+    {
+      "text": "dig up train timings",
+      "intent": "search",
+      "slots": {
+        "query": "train timings"
+      }
+    },
+    {
+      "text": "dig up best laptop",
+      "intent": "search",
+      "slots": {
+        "query": "best laptop"
+      }
+    },
+    {
+      "text": "dig up yoga videos",
+      "intent": "search",
+      "slots": {
+        "query": "yoga videos"
+      }
+    },
+    {
+      "text": "show me results for hotel deals",
+      "intent": "search",
+      "slots": {
+        "query": "hotel deals"
+      }
+    },
+    {
+      "text": "show me results for weather today",
+      "intent": "search",
+      "slots": {
+        "query": "weather today"
+      }
+    },
+    {
+      "text": "show me results for python tutorial",
+      "intent": "search",
+      "slots": {
+        "query": "python tutorial"
+      }
+    },
+    {
+      "text": "show me results for news headlines",
+      "intent": "search",
+      "slots": {
+        "query": "news headlines"
+      }
+    },
+    {
+      "text": "show me results for cricket score",
+      "intent": "search",
+      "slots": {
+        "query": "cricket score"
+      }
+    },
+    {
+      "text": "show me results for train timings",
+      "intent": "search",
+      "slots": {
+        "query": "train timings"
+      }
+    },
+    {
+      "text": "show me results for best laptop",
+      "intent": "search",
+      "slots": {
+        "query": "best laptop"
+      }
+    },
+    {
+      "text": "show me results for yoga videos",
+      "intent": "search",
+      "slots": {
+        "query": "yoga videos"
+      }
+    },
+    {
+      "text": "i need details about hotel deals",
+      "intent": "search",
+      "slots": {
+        "query": "hotel deals"
+      }
+    },
+    {
+      "text": "i need details about weather today",
+      "intent": "search",
+      "slots": {
+        "query": "weather today"
+      }
+    },
+    {
+      "text": "i need details about python tutorial",
+      "intent": "search",
+      "slots": {
+        "query": "python tutorial"
+      }
+    },
+    {
+      "text": "i need details about news headlines",
+      "intent": "search",
+      "slots": {
+        "query": "news headlines"
+      }
+    },
+    {
+      "text": "i need details about cricket score",
+      "intent": "search",
+      "slots": {
+        "query": "cricket score"
+      }
+    },
+    {
+      "text": "i need details about train timings",
+      "intent": "search",
+      "slots": {
+        "query": "train timings"
+      }
+    },
+    {
+      "text": "terminate calculator",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "calculator"
+      }
+    },
+    {
+      "text": "force close calculator",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "calculator"
+      }
+    },
+    {
+      "text": "terminate notepad",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "notepad"
+      }
+    },
+    {
+      "text": "force close notepad",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "notepad"
+      }
+    },
+    {
+      "text": "exit paint",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "paint"
+      }
+    },
+    {
+      "text": "terminate paint",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "paint"
+      }
+    },
+    {
+      "text": "force close paint",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "paint"
+      }
+    },
+    {
+      "text": "exit vlc",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "vlc"
+      }
+    },
+    {
+      "text": "terminate vlc",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "vlc"
+      }
+    },
+    {
+      "text": "force close vlc",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "vlc"
+      }
+    },
+    {
+      "text": "terminate spotify",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "spotify"
+      }
+    },
+    {
+      "text": "force close spotify",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "spotify"
+      }
+    },
+    {
+      "text": "exit cmd",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "cmd"
+      }
+    },
+    {
+      "text": "terminate cmd",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "cmd"
+      }
+    },
+    {
+      "text": "force close cmd",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "cmd"
+      }
+    },
+    {
+      "text": "exit task manager",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "task manager"
+      }
+    },
+    {
+      "text": "terminate task manager",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "task manager"
+      }
+    },
+    {
+      "text": "force close task manager",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "task manager"
+      }
+    },
+    {
+      "text": "exit photos",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "photos"
+      }
+    },
+    {
+      "text": "terminate photos",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "photos"
+      }
+    },
+    {
+      "text": "force close photos",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "photos"
+      }
+    },
+    {
+      "text": "exit calendar",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "calendar"
+      }
+    },
+    {
+      "text": "terminate calendar",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "calendar"
+      }
+    },
+    {
+      "text": "force close calendar",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "calendar"
+      }
+    },
+    {
+      "text": "exit camera",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "camera"
+      }
+    },
+    {
+      "text": "terminate camera",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "camera"
+      }
+    },
+    {
+      "text": "force close camera",
+      "intent": "close_app",
+      "slots": {
+        "app_name": "camera"
+      }
+    },
+    {
+      "text": "talk to mom on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "mom"
+      }
+    },
+    {
+      "text": "ping mom on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "mom"
+      }
+    },
+    {
+      "text": "talk to dad on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "dad"
+      }
+    },
+    {
+      "text": "ping dad on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "dad"
+      }
+    },
+    {
+      "text": "talk to lakshya on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "lakshya"
+      }
+    },
+    {
+      "text": "ping lakshya on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "lakshya"
+      }
+    },
+    {
+      "text": "open chat with prem",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "prem"
+      }
+    },
+    {
+      "text": "talk to prem on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "prem"
+      }
+    },
+    {
+      "text": "ping prem on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "prem"
+      }
+    },
+    {
+      "text": "open chat with eesha",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "eesha"
+      }
+    },
+    {
+      "text": "talk to eesha on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "eesha"
+      }
+    },
+    {
+      "text": "ping eesha on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "eesha"
+      }
+    },
+    {
+      "text": "open chat with brother",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "brother"
+      }
+    },
+    {
+      "text": "talk to brother on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "brother"
+      }
+    },
+    {
+      "text": "ping brother on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "brother"
+      }
+    },
+    {
+      "text": "get me mom on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "mom"
+      }
+    },
+    {
+      "text": "get me dad on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "dad"
+      }
+    },
+    {
+      "text": "get me lakshya on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "lakshya"
+      }
+    },
+    {
+      "text": "get me prem on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "prem"
+      }
+    },
+    {
+      "text": "get me eesha on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "eesha"
+      }
+    },
+    {
+      "text": "get me brother on whatsapp",
+      "intent": "whatsapp_chat",
+      "slots": {
+        "contact": "brother"
+      }
+    },
+    {
+      "text": "scan servx codebase",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "map the architecture of servx",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "give me an overview of servx",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "scan zync codebase",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "map the architecture of zync",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "give me an overview of zync",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "scan nexus codebase",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "map the architecture of nexus",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "give me an overview of nexus",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "scan ledger-ai codebase",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "map the architecture of ledger-ai",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "give me an overview of ledger-ai",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "scan shopkart codebase",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "map the architecture of shopkart",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "give me an overview of shopkart",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "scan owner/project codebase",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "map the architecture of owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "give me an overview of owner/project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "inspect the servx project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "inspect the zync project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "inspect the nexus project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "inspect the ledger-ai project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "inspect the shopkart project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "inspect the owner/project project",
+      "intent": "analyse_repo",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "review pr 5 in servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "5",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "deep analyse pr 5 servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "5",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "check pr 5 in servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "5",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "review pr 12 in zync",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "12",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "deep analyse pr 12 zync",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "12",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "check pr 12 in zync",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "12",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "review pr 23 in nexus",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "23",
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "deep analyse pr 23 nexus",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "23",
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "check pr 23 in nexus",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "23",
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "review pr 42 in ledger-ai",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "deep analyse pr 42 ledger-ai",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "check pr 42 in ledger-ai",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "review pr 7 in shopkart",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "7",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "deep analyse pr 7 shopkart",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "7",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "check pr 7 in shopkart",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "7",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "review pr 99 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "99",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "deep analyse pr 99 owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "99",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "check pr 99 in owner/project",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "99",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "critique pull request 3 in servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "3",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "critique pull request 8 in servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "8",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "critique pull request 15 in servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "15",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "critique pull request 27 in servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "27",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "critique pull request 31 in servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "31",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "critique pull request 55 in servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "55",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "critique pull request 71 in servx",
+      "intent": "analyse_pr",
+      "slots": {
+        "pr_number": "71",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "show me the current pr in servx",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "what is the newest pull request in servx",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "show me the current pr in zync",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "what is the newest pull request in zync",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "show me the current pr in nexus",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "what is the newest pull request in nexus",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "show me the current pr in ledger-ai",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "what is the newest pull request in ledger-ai",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "show me the current pr in shopkart",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "what is the newest pull request in shopkart",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "show me the current pr in owner/project",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "what is the newest pull request in owner/project",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "recent pr by alex in servx",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "servx",
+        "author": "alex"
+      }
+    },
+    {
+      "text": "recent pr by prem in servx",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "servx",
+        "author": "prem"
+      }
+    },
+    {
+      "text": "recent pr by eesha in servx",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "servx",
+        "author": "eesha"
+      }
+    },
+    {
+      "text": "recent pr by ravi in servx",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "servx",
+        "author": "ravi"
+      }
+    },
+    {
+      "text": "recent pr by sana in servx",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "servx",
+        "author": "sana"
+      }
+    },
+    {
+      "text": "get the active pr in servx",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "get the active pr in zync",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "get the active pr in nexus",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "get the active pr in ledger-ai",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "get the active pr in shopkart",
+      "intent": "analyse_latest_pr",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "list files in pr 42 in servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "which files did pr 42 touch in servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "diff files for pr 42 in servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "42",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "list files in pr 7 in zync",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "7",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "which files did pr 7 touch in zync",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "7",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "diff files for pr 7 in zync",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "7",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "list files in pr 19 in nexus",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "19",
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "which files did pr 19 touch in nexus",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "19",
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "diff files for pr 19 in nexus",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "19",
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "list files in pr 101 in ledger-ai",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "101",
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "which files did pr 101 touch in ledger-ai",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "101",
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "diff files for pr 101 in ledger-ai",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "101",
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "list files in pr 3 in shopkart",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "3",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "which files did pr 3 touch in shopkart",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "3",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "diff files for pr 3 in shopkart",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "3",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "list files in pr 55 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "55",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "which files did pr 55 touch in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "55",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "diff files for pr 55 in owner/project",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "55",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "files changed in pr 11 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "11",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 22 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "22",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 33 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "33",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 44 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "44",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 66 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "66",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 77 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "77",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 88 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "88",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 9 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "9",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 13 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "13",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 17 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "17",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 21 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "21",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 25 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "25",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 29 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "29",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 35 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "35",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "files changed in pr 41 servx",
+      "intent": "list_pr_files",
+      "slots": {
+        "pr_number": "41",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "open a pr in servx improve login from feature-login to main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "new pull request in servx improve login feature-login into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "improve login",
+        "head": "feature-login",
+        "base": "main"
+      }
+    },
+    {
+      "text": "open a pr in zync fix crash on start from fix-crash to dev",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "zync",
+        "title": "fix crash on start",
+        "head": "fix-crash",
+        "base": "dev"
+      }
+    },
+    {
+      "text": "new pull request in zync fix crash on start fix-crash into dev",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "zync",
+        "title": "fix crash on start",
+        "head": "fix-crash",
+        "base": "dev"
+      }
+    },
+    {
+      "text": "open a pr in nexus add dark mode from feat-dark to main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "nexus",
+        "title": "add dark mode",
+        "head": "feat-dark",
+        "base": "main"
+      }
+    },
+    {
+      "text": "new pull request in nexus add dark mode feat-dark into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "nexus",
+        "title": "add dark mode",
+        "head": "feat-dark",
+        "base": "main"
+      }
+    },
+    {
+      "text": "open a pr in ledger-ai update readme from docs-update to main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "ledger-ai",
+        "title": "update readme",
+        "head": "docs-update",
+        "base": "main"
+      }
+    },
+    {
+      "text": "new pull request in ledger-ai update readme docs-update into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "ledger-ai",
+        "title": "update readme",
+        "head": "docs-update",
+        "base": "main"
+      }
+    },
+    {
+      "text": "open a pr in shopkart payment flow from feat-pay to release-2",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "shopkart",
+        "title": "payment flow",
+        "head": "feat-pay",
+        "base": "release-2"
+      }
+    },
+    {
+      "text": "new pull request in shopkart payment flow feat-pay into release-2",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "shopkart",
+        "title": "payment flow",
+        "head": "feat-pay",
+        "base": "release-2"
+      }
+    },
+    {
+      "text": "open a pr in owner/project speed up search from perf-search to main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "speed up search",
+        "head": "perf-search",
+        "base": "main"
+      }
+    },
+    {
+      "text": "new pull request in owner/project speed up search perf-search into main",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "owner/project",
+        "title": "speed up search",
+        "head": "perf-search",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr refactor auth from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "refactor auth",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr bump deps from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "bump deps",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr fix typo from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "fix typo",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr add tests from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "add tests",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr new landing from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "new landing",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr cache layer from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "cache layer",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr api v2 from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "api v2",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr mobile layout from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "mobile layout",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr sso login from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "sso login",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr export csv from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "export csv",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr fix flaky test from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "fix flaky test",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr perf pass from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "perf pass",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr i18n strings from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "i18n strings",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr health check from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "health check",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr docker setup from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "docker setup",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr ci pipeline from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "ci pipeline",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr search filters from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "search filters",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr profile page from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "profile page",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr notifications from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "notifications",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "raise pr audit log from dev to main in servx",
+      "intent": "create_pr",
+      "slots": {
+        "repo": "servx",
+        "title": "audit log",
+        "head": "dev",
+        "base": "main"
+      }
+    },
+    {
+      "text": "drop alex from servx",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "revoke alex access to owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "kick alex from zync",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "alex",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "drop prem from servx",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "prem",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "revoke prem access to owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "prem",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "kick prem from zync",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "prem",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "drop eesha from servx",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "eesha",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "revoke eesha access to owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "eesha",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "kick eesha from zync",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "eesha",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "drop ravi from servx",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "ravi",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "revoke ravi access to owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "ravi",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "kick ravi from zync",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "ravi",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "drop sana from servx",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "sana",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "revoke sana access to owner/project",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "sana",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "kick sana from zync",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "sana",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "delete kiran from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "kiran",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete divya from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "divya",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete arjun from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "arjun",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete meera from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "meera",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete vikram from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "vikram",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete anaya from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "anaya",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete kabir from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "kabir",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete ishita from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "ishita",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete rohan from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "rohan",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete neha from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "neha",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete farhan from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "farhan",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete priya from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "priya",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete aman from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "aman",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete zoya from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "zoya",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete nikhil from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "nikhil",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete tara from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "tara",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "delete dev from collaborators of shopkart",
+      "intent": "remove_collaborator",
+      "slots": {
+        "username": "dev",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "update the branch for pr 42 in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "sync pr 42 with main in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "42",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "update the branch for pr 7 in zync",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "7",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "sync pr 7 with main in zync",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "7",
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "update the branch for pr 15 in nexus",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "15",
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "sync pr 15 with main in nexus",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "15",
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "update the branch for pr 99 in ledger-ai",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "99",
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "sync pr 99 with main in ledger-ai",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "99",
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "update the branch for pr 3 in shopkart",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "3",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "sync pr 3 with main in shopkart",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "3",
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "update the branch for pr 21 in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "21",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "sync pr 21 with main in owner/project",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "21",
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "bring pr 5 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "5",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 9 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "9",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 13 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "13",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 17 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "17",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 25 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "25",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 29 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "29",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 33 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "33",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 37 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "37",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 45 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "45",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 51 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "51",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 60 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "60",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 70 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "70",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 80 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "80",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "bring pr 90 up to date in servx",
+      "intent": "update_branch",
+      "slots": {
+        "pr_number": "90",
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "list branches in servx",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "show all branches of servx",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "list branches in zync",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "show all branches of zync",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "list branches in nexus",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "show all branches of nexus",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "list branches in ledger-ai",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "show all branches of ledger-ai",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "list branches in shopkart",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "show all branches of shopkart",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "list branches in owner/project",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "show all branches of owner/project",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "branch list for servx",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "branch list for zync",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "branch list for nexus",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "branch list for ledger-ai",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "branch list for shopkart",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "branch list for owner/project",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "does branch feature-login exist in servx",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "servx",
+        "branch": "feature-login"
+      }
+    },
+    {
+      "text": "does branch fix-crash exist in servx",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "servx",
+        "branch": "fix-crash"
+      }
+    },
+    {
+      "text": "does branch dev exist in servx",
+      "intent": "list_branches",
+      "slots": {
+        "repo": "servx",
+        "branch": "dev"
+      }
+    },
+    {
+      "text": "check the newest branch in servx",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "recently created branch in servx",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "check the newest branch in zync",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "recently created branch in zync",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "check the newest branch in nexus",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "recently created branch in nexus",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "check the newest branch in ledger-ai",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "recently created branch in ledger-ai",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "check the newest branch in shopkart",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "recently created branch in shopkart",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "check the newest branch in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "recently created branch in owner/project",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "fresh branches by alex in servx",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "servx",
+        "author": "alex"
+      }
+    },
+    {
+      "text": "fresh branches by prem in servx",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "servx",
+        "author": "prem"
+      }
+    },
+    {
+      "text": "fresh branches by eesha in servx",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "servx",
+        "author": "eesha"
+      }
+    },
+    {
+      "text": "fresh branches by ravi in servx",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "servx",
+        "author": "ravi"
+      }
+    },
+    {
+      "text": "fresh branches by sana in servx",
+      "intent": "check_branch",
+      "slots": {
+        "repo": "servx",
+        "author": "sana"
+      }
+    },
+    {
+      "text": "open github.com in browser",
+      "intent": "open_url",
+      "slots": {
+        "url": "github.com",
+        "target": "github.com"
+      }
+    },
+    {
+      "text": "launch github.com website",
+      "intent": "open_url",
+      "slots": {
+        "url": "github.com",
+        "target": "github.com"
+      }
+    },
+    {
+      "text": "open stackoverflow.com in browser",
+      "intent": "open_url",
+      "slots": {
+        "url": "stackoverflow.com",
+        "target": "stackoverflow.com"
+      }
+    },
+    {
+      "text": "launch stackoverflow.com website",
+      "intent": "open_url",
+      "slots": {
+        "url": "stackoverflow.com",
+        "target": "stackoverflow.com"
+      }
+    },
+    {
+      "text": "open news.ycombinator.com in browser",
+      "intent": "open_url",
+      "slots": {
+        "url": "news.ycombinator.com",
+        "target": "news.ycombinator.com"
+      }
+    },
+    {
+      "text": "launch news.ycombinator.com website",
+      "intent": "open_url",
+      "slots": {
+        "url": "news.ycombinator.com",
+        "target": "news.ycombinator.com"
+      }
+    },
+    {
+      "text": "browse to news.ycombinator.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "news.ycombinator.com",
+        "target": "news.ycombinator.com"
+      }
+    },
+    {
+      "text": "visit mail.google.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "mail.google.com",
+        "target": "mail.google.com"
+      }
+    },
+    {
+      "text": "visit calendar.google.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "calendar.google.com",
+        "target": "calendar.google.com"
+      }
+    },
+    {
+      "text": "visit drive.google.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "drive.google.com",
+        "target": "drive.google.com"
+      }
+    },
+    {
+      "text": "visit maps.google.com",
+      "intent": "open_url",
+      "slots": {
+        "url": "maps.google.com",
+        "target": "maps.google.com"
+      }
+    },
+    {
+      "text": "visit amazon.in",
+      "intent": "open_url",
+      "slots": {
+        "url": "amazon.in",
+        "target": "amazon.in"
+      }
+    },
+    {
+      "text": "show ci pipelines in servx",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "ci workflows in servx",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "show ci pipelines in zync",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "ci workflows in zync",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "show ci pipelines in nexus",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "ci workflows in nexus",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "show ci pipelines in ledger-ai",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "ci workflows in ledger-ai",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "show ci pipelines in shopkart",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "ci workflows in shopkart",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "show ci pipelines in owner/project",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "ci workflows in owner/project",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "actions list for servx",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "actions list for zync",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "actions list for nexus",
+      "intent": "list_workflows",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "show recent ci runs in servx",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "build history of servx",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "show recent ci runs in zync",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "build history of zync",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "show recent ci runs in nexus",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "build history of nexus",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "show recent ci runs in ledger-ai",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "build history of ledger-ai",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "show recent ci runs in shopkart",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "build history of shopkart",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "show recent ci runs in owner/project",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "build history of owner/project",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "did the last build pass in servx",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "did the last build pass in zync",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "did the last build pass in nexus",
+      "intent": "list_workflow_runs",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "comment on pr 42 in servx saying looks good",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "servx",
+        "body": "looks good"
+      }
+    },
+    {
+      "text": "comment on pr 42 in servx saying needs another review",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "servx",
+        "body": "needs another review"
+      }
+    },
+    {
+      "text": "comment on pr 42 in servx saying fix the typo",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "servx",
+        "body": "fix the typo"
+      }
+    },
+    {
+      "text": "comment on pr 42 in servx saying add tests please",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "42",
+        "repo": "servx",
+        "body": "add tests please"
+      }
+    },
+    {
+      "text": "leave a comment on pr 7 in zync saying looks good",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "7",
+        "repo": "zync",
+        "body": "looks good"
+      }
+    },
+    {
+      "text": "leave a comment on pr 15 in zync saying needs another review",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "15",
+        "repo": "zync",
+        "body": "needs another review"
+      }
+    },
+    {
+      "text": "leave a comment on pr 23 in zync saying fix the typo",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "23",
+        "repo": "zync",
+        "body": "fix the typo"
+      }
+    },
+    {
+      "text": "leave a comment on pr 31 in zync saying add tests please",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "31",
+        "repo": "zync",
+        "body": "add tests please"
+      }
+    },
+    {
+      "text": "leave a comment on pr 55 in zync saying looks good",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "55",
+        "repo": "zync",
+        "body": "looks good"
+      }
+    },
+    {
+      "text": "leave a comment on pr 8 in zync saying needs another review",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "8",
+        "repo": "zync",
+        "body": "needs another review"
+      }
+    },
+    {
+      "text": "leave a comment on pr 12 in zync saying fix the typo",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "12",
+        "repo": "zync",
+        "body": "fix the typo"
+      }
+    },
+    {
+      "text": "leave a comment on pr 18 in zync saying add tests please",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "18",
+        "repo": "zync",
+        "body": "add tests please"
+      }
+    },
+    {
+      "text": "leave a comment on pr 26 in zync saying looks good",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "26",
+        "repo": "zync",
+        "body": "looks good"
+      }
+    },
+    {
+      "text": "leave a comment on pr 39 in zync saying needs another review",
+      "intent": "comment_pr",
+      "slots": {
+        "pr_number": "39",
+        "repo": "zync",
+        "body": "needs another review"
+      }
+    },
+    {
+      "text": "show collaborators of servx",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "show collaborators of zync",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "show collaborators of nexus",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "show collaborators of shopkart",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "show collaborators of ledger-ai",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "show collaborators of owner/project",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "owner/project"
+      }
+    },
+    {
+      "text": "show collaborators of ultron",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "ultron"
+      }
+    },
+    {
+      "text": "show collaborators of meet",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "meet"
+      }
+    },
+    {
+      "text": "who has access to servx",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "who has access to zync",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "who has access to nexus",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "who has access to shopkart",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "members of org nexus-org",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "nexus-org"
+      }
+    },
+    {
+      "text": "members of org servx-team",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "servx-team"
+      }
+    },
+    {
+      "text": "members of org zync-labs",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "zync-labs"
+      }
+    },
+    {
+      "text": "who is in the nexus-org org",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "nexus-org"
+      }
+    },
+    {
+      "text": "who is in the servx-team org",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "servx-team"
+      }
+    },
+    {
+      "text": "who is in the zync-labs org",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "zync-labs"
+      }
+    },
+    {
+      "text": "list nexus-org members",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "nexus-org"
+      }
+    },
+    {
+      "text": "list servx-team members",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "servx-team"
+      }
+    },
+    {
+      "text": "list zync-labs members",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "zync-labs"
+      }
+    },
+    {
+      "text": "all collaborators on ledger-ai",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "ledger-ai"
+      }
+    },
+    {
+      "text": "everyone with access to meet",
+      "intent": "list_collaborators",
+      "slots": {
+        "repo": "meet"
+      }
+    },
+    {
+      "text": "org roster for nexus-org",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "nexus-org"
+      }
+    },
+    {
+      "text": "show me the servx-team roster",
+      "intent": "list_org_members",
+      "slots": {
+        "org": "servx-team"
+      }
+    }
+  ]
+}

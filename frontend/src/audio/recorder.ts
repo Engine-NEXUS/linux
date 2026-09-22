@@ -69,6 +69,41 @@ function isAnalyseIntent(intent: Intent): boolean {
 }
 
 /**
+ * Check if an intent is a local command that should be executed by
+ * command_executor in Rust (e.g. open/close app, media controls, search).
+ */
+function isLocalExecutableIntent(intent: Intent): boolean {
+  switch (intent.action) {
+    case "open_app":
+    case "open_url":
+    case "close_app":
+    case "whatsapp_chat":
+    case "search":
+    case "media_play_pause":
+    case "media_next":
+    case "media_previous":
+    case "media_stop":
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Check if an intent belongs to a subsystem that performs network/MCP I/O
+ * and may be long-running (requiring ack / loading indicator).
+ */
+function isLongRunningSubsystemIntent(intent: Intent): boolean {
+  return (
+    isAnalyseIntent(intent) ||
+    intent.action === "github_command" ||
+    intent.action === "order_food" ||
+    intent.action === "search_product" ||
+    intent.action === "send_whatsapp_message"
+  );
+}
+
+/**
  * Long-running query queue.
  *
  * If the user says a DIFFERENT long-running command while one is in flight,
@@ -663,9 +698,19 @@ export async function processTranscript(transcript: string): Promise<void> {
     return;
   }
 
-  // Analyse intents and GitHub commands go to the remote backend / orchestrator
-  if (isAnalyseIntent(intent) || intent.action === "github_command") {
-    console.log("[NEXUS] analyse/github intent detected, sending to orchestrator:", intent);
+  if (intent.action === "need_more_info") {
+    useAssistant.getState().setLoadingVisible(false);
+    useAssistant.getState().setVisible(true);
+    const prompt = (intent as { prompt: string }).prompt;
+    console.log("[NEXUS] local need_more_info prompt:", prompt);
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage(prompt);
+    void speak(prompt.replace(/,/g, ""));
+    await waitForTtsIdle();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    useAssistant.getState().setVisible(false);
+    setTimeout(() => useAssistant.getState().reset(), 550);
+    return;
   } else if (intent.action === "greeting") {
     useAssistant.getState().setLoadingVisible(false);
     useAssistant.getState().setVisible(true);
@@ -679,23 +724,26 @@ export async function processTranscript(transcript: string): Promise<void> {
     useAssistant.getState().setVisible(false);
     setTimeout(() => useAssistant.getState().reset(), 550);
     return;
-  } else if (intent.action !== "unknown") {
+  } else if (isLocalExecutableIntent(intent)) {
     // Known local command — execute it directly.
     useAssistant.getState().setLoadingVisible(false);
     useAssistant.getState().setVisible(true);
     useAssistant.getState().setState("speaking");
-    useAssistant.getState().addAssistantMessage("Ok sir.");
-    void speak("Ok sir.");
+    // No pre-spoken "Ok sir": success is announced only after execution
+    // returns (its message IS "Ok sir." on success). Announcing before
+    // the result lied on every failure — e.g. opening the wrong chat.
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const result = await invoke<{ success: boolean; message: string }>("execute_command", { intent });
       console.log("[NEXUS] local command result:", result);
-      if (result.message && result.message !== "Ok sir.") {
+      if (result.message) {
         useAssistant.getState().addAssistantMessage(result.message);
         void speak(result.message.replace(/,/g, ""));
       }
     } catch (err) {
       console.error("[NEXUS] command execution failed:", err);
+      useAssistant.getState().addAssistantMessage("Couldn't do that, sir.");
+      void speak("Couldn't do that sir.");
     }
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
@@ -704,9 +752,9 @@ export async function processTranscript(transcript: string): Promise<void> {
     return;
   }
 
-  // 4. Unknown intent (or analyse/github intent) — route through the CENTRAL ORCHESTRATOR.
+  // 4. Orchestrator-routed intent (MCP, GitHub, Analyse, Ghostwriter, Screen, or general query).
   try {
-    const isLongFinal = isLong || isAnalyseIntent(intent) || intent.action === "github_command";
+    const isLongFinal = isLong || isLongRunningSubsystemIntent(intent);
     console.log("[NEXUS] processTranscript: intent=", intent.action, "isLongRunning=", isLongFinal, "transcript=", corrected);
 
     if (isLongFinal && !isLongRunningInFlight()) {
@@ -724,7 +772,7 @@ export async function processTranscript(transcript: string): Promise<void> {
     }
     return;
   } catch (err) {
-    console.warn("[NEXUS] orchestrator unavailable for unknown query:", err);
+    console.warn("[NEXUS] orchestrator unavailable for query:", err);
   }
 
   // 5. Neither local intent nor backend available.
@@ -919,10 +967,20 @@ export async function finishCapture(): Promise<void> {
     return;
   }
 
-  // Analyse intents and GitHub commands go to the remote backend (they're long-running queries)
-  // but the Rust parser has already extracted the repo/PR data.
-  if (isAnalyseIntent(intent) || intent.action === "github_command") {
-    console.log("[NEXUS] analyse/github intent detected, sending to backend:", intent);
+  if (intent.action === "need_more_info") {
+    useAssistant.getState().setLoadingVisible(false);
+    useAssistant.getState().setVisible(true);
+    const prompt = (intent as { prompt: string }).prompt;
+    console.log("[NEXUS] local need_more_info prompt (finishCapture):", prompt);
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage(prompt);
+    void speak(prompt.replace(/,/g, ""));
+    await waitForTtsIdle();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    useAssistant.getState().setVisible(false);
+    setTimeout(() => useAssistant.getState().reset(), 550);
+    captureInProgress = false;
+    return;
   } else if (intent.action === "greeting") {
     // Roll back loading state — greetings are local, not long-running.
     useAssistant.getState().setLoadingVisible(false);
@@ -942,7 +1000,7 @@ export async function finishCapture(): Promise<void> {
     setTimeout(() => useAssistant.getState().reset(), 550);
     captureInProgress = false;
     return;
-  } else if (intent.action !== "unknown") {
+  } else if (isLocalExecutableIntent(intent)) {
     // Known local command — execute it directly.
     // Roll back loading state — local commands are not long-running.
     useAssistant.getState().setLoadingVisible(false);
@@ -971,16 +1029,16 @@ export async function finishCapture(): Promise<void> {
     return;
   }
 
-  // 4. Unknown intent (or analyse/github intent) — route through the CENTRAL ORCHESTRATOR.
+  // 4. Orchestrator-routed intent (MCP, GitHub, Analyse, Ghostwriter, Screen, or general query).
   //    The orchestrator (Rust) owns the full lifecycle:
   //      - Parses intent (deterministic, <1ms)
-  //      - Routes to the correct subsystem (LocalCommand, WorkerBackend, Architect, GitHub)
+  //      - Routes to the correct subsystem (LocalCommand, WorkerBackend, Architect, GitHub, Mcp)
   //      - Emits ack + shows loading indicator (for long-running)
-  //      - Dispatches to the Worker or GitHub API
+  //      - Dispatches to the Worker, GitHub API, or MCP bridges
   //      - Emits result + hides loading
   //    The frontend just calls processViaOrchestrator() and listens for events.
   try {
-    const isLongFinal = isLong || isAnalyseIntent(intent) || intent.action === "github_command";
+    const isLongFinal = isLong || isLongRunningSubsystemIntent(intent);
     console.log("[NEXUS] finishCapture: intent=", intent.action, "isLongRunning=", isLongFinal, "transcript=", transcript);
 
     if (isLongFinal && !isLongRunningInFlight()) {
@@ -1258,10 +1316,20 @@ async function _finishCaptureFromVadInner(
     return;
   }
 
-  // Analyse intents and GitHub commands go to the remote backend (they're long-running queries)
-  // but the Rust parser has already extracted the repo/PR data.
-  if (isAnalyseIntent(intent) || intent.action === "github_command") {
-    console.log("[NEXUS] analyse/github intent detected (vad), sending to backend:", intent);
+  if (intent.action === "need_more_info") {
+    useAssistant.getState().setLoadingVisible(false);
+    useAssistant.getState().setVisible(true);
+    const prompt = (intent as { prompt: string }).prompt;
+    console.log("[NEXUS] local need_more_info prompt (vad):", prompt);
+    useAssistant.getState().setState("speaking");
+    useAssistant.getState().addAssistantMessage(prompt);
+    void speak(prompt.replace(/,/g, ""));
+    await waitForTtsIdle();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    useAssistant.getState().setVisible(false);
+    setTimeout(() => useAssistant.getState().reset(), 550);
+    captureInProgress = false;
+    return;
   } else if (intent.action === "greeting") {
     // Roll back loading state — greetings are local, not long-running.
     useAssistant.getState().setLoadingVisible(false);
@@ -1281,7 +1349,7 @@ async function _finishCaptureFromVadInner(
     setTimeout(() => useAssistant.getState().reset(), 550);
     captureInProgress = false;
     return;
-  } else if (intent.action !== "unknown") {
+  } else if (isLocalExecutableIntent(intent)) {
     // Known local command — execute it directly.
     // Roll back loading state — local commands are not long-running.
     useAssistant.getState().setLoadingVisible(false);
@@ -1310,12 +1378,12 @@ async function _finishCaptureFromVadInner(
     return;
   }
 
-  // 4. Unknown intent (or analyse/github intent) — route through the CENTRAL ORCHESTRATOR.
+  // 4. Orchestrator-routed intent (MCP, GitHub, Analyse, Ghostwriter, Screen, or general query).
   try {
     // isLong was already determined above (before intent parsing).
     // If it's long-running, we already gave the instant ack and handled
     // dedup/queue. Here we just need to set the in-flight flag and send.
-    const isLongFinal = isLong || isAnalyseIntent(intent) || intent.action === "github_command";
+    const isLongFinal = isLong || isLongRunningSubsystemIntent(intent);
     console.log("[NEXUS] finishCaptureFromVad: intent=", intent.action, "isLongRunning=", isLongFinal, "transcript=", transcript);
 
     if (isLongFinal && !isLongRunningInFlight()) {
@@ -1331,7 +1399,7 @@ async function _finishCaptureFromVadInner(
     console.log("[NEXUS] orchestrator process result (vad):", result);
     return;
   } catch (err) {
-    console.warn("[NEXUS] orchestrator unavailable for unknown query (vad):", err);
+    console.warn("[NEXUS] orchestrator unavailable for query (vad):", err);
   }
 
   // 5. Neither local intent nor backend available.

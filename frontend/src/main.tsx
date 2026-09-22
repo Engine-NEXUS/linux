@@ -164,6 +164,8 @@ async function startListening() {
   // while a long-running query is in flight and the loading indicator
   // is still visible.
   useAssistant.getState().setLoadingVisible(false);
+  // New turn: never inherit the previous turn's "waiting" glow.
+  useAssistant.getState().setAwaitingInput(false);
   s.setVisible(true);
   s.setState("listening");
   // Clear barge-in flag now that we're starting a fresh listening session

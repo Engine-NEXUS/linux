@@ -5,6 +5,61 @@
 
 ---
 
+## Apex Wake Word Evolution, Data Poisoning Quarantine & Adaptive Microphone DSP (2026-09-22)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-22 | feat(wake): acoustic poisoning audit (`audit_positive_samples.py`), quarantined 135 bad audio files, leaving 456 pristine positive recordings | [38-apex-wake-word-evolution-and-hardware-adaptation.md](./38-apex-wake-word-evolution-and-hardware-adaptation.md), [Hardware spec](../research/micspecification/apex-wake-word-and-laptop-mic-hardware-adaptation.md) |
+| — | 2026-09-22 | feat(dsp): spectral ambient mic prober (`nexus wake probe` / `acoustic_profile.rs`), auto-tunes 128.3 Hz HPF, hardware pre-gain (2.5x), and impulsive noise gate (8.0x) | [38-apex-wake-word-evolution-and-hardware-adaptation.md](./38-apex-wake-word-evolution-and-hardware-adaptation.md) |
+| — | 2026-09-22 | feat(train): 1,442 multilingual negatives + 400 background sound clips (`generate_background_sounds.py`) + `BCEWithLogitsLoss(pos_weight=8.0)` + `reset_after_trigger()` | [38-apex-wake-word-evolution-and-hardware-adaptation.md](./38-apex-wake-word-evolution-and-hardware-adaptation.md) |
+
+## Targeted Intent Training, Category Drill-Down & MCP Data Promotion (2026-09-22)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-22 | feat(collect): targeted voice collection (`nexus collect -c <cat> -i <intent>`), full 55-intent phrase catalog, and entity slot extraction | [37-targeted-intent-training-and-mcp-data-promotion.md](./37-targeted-intent-training-and-mcp-data-promotion.md) |
+| — | 2026-09-22 | feat(nlu): zero-quarantine MCP promotion into `dataset.json` (294 rows across `order_food`, `send_whatsapp_message`, `search_product`), re-locked splits | [37-targeted-intent-training-and-mcp-data-promotion.md](./37-targeted-intent-training-and-mcp-data-promotion.md) |
+| — | 2026-09-22 | feat(stats): aligned 55-intent schema with `nlu_stats.py`, displaying full active training rows and mastery status | [37-targeted-intent-training-and-mcp-data-promotion.md](./37-targeted-intent-training-and-mcp-data-promotion.md) |
+
+## NLU Data Foundation, STT Conditioning & Voice Scaling (2026-09-22)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-22 | feat(nlu): decoupled acoustic STT from text NLU; fixed multilingual Whisper hallucinations with prompt biasing and `temperature=0.0` | [36-nlu-data-foundation-stt-conditioning-and-voice-scaling.md](./36-nlu-data-foundation-stt-conditioning-and-voice-scaling.md), [STT bias](../research/nlu-intent/stt-vocabulary-bias-2026-09-22.md) |
+| — | 2026-09-22 | feat(data): repaired external benchmark locks in `data_foundation.py`, automated 70/30 data audit, and documented speaker-invariant OTA updates | [36-nlu-data-foundation-stt-conditioning-and-voice-scaling.md](./36-nlu-data-foundation-stt-conditioning-and-voice-scaling.md) |
+
+## STT Domain Vocabulary Bias (2026-09-22)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-22 | feat(stt): `NEXUS_VOCABULARY` decoder-bias prompt on both Groq call sites + budget/coverage guard test | [36-stt-vocabulary-bias.md](./36-stt-vocabulary-bias.md), [STT vocabulary research](../research/nlu-intent/stt-vocabulary-bias-2026-09-22.md) |
+
+## MCP Connect System — Best-of-Combine + Round-2 Audit (2026-09-20)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-20 | feat(mcp): 4-state connect machine + sidebar Connect card on first failure + auto-retry monitor (WhatsApp QR via `pairing_status`, rotation probe, parallel probes) | [35-mcp-connect-system](./35-mcp-connect-system-best-of-combine.md) |
+| — | 2026-09-20 | feat(oauth): Swiggy spec-OAuth on Worker + vault silent refresh + "Login with Swiggy" (Workers/connections UI) | [35-mcp-connect-system](./35-mcp-connect-system-best-of-combine.md) |
+| — | 2026-09-20 | fix(mcp): round-2 live-source audit — card self-update vs 20-30s QR rotation, refresh-token rotation persistence, RFC 8707 `resource`, audit-log hygiene test, parallel probes | [35-mcp-connect-system](./35-mcp-connect-system-best-of-combine.md) |
+| — | 2026-09-20 | feat(mcp): circuit breaker, `mcp_audit.jsonl` trail, output cap + sanitizer, `nexus mcp check`, actionable bridge guidance | [35-mcp-connect-system](./35-mcp-connect-system-best-of-combine.md), [00-overview](../mcp/00-overview-and-status.md) |
+
+## Motion Fixes + Analyse-PR Dashboard + Minimal Sidebar + Phase 11 (2026-09-18)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-18 | fix(orb): missing `done` handshake on long replies — guarded `finishSpokenResult` + 60s failsafe + inline loading show | [34-motion-analyse-flow-minimal-sidebar-phase11.md](./34-motion-analyse-flow-minimal-sidebar-phase11.md) |
+| — | 2026-09-18 | feat(pr-list): Analyse closes list + loading + analysis dashboard in sidebar (Worker `analysis` field was console-logged-dropped) | [34-motion-analyse-flow-minimal-sidebar-phase11.md](./34-motion-analyse-flow-minimal-sidebar-phase11.md) |
+| — | 2026-09-18 | style(sidebar): flat minimal pass — gradients, inset stacks, specular rims, dead backdrop-filters removed | [34-motion-analyse-flow-minimal-sidebar-phase11.md](./34-motion-analyse-flow-minimal-sidebar-phase11.md) |
+| — | 2026-09-18 | feat(parser): list_prs accepts "pull requests" noun + "and all" tails (regex was the hole, not data); Phase 11 +45 rows → candidate test 0.9004 | [34-motion-analyse-flow-minimal-sidebar-phase11.md](./34-motion-analyse-flow-minimal-sidebar-phase11.md) |
+| — | 2026-09-18 | feat(collect): category menu (`github/mcp/apps/messages/live/random`) + fixed duplicate `list_prs` key silently dropping 21 phrases | [34-motion-analyse-flow-minimal-sidebar-phase11.md](./34-motion-analyse-flow-minimal-sidebar-phase11.md) |
+| — | 2026-09-20 | feat(parser): `canonical_repo_name()` sound-alias map (cervix/srvx→servx, zinc→zync) across deterministic + NLU repo paths | [34-motion-analyse-flow-minimal-sidebar-phase11.md](./34-motion-analyse-flow-minimal-sidebar-phase11.md) |
+
+## Data Foundation and Wake-Model Gates (2026-09-14)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-14 | feat(data): add provenance registry, frozen NLU evaluation locks, wake-audio grouped-split validation, deployed model fingerprints, and `nexus data` | [Data foundation gates](../testing/data-foundation-and-wake-model-gates.md) |
+
 ## BERT-Mini Dataset and Model Deep Audit (2026-09-14)
 
 | Commit | Date | Summary | Details |

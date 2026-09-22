@@ -51,6 +51,9 @@
     "whatsapp_open",
     "whatsapp_search",
     "focus_app",
+    "order_food",
+    "search_product",
+    "send_whatsapp_message",
     "unknown"
   ],
   "slots": [
@@ -98,6 +101,12 @@
     "B-keys",
     "I-keys",
     "B-target",
-    "I-target"
+    "I-target",
+    "B-food_item",
+    "I-food_item",
+    "B-restaurant",
+    "I-restaurant",
+    "B-message",
+    "I-message"
   ]
 }

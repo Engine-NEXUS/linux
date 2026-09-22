@@ -51,8 +51,9 @@ pub async fn transcribe_audio(
     if local_only {
         tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
     } else if !groq_key.is_empty() {
-        // Primary: Groq cloud STT (~247ms, free)
-        match crate::stt_groq::transcribe_with_groq(&samples, &groq_key, &state.client).await {
+        // Primary: Groq cloud STT (~247ms, free) — with the NEXUS domain
+        // vocabulary so rare entities (Servx, Zync, Eesha) win decoder bets.
+        match crate::stt_groq::transcribe_with_groq(&samples, &groq_key, &state.client, Some(crate::stt_groq::NEXUS_VOCABULARY)).await {
             Ok(text) => {
                 let filtered = apply_hallucination_filter(&text);
                 if filtered != text {
@@ -83,10 +84,12 @@ pub async fn transcribe_audio(
 /// * `samples` - Raw i16 PCM samples at 16kHz mono
 /// * `client` - Reused reqwest client
 /// * `app` - Optional AppHandle for reading Groq API key and local_stt_only setting
+/// * `prompt` - Optional Groq decoder-bias hint (None for normal transcription)
 pub async fn transcribe_samples<R: tauri::Runtime>(
     samples: &[i16],
     client: &reqwest::Client,
     app: Option<&tauri::AppHandle<R>>,
+    prompt: Option<&str>,
 ) -> Result<String, String> {
     tracing::info!("stt: transcribing {} samples (Rust-side capture)", samples.len());
 
@@ -98,7 +101,7 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
         if local_only {
             tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
         } else if !groq_key.is_empty() {
-            match crate::stt_groq::transcribe_with_groq(samples, &groq_key, client).await {
+            match crate::stt_groq::transcribe_with_groq(samples, &groq_key, client, prompt).await {
                 Ok(text) => {
                     let filtered = apply_hallucination_filter(&text);
                     if filtered != text {
@@ -119,6 +122,55 @@ pub async fn transcribe_samples<R: tauri::Runtime>(
 
     // Fallback: local faster-whisper Python sidecar
     transcribe_local(samples, client).await
+}
+
+/// Verbose variant for the wake-word verifier (v3 confidence gate).
+/// Returns (transcript, segments); segments carry no_speech_prob/avg_logprob.
+/// Groq path uses `verbose_json`; local fallback returns text with NO segments
+/// (caller must treat empty segments as "no confidence info" → word gate only).
+/// Applies the same hallucination filter to the transcript text.
+/// Unused under `mock-wake` — allowed, not dead.
+#[allow(dead_code)]
+pub async fn transcribe_samples_verbose<R: tauri::Runtime>(
+    samples: &[i16],
+    client: &reqwest::Client,
+    app: Option<&tauri::AppHandle<R>>,
+    prompt: Option<&str>,
+) -> Result<(String, Vec<crate::stt_groq::GroqSegment>), String> {
+    if let Some(app) = app {
+        let groq_key = crate::commands::read_groq_api_key(app);
+        let local_only = crate::commands::read_local_stt_only(app);
+
+        if local_only {
+            tracing::info!("stt: localSttOnly=true, using local whisper (privacy mode)");
+        } else if !groq_key.is_empty() {
+            match crate::stt_groq::transcribe_with_groq_verbose(
+                samples, &groq_key, client, prompt,
+            )
+            .await
+            {
+                Ok((text, segments)) => {
+                    let filtered = apply_hallucination_filter(&text);
+                    if filtered != text {
+                        tracing::info!("stt: filtered hallucination '{}' -> '{}'", text, filtered);
+                    } else {
+                        tracing::info!("stt: groq transcript: '{}'", filtered);
+                    }
+                    return Ok((filtered, segments));
+                }
+                Err(e) => {
+                    tracing::warn!("stt: groq failed ({}), falling back to local whisper", e);
+                }
+            }
+        } else {
+            tracing::info!("stt: no groq key, using local whisper directly");
+        }
+    }
+
+    // Fallback: local sidecar returns plain text (no segment metadata).
+    transcribe_local(samples, client)
+        .await
+        .map(|text| (text, Vec::new()))
 }
 
 /// Transcribe using the local faster-whisper Python sidecar (port 39217).
@@ -244,11 +296,16 @@ fn pcm_to_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
 }
 
 /// Filter common Whisper hallucinations on noisy/silent audio.
+/// `contains` entries are multi-word junk that never forms a command;
+/// `exact` entries are single fragments Whisper emits on pure noise
+/// (measured 2026-09-19 on room/TV/conversation clips with nobody speaking:
+/// ' Thank you.', ' you', ' BOOAAA!', " It's a", ' out.', ' Oh').
+/// Kept OUT deliberately: "i'm sorry" / "i'm not" (dictation-plausible).
 fn apply_hallucination_filter(text: &str) -> String {
     let lower = text.to_lowercase();
     let hallucinations = [
         "thank you for watching", "thanks for watching", "thank you.", "you.", "bye.",
-        "please subscribe", "subscribe to my channel",
+        "please subscribe", "subscribe to my channel", "booaaa", "and the world is coming",
     ];
 
     for h in hallucinations.iter() {
@@ -257,10 +314,87 @@ fn apply_hallucination_filter(text: &str) -> String {
         }
     }
 
+    let exact_fragments = ["you", "oh", "out", "it's a"];
+    let bare = lower.trim().trim_end_matches('.');
+    if exact_fragments.contains(&bare) {
+        return "".to_string();
+    }
+
+    // Foreign-script guard (measured 2026-09-19: TV anime audio transcribed
+    // as Japanese flowed through as a "command", got answered in Japanese,
+    // and crashed Piper). 2+ CJK/Hiragana/Katakana/Hangul chars = background
+    // media or non-English speech the English pipeline cannot act on → retry
+    // prompt, never an action. Shorter fragments fall to the min-length rule
+    // below, same safe direction.
+    let cjk_count = text
+        .chars()
+        .filter(|c| {
+            matches!(c,
+                '\u{3040}'..='\u{30FF}'   // Hiragana + Katakana
+                | '\u{4E00}'..='\u{9FFF}' // CJK Unified Ideographs
+                | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
+            )
+        })
+        .count();
+    if cjk_count >= 2 {
+        return "".to_string();
+    }
+
     let alpha_count = text.chars().filter(|c| c.is_alphabetic()).count();
     if alpha_count < 2 {
         return "".to_string();
     }
 
     text.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_hallucination_filter;
+
+    /// Measured noise confabulations (2026-09-19 repro on pure background
+    /// clips) are filtered; real commands and dictation pass through.
+    #[test]
+    fn test_noise_fragments_filtered() {
+        for junk in [
+            " Thank you.",
+            " you",
+            " BOOAAA!",
+            " It's a",
+            " out.",
+            " Oh",
+            " and the world is coming.",
+        ] {
+            assert_eq!(apply_hallucination_filter(junk), "", "'{junk}' must filter");
+        }
+    }
+
+    #[test]
+    fn test_real_speech_passes() {
+        for real in [
+            "Open WhatsApp.",
+            "Nexus.",
+            "type I'm sorry you feel bad",
+            "What's up?",
+        ] {
+            assert_eq!(apply_hallucination_filter(real), real);
+        }
+    }
+
+    /// Foreign-script guard: TV-anime Japanese (the exact 2026-09-19
+    /// crash transcript) filters to retry; English + single stray chars pass.
+    #[test]
+    fn test_foreign_script_filtered() {
+        assert_eq!(
+            apply_hallucination_filter("治療が縮まれ出ている。"),
+            ""
+        );
+        assert_eq!(
+            apply_hallucination_filter("治療が短くなっていると感じているのですね。"),
+            ""
+        );
+        assert_eq!(apply_hallucination_filter("Open WhatsApp."), "Open WhatsApp.");
+        // single stray CJK char: caught by the min-length rule → retry.
+        assert_eq!(apply_hallucination_filter("愛"), "");
+    }
 }

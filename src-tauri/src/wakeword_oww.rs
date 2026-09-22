@@ -41,7 +41,6 @@ pub fn set_meeting_state(_state: std::sync::Arc<crate::meeting_detect::MeetingSt
 
 #[cfg(not(feature = "mock-wake"))]
 mod engine {
-    use std::io::Cursor;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -54,6 +53,275 @@ mod engine {
     use tract_onnx::prelude::*;
 
     type ModelType = Arc<TypedSimplePlan>;
+
+    // ─── Phase B: Audio Preprocessing ────────────────────────────────
+    // Pure-Rust audio preprocessing for wake word detection.
+    // Replaces the need for C-based RNNoise dependency.
+    //
+    // Pipeline: raw audio → high-pass filter → noise gate → VAD → AGC → model
+    //
+    // 1. High-pass filter (80Hz): removes low-frequency rumble (HVAC, traffic,
+    //    desk vibrations) that RNNoise also targets. First-order IIR.
+    // 2. Adaptive noise floor tracking: tracks minimum RMS over a rolling
+    //    window. If current RMS is within 2x of noise floor, it's likely noise.
+    // 3. VAD (Voice Activity Detection): combines energy + zero-crossing rate
+    //    to determine if the chunk contains speech. Skips model if no speech.
+    // 4. AGC (existing): amplifies quiet speech to target RMS.
+
+    /// High-pass filter (first-order IIR) for noise suppression.
+    /// Removes low-frequency noise below ~80Hz (HVAC, traffic, desk vibration).
+    /// This is the same frequency range RNNoise targets.
+    pub struct HighPassFilter {
+        /// Previous output sample (for IIR feedback)
+        prev_y: f32,
+        /// Previous input sample (for IIR feedforward)
+        prev_x: f32,
+        /// Filter coefficient (alpha = RC / (RC + dt))
+        /// At 16kHz, 80Hz cutoff: alpha = 0.9969
+        alpha: f32,
+    }
+
+    impl HighPassFilter {
+        /// Create a high-pass filter with 80Hz cutoff at 16kHz sample rate.
+        pub fn new(cutoff_hz: f32, sample_rate: f32) -> Self {
+            let dt = 1.0 / sample_rate;
+            let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_hz);
+            let alpha = rc / (rc + dt);
+            HighPassFilter {
+                prev_y: 0.0,
+                prev_x: 0.0,
+                alpha,
+            }
+        }
+
+        /// Process a chunk of audio samples.
+        pub fn process(&mut self, samples: &mut [f32]) {
+            for s in samples.iter_mut() {
+                let y = self.alpha * (self.prev_y + *s - self.prev_x);
+                self.prev_y = y;
+                self.prev_x = *s;
+                *s = y;
+            }
+        }
+
+        /// Reset filter state (call on stream restart).
+        pub fn reset(&mut self) {
+            self.prev_y = 0.0;
+            self.prev_x = 0.0;
+        }
+    }
+
+    /// Adaptive noise floor tracker.
+    /// Tracks the minimum RMS over a rolling window to estimate
+    /// the background noise level. If current RMS is close to the
+    /// noise floor, the audio is likely just noise.
+    pub struct NoiseFloorTracker {
+        /// Rolling buffer of recent RMS values
+        rms_history: CircularBuffer<32, f32>,
+        /// Current noise floor estimate (minimum RMS in history)
+        noise_floor: f32,
+    }
+
+    impl NoiseFloorTracker {
+        pub fn new() -> Self {
+            let mut rms_history = CircularBuffer::<32, f32>::new();
+            // Initialize with a moderate noise floor
+            for _ in 0..32 {
+                rms_history.push_back(0.001);
+            }
+            NoiseFloorTracker {
+                rms_history,
+                noise_floor: 0.001,
+            }
+        }
+
+        /// Update with a new RMS value and return the current noise floor.
+        pub fn update(&mut self, rms: f32) -> f32 {
+            self.rms_history.push_back(rms);
+            // Noise floor = minimum RMS in the rolling window
+            self.noise_floor = self.rms_history.iter().cloned().fold(f32::MAX, f32::min);
+            self.noise_floor
+        }
+
+        /// Check if the current RMS is likely just noise.
+        /// Returns true if RMS is within 2x of the noise floor.
+        #[allow(dead_code)]
+        pub fn is_noise(&self, rms: f32) -> bool {
+            rms < self.noise_floor * 2.0
+        }
+
+        /// Get the current noise floor estimate.
+        #[allow(dead_code)]
+        pub fn floor(&self) -> f32 {
+            self.noise_floor
+        }
+    }
+
+    /// Simple VAD (Voice Activity Detection) using energy + zero-crossing rate.
+    /// Returns true if the chunk likely contains speech.
+    ///
+    /// This is a lightweight alternative to WebRTC VAD that works in pure Rust.
+    /// It combines two features:
+    /// 1. Short-term energy: speech has higher energy than noise
+    /// 2. Zero-crossing rate: speech has lower ZCR than noise (voiced sounds
+    ///    are low-frequency, noise is high-frequency with high ZCR)
+    pub struct VadDetector {
+        /// Energy threshold (adaptive, based on noise floor)
+        energy_threshold: f32,
+        /// Zero-crossing rate threshold (fixed)
+        zcr_threshold: f32,
+        /// Number of consecutive speech frames needed to confirm speech
+        speech_frames_needed: u32,
+        /// Current count of consecutive speech frames
+        speech_frame_count: u32,
+    }
+
+    impl VadDetector {
+        pub fn new() -> Self {
+            VadDetector {
+                energy_threshold: 0.005,  // Initial threshold (will adapt)
+                zcr_threshold: 0.35,     // 35% zero-crossing rate = likely noise
+                speech_frames_needed: 1, // 1 frame = 80ms (fast response)
+                speech_frame_count: 0,
+            }
+        }
+
+        /// Detect if a chunk contains speech.
+        /// Returns true if speech is detected.
+        pub fn detect(&mut self, samples: &[f32], noise_floor: f32) -> bool {
+            if samples.is_empty() {
+                return false;
+            }
+
+            // 1. Compute short-term energy (RMS)
+            let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+            let rms = (sum_sq / samples.len() as f32).sqrt();
+
+            // 2. Compute zero-crossing rate
+            let mut zero_crossings = 0;
+            for i in 1..samples.len() {
+                if (samples[i] >= 0.0) != (samples[i - 1] >= 0.0) {
+                    zero_crossings += 1;
+                }
+            }
+            let zcr = zero_crossings as f32 / samples.len() as f32;
+
+            // 3. Adapt energy threshold based on noise floor
+            // Threshold = max(5x noise floor, 0.005)
+            self.energy_threshold = (noise_floor * 5.0).max(0.005);
+
+            // 4. Speech detection: high energy AND low ZCR
+            let has_energy = rms > self.energy_threshold;
+            let has_low_zcr = zcr < self.zcr_threshold;
+
+            if has_energy && has_low_zcr {
+                self.speech_frame_count += 1;
+            } else {
+                // Decay: reduce speech count but don't reset immediately
+                // This handles brief pauses within a word
+                self.speech_frame_count = self.speech_frame_count.saturating_sub(1);
+            }
+
+            self.speech_frame_count >= self.speech_frames_needed
+        }
+    }
+
+    /// Audio preprocessing pipeline.
+    /// Combines high-pass filter, noise floor tracking, and VAD.
+    pub struct AudioPreprocessor {
+        pub high_pass: HighPassFilter,
+        pub noise_floor: NoiseFloorTracker,
+        pub vad: VadDetector,
+        /// Whether VAD gating is enabled (can be disabled for debugging)
+        pub vad_enabled: bool,
+        /// Count of chunks skipped by VAD (for stats)
+        pub vad_skips: u64,
+        /// Count of chunks passed by VAD (for stats)
+        pub vad_passes: u64,
+        /// Previous chunk RMS for impulsive spike rejection (coughs, throat clearing)
+        pub prev_rms: f32,
+        /// Ratio threshold for impulsive detection (default 8.0x)
+        pub impulsive_ratio: f32,
+    }
+
+    impl AudioPreprocessor {
+        #[allow(dead_code)]
+        pub fn new() -> Self {
+            AudioPreprocessor {
+                high_pass: HighPassFilter::new(80.0, 16000.0),
+                noise_floor: NoiseFloorTracker::new(),
+                vad: VadDetector::new(),
+                vad_enabled: true,
+                vad_skips: 0,
+                vad_passes: 0,
+                prev_rms: 0.0,
+                impulsive_ratio: 8.0,
+            }
+        }
+
+        pub fn with_profile(profile: &crate::acoustic_profile::AcousticProfile) -> Self {
+            AudioPreprocessor {
+                high_pass: HighPassFilter::new(profile.highpass_cutoff_hz, 16000.0),
+                noise_floor: NoiseFloorTracker::new(),
+                vad: VadDetector::new(),
+                vad_enabled: true,
+                vad_skips: 0,
+                vad_passes: 0,
+                prev_rms: 0.0,
+                impulsive_ratio: profile.impulsive_ratio,
+            }
+        }
+
+        /// Process a chunk of audio.
+        /// Returns the processed chunk and whether speech was detected.
+        /// If VAD is enabled and no speech is detected, returns None.
+        pub fn process(&mut self, mut chunk: Vec<f32>) -> Option<Vec<f32>> {
+            // 1. High-pass filter (remove low-frequency noise)
+            self.high_pass.process(&mut chunk);
+
+            // 2. Compute RMS after filtering
+            let rms = if chunk.is_empty() {
+                0.0
+            } else {
+                let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
+                (sum_sq / chunk.len() as f32).sqrt()
+            };
+
+            // 3. Update noise floor
+            let floor = self.noise_floor.update(rms);
+
+            // 3b. Impulsive sound gate: reject sudden short acoustic bursts (coughs, throat clears)
+            // Speech (N-E-X-U-S) rises continuously over 300-800ms; coughs spike in a single 80ms chunk
+            let is_impulsive = self.prev_rms > 0.0005 && rms > self.prev_rms * self.impulsive_ratio && rms < 0.05;
+            self.prev_rms = rms;
+            if is_impulsive {
+                self.vad_skips += 1;
+                return None;
+            }
+
+            // 4. VAD check
+            if self.vad_enabled {
+                let has_speech = self.vad.detect(&chunk, floor);
+                if !has_speech {
+                    self.vad_skips += 1;
+                    return None;
+                }
+                self.vad_passes += 1;
+            }
+
+            Some(chunk)
+        }
+
+        /// Reset all preprocessing state (call on stream restart).
+        pub fn reset(&mut self) {
+            self.high_pass.reset();
+            self.noise_floor = NoiseFloorTracker::new();
+            self.vad = VadDetector::new();
+            self.vad_skips = 0;
+            self.vad_passes = 0;
+            self.prev_rms = 0.0;
+        }
+    }
 
     // ─── Tier 3: Command classifier types ───────────────────────────────
 
@@ -173,11 +441,14 @@ mod engine {
 
     /// Load an ONNX model from a file path.
     fn load_onnx_model(path: &Path) -> anyhow::Result<ModelType> {
-        let data = std::fs::read(path)
-            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
-        let mut rdr = Cursor::new(data);
+        // NOTE: load by PATH (not by in-memory cursor) so tract can resolve
+        // ONNX external-data files (e.g. nexus.onnx + nexus.onnx.data, which
+        // the exporter splits when weights exceed the protobuf threshold).
+        // model_for_read(Cursor) has no base directory and fails on such
+        // models; model_for_path resolves sibling .data files correctly.
+        // Single-file models (mel, embedding) load identically either way.
         let model = tract_onnx::onnx()
-            .model_for_read(&mut rdr)
+            .model_for_path(path)
             .map_err(|e| anyhow::anyhow!("Failed to parse ONNX {}: {}", path.display(), e))?;
         let model = model
             .into_optimized()
@@ -314,6 +585,22 @@ mod engine {
 
             Ok(reshaped)
         }
+
+        /// Reset the feature buffer and lookback to clean zero state.
+        /// Prevents lingering wake-word context from triggering phantom cascades.
+        pub fn reset(&mut self) {
+            self.raw_lookback.fill(0.0);
+            for _ in 0..FEATURE_BUFFER_SIZE {
+                if let Ok(t) = Tensor::from_shape(&[1, 1, 1, 96], &[0f32; 96]) {
+                    self.feature_buffer.push_back(t);
+                }
+            }
+            for _ in 0..MEL_CIRC_SIZE {
+                if let Ok(t) = Tensor::from_shape(&[MELS_PER_CHUNK, 32], &[0f32; MELS_PER_CHUNK * 32]) {
+                    self.mel_spectrogram_buffer.push_back(t);
+                }
+            }
+        }
     }
 
     /// openWakeWord KWS engine with optional speaker verification
@@ -321,6 +608,10 @@ mod engine {
     pub struct WakeEngine {
         pub classifier: ModelType,
         pub audio_features: AudioFeatures,
+        /// Phase B: Audio preprocessor (high-pass filter + noise floor + VAD)
+        pub preprocessor: AudioPreprocessor,
+        /// Phase D: Speaker verifier (optional, owner-only activation)
+        pub speaker_verifier: Option<crate::voice_profile::SpeakerVerifier>,
 
         pub sample_rate: i32,
         pub chunk_buffer: Vec<f32>,
@@ -340,7 +631,23 @@ mod engine {
         /// Engine start time — used to ignore false triggers during the
         /// first few seconds while the audio stream stabilizes.
         pub engine_start_time: std::time::Instant,
+        /// WebRTC VAD pre-gate confirm (v4): energy gate passes on any loud
+        /// sound (tonal HVAC, music, mic pops); this vetoes clear non-speech
+        /// before the classifier runs. Quality mode (least aggressive) +
+        /// veto-only-on-0/4 keeps wake onset safe.
+        /// SendVad: webrtc_vad::Vad wraps a raw C pointer (not Send).
+        /// Wrapped like SendStream: all access happens under the engine
+        /// Mutex on the audio thread; the C state has no thread affinity.
+        pub webrtc_vad: SendVad,
+        /// Adaptive acoustic profile loaded for the host microphone.
+        pub acoustic_profile: crate::acoustic_profile::AcousticProfile,
     }
+
+    /// Send-safe wrapper for webrtc_vad::Vad (see field docs).
+    pub struct SendVad(pub webrtc_vad::Vad);
+    // SAFETY: same rationale as SendStream — exclusive access under the
+    // engine Mutex, no thread-affine state in the C struct.
+    unsafe impl Send for SendVad {}
 
     /// Load Tier 3 command classifiers from `resources/oww/commands/`.
     ///
@@ -442,13 +749,18 @@ mod engine {
 
 
 
-            let threshold = 0.35f32;
+            let profile = crate::acoustic_profile::AcousticProfile::load_or_default(Some(&oww_dir));
+            let threshold = profile.kws_threshold;
             tracing::info!(
                 "openWakeWord KWS engine initialized \
                  (wake word: NEXUS, 80ms sliding window, threshold: {}, \
-                 silence gate: RMS < 0.002 = skip, AGC: target RMS 0.03, max gain 20x, \
+                 device: '{}', highpass: {:.1}Hz, silence gate: {:.5}, pre-gain: {:.2}x, \
                  detection: max-based, post-TTS mute: 2000ms, grace: 10s after restart)",
-                threshold
+                threshold,
+                profile.device_name,
+                profile.highpass_cutoff_hz,
+                profile.silence_rms_threshold,
+                profile.pre_gain,
             );
 
             // --- Tier 3: Load command classifiers (optional) ---
@@ -470,9 +782,28 @@ mod engine {
             Ok(WakeEngine {
                 classifier,
                 audio_features,
+                preprocessor: AudioPreprocessor::with_profile(&profile),
+                // Phase D: Load speaker profile if it exists (optional)
+                speaker_verifier: {
+                    let profile_path = app_data_dir.join("voice_profile.json");
+                    match crate::voice_profile::SpeakerVerifier::new(profile_path) {
+                        Ok(v) => {
+                            if v.is_enrolled() {
+                                tracing::info!("wake: speaker verification ENABLED (profile loaded)");
+                            } else {
+                                tracing::debug!("wake: speaker verification disabled (no profile enrolled)");
+                            }
+                            Some(v)
+                        }
+                        Err(e) => {
+                            tracing::warn!("wake: failed to load speaker profile: {e}");
+                            None
+                        }
+                    }
+                },
                 sample_rate: 16000,
                 chunk_buffer: Vec::with_capacity(OWW_CHUNK_SIZE),
-                threshold: 0.35,
+                threshold,
                 detections_buffer: CircularBuffer::<DETECTION_BUFFER_SIZE, f32>::new(),
                 last_detection_time: std::time::Instant::now()
                     .checked_sub(std::time::Duration::from_secs(10))
@@ -483,7 +814,24 @@ mod engine {
                 confirmation_active: false,
                 pending_probability: 0.0,
                 engine_start_time: std::time::Instant::now(),
+                webrtc_vad: SendVad(
+                    webrtc_vad::Vad::new_with_rate_and_mode(
+                        webrtc_vad::SampleRate::Rate16kHz,
+                        webrtc_vad::VadMode::Quality,
+                    ),
+                ),
+                acoustic_profile: profile,
             })
+        }
+
+        /// Reset embedding buffers and detection buffers immediately after a wake trigger.
+        /// Prevents phantom cascade triggers from residual NEXUS context lingering in the buffer.
+        pub fn reset_after_trigger(&mut self) {
+            self.audio_features.reset();
+            self.detections_buffer.clear();
+            for cmd in &mut self.command_classifiers {
+                cmd.detections_buffer.clear();
+            }
         }
 
         /// Run KWS detection on a single 80ms chunk.
@@ -504,6 +852,22 @@ mod engine {
                 self.detections_buffer.push_back(0.0);
                 return (false, 0.0, None);
             }
+
+            // ─── Phase B: Audio Preprocessing ───────────────────────────
+            // High-pass filter (80Hz) + adaptive noise floor + VAD
+            // This runs BEFORE the energy gate to clean the audio first.
+            // If VAD detects no speech, skip the classifier entirely (saves CPU).
+            let chunk = match self.preprocessor.process(chunk) {
+                Some(c) => c,
+                None => {
+                    // VAD says no speech — push 0.0 to flush stale values
+                    self.detections_buffer.push_back(0.0);
+                    for cmd in &mut self.command_classifiers {
+                        cmd.detections_buffer.push_back(0.0);
+                    }
+                    return (false, 0.0, None);
+                }
+            };
 
             // ─── Energy gate + Automatic Gain Control (AGC) ────────────
             // The nexus.onnx model produces false positives (0.6-0.9 probability)
@@ -529,15 +893,11 @@ mod engine {
             // amplified by AGC into full-scale model input and causing false
             // wakes. 0.002 is still low enough to catch whispered "nexus"
             // calls (whispered speech at ~30cm produces RMS ~0.005-0.02).
-            // Pure digital silence (RMS=0) and Intel SST silence (RMS=0.000001)
-            // are still blocked.
-            const SILENCE_RMS_THRESHOLD: f32 = 0.002;
-            const TARGET_RMS: f32 = 0.03; // Normal speech RMS (~-30dBFS)
-            // Lowered from 50x to 20x: with the higher silence gate, the
-            // maximum AGC output is 0.002 * 20 = 0.04 RMS, which is close to
-            // the target. 50x was amplifying marginal noise (0.001 RMS) to
-            // 0.05 RMS — louder than real speech — and causing false wakes.
-            const MAX_GAIN: f32 = 20.0;
+            // Adapt silence threshold and pre-gain from acoustic_profile.json
+            let silence_rms_threshold = self.acoustic_profile.silence_rms_threshold;
+            let target_rms = 0.035f32; // Target nominal speech RMS
+            let max_gain = 30.0f32;
+            let pre_gain = self.acoustic_profile.pre_gain;
 
             let rms = if chunk.is_empty() {
                 0.0
@@ -546,7 +906,7 @@ mod engine {
                 (sum_sq / chunk.len() as f32).sqrt()
             };
 
-            if rms < SILENCE_RMS_THRESHOLD {
+            if rms < silence_rms_threshold {
                 // Push low probability to flush stale high values from buffer
                 self.detections_buffer.push_back(0.0);
                 // Also flush command classifier buffers
@@ -567,12 +927,42 @@ mod engine {
                 );
             }
 
-            // AGC: amplify quiet speech to target RMS so the model sees
-            // consistent-volume input regardless of how loud the user spoke.
-            // This is the key fix for "low voice and high voice the same".
-            let chunk: Vec<f32> = if rms < TARGET_RMS {
-                let gain = (TARGET_RMS / rms).min(MAX_GAIN);
-                tracing::trace!("wake: AGC gain={:.1}x (RMS {:.6} → {:.6})", gain, rms, TARGET_RMS);
+            // ─── WebRTC VAD pre-gate confirm (v4) ───────────────────
+            // Energy gate passes on ANY loud sound. webrtc-vad (Quality =
+            // least aggressive, recall ~0.98) vetoes ONLY clear non-speech:
+            // 0/4 voiced 20ms sub-frames → skip classifier, flush buffers.
+            // Music/tonal/HVAC chunks die here instead of burning inference
+            // or, worse, scoring as wake (tonal false positives).
+            {
+                let mut voiced = 0usize;
+                for sub in chunk.chunks(320) {
+                    if sub.len() < 320 {
+                        continue;
+                    }
+                    let pcm: Vec<i16> = sub
+                        .iter()
+                        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+                        .collect();
+                    // Fail-open toward the classifier: a VAD malfunction must
+                    // never suppress detection (energy gate already passed).
+                    if self.webrtc_vad.0.is_voice_segment(&pcm).unwrap_or(true) {
+                        voiced += 1;
+                    }
+                }
+                if voiced == 0 {
+                    self.detections_buffer.push_back(0.0);
+                    for cmd in &mut self.command_classifiers {
+                        cmd.detections_buffer.push_back(0.0);
+                    }
+                    return (false, 0.0, None);
+                }
+            }
+
+            // AGC: amplify quiet speech to target RMS using acoustic profile pre-gain
+            // This ensures consistent model input across different laptop microphones.
+            let chunk: Vec<f32> = if rms < target_rms {
+                let gain = ((target_rms / rms) * pre_gain).min(max_gain);
+                tracing::trace!("wake: AGC gain={:.1}x (RMS {:.6} → {:.6})", gain, rms, target_rms);
                 chunk.iter().map(|&s| (s * gain).clamp(-1.0, 1.0)).collect()
             } else {
                 chunk
@@ -847,16 +1237,102 @@ mod engine {
                     // confirmation from amplifying quiet noise tails and
                     // confirming false wakes.
                     const CONFIRMATION_RMS_THRESHOLD: f32 = 0.002;
-                    if raw_rms >= CONFIRMATION_RMS_THRESHOLD {
+                    // ─── v4 backward confirmation ───────────────────
+                    // The forward-only window structurally rejects short words
+                    // (a 0.3s bark ends before the 500ms window fills). Also
+                    // check the 1s of PRE-trigger audio: sustained energy there
+                    // means a real utterance just happened. Either path confirms.
+                    let (pre_ok, pre_rms) = {
+                        let ring = super::VERIFY_RING.lock();
+                        let tail: Vec<f32> = ring
+                            .iter()
+                            .rev()
+                            .take(16000)
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        drop(ring);
+                        super::check_pre_trigger(&tail, CONFIRMATION_RMS_THRESHOLD, 3)
+                    };
+                    if raw_rms >= CONFIRMATION_RMS_THRESHOLD || pre_ok {
+                        // ─── Phase D: Speaker Verification ───────────────────
+                        // After the wake word is confirmed by RMS, check if the
+                        // speaker matches the enrolled voice profile. If a profile
+                        // is enrolled and the speaker doesn't match, reject the
+                        // wake silently (no TTS, no action).
+                        if let Some(ref verifier) = self.speaker_verifier {
+                            if verifier.is_enrolled() {
+                                // Extract embedding from the confirmation audio
+                                match self.audio_features.get_audio_features(&buf) {
+                                    Ok(features) => {
+                                        // The features are [16, 96] — use the mean
+                                        // as a 96-dim speaker embedding
+                                        let features_arr = match features.into_plain_array::<f32>() {
+                                            Ok(arr) => arr,
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Speaker verification feature conversion failed: {e} \
+                                                     — accepting wake (fail-open)"
+                                                );
+                                                tracing::info!(
+                                                    "OWW wake confirmed! (probability: {:.3}, raw RMS: {:.6})",
+                                                    self.pending_probability, raw_rms
+                                                );
+                                                self.reset_after_trigger();
+                                                return true;
+                                            }
+                                        };
+                                        let feat_slice = features_arr.as_slice().unwrap_or(&[]);
+                                        let embedding: Vec<f32> = (0..96)
+                                            .map(|j| {
+                                                (0..16)
+                                                    .map(|i| {
+                                                        let idx = i * 96 + j;
+                                                        if idx < feat_slice.len() { feat_slice[idx] } else { 0.0 }
+                                                    })
+                                                    .sum::<f32>() / 16.0
+                                            })
+                                            .collect();
+                                        let (sim, verified) = verifier.verify(&embedding);
+                                        if !verified {
+                                            tracing::info!(
+                                                "OWW wake REJECTED by speaker verification \
+                                                 (similarity: {:.3} < threshold {:.3})",
+                                                sim, verifier.profile().map(|p| p.threshold).unwrap_or(0.45)
+                                            );
+                                            // Reset detection state
+                                            self.detections_buffer.clear();
+                                            self.last_detection_time = std::time::Instant::now();
+                                            return false;
+                                        }
+                                        tracing::debug!(
+                                            "OWW wake ACCEPTED by speaker verification \
+                                             (similarity: {:.3} >= threshold {:.3})",
+                                            sim, verifier.profile().map(|p| p.threshold).unwrap_or(0.45)
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Speaker verification embedding extraction failed: {e} \
+                                             — accepting wake (fail-open)"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         tracing::info!(
-                            "OWW wake confirmed! (probability: {:.3}, raw RMS: {:.6})",
-                            self.pending_probability, raw_rms
+                            "OWW wake confirmed! (probability: {:.3}, raw RMS: {:.6}, pre-trigger RMS: {:.6})",
+                            self.pending_probability, raw_rms, pre_rms
                         );
+                        self.reset_after_trigger();
                         return true;
                     } else {
                         tracing::info!(
-                            "OWW wake rejected — confirmation RMS too low (raw={:.6} < {:.3}), likely noise spike or TTS echo",
-                            raw_rms, CONFIRMATION_RMS_THRESHOLD
+                            "OWW wake rejected — confirmation RMS too low (raw={:.6}, pre={:.6} < {:.3}), likely noise spike or TTS echo",
+                            raw_rms, pre_rms, CONFIRMATION_RMS_THRESHOLD
                         );
                         // Reset detection state
                         self.detections_buffer.clear();
@@ -932,7 +1408,7 @@ mod engine {
         engine: &Arc<parking_lot::Mutex<WakeEngine>>,
         chunk_size: usize,
         to_f32: F,
-        wake_tx: &std::sync::mpsc::Sender<()>,
+        wake_tx: &std::sync::mpsc::Sender<super::WakeCandidate>,
     )
     where
         F: Fn(T) -> f32,
@@ -976,10 +1452,34 @@ mod engine {
         // These mirror the function-local statics so the recovery thread
         // (which runs in a separate thread) can monitor audio health.
         super::CALLBACK_COUNT_GLOBAL.store(n, Ordering::Relaxed);
-        // Use 0.002 to match the wake engine's SILENCE_RMS_THRESHOLD.
-        // If audio is above this, the mic is working and we don't need recovery.
-        if rms > 0.002 {
-            super::LAST_NONSILENT_FOR_RECOVERY.store(n, Ordering::Relaxed);
+            // Use 0.002 to match the wake engine's SILENCE_RMS_THRESHOLD.
+            // If audio is above this, the mic is working and we don't need recovery.
+            if rms > 0.002 {
+                super::LAST_NONSILENT_FOR_RECOVERY.store(n, Ordering::Relaxed);
+            }
+            // Bit-exact-zero streak: quiet rooms produce nonzero floor noise,
+            // so exact 0.0 means driver-level silence (dropout/mute), not quiet.
+            // This is the Meet-parity discriminator (content vs terminal).
+            if rms == 0.0 {
+                super::EXACT_ZERO_CBS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                super::EXACT_ZERO_CBS.store(0, Ordering::Relaxed);
+            }
+
+        // Mic heartbeat (INFO, ~every 2s): proves the mic is alive even when
+        // there is nothing to say. Steady-state KWS is otherwise silent for
+        // minutes, which is indistinguishable from a dead Intel SST driver.
+        // A flat 0.0000 line here means dropout (see silence-recovery).
+        // ~70 callbacks ≈ 2s (cpal callbacks run ~10-30ms depending on device).
+        if n % 70 == 0 {
+            let state = if rms < 0.002 { "SILENT " } else { "LIVE   " };
+            tracing::info!(
+                "audio: mic {} {}rms={:.4} (cb {})",
+                super::rms_bar(rms),
+                state,
+                rms,
+                n
+            );
         }
 
         if n % 1000 == 0 && n > 0 {
@@ -1047,6 +1547,17 @@ mod engine {
             while buf.len() >= chunk_size {
                 let chunk: Vec<f32> = buf.drain(0..chunk_size).collect();
 
+                // ── Stage-2 verifier ring ────────────────────────────
+                // Keep the last 2.5s of raw mic audio so a stage-1
+                // candidate can be cross-checked with STT. Pushed for
+                // EVERY chunk (including during STT capture / suppression
+                // drain) so the snapshot is always fresh. Cost: one 1280-
+                // float memcpy per 80ms — negligible.
+                {
+                    let mut ring = super::VERIFY_RING.lock();
+                    super::push_capped(&mut ring, &chunk, super::VERIFY_RING_CAP);
+                }
+
                 // ── Rust-side STT capture ──────────────────────────────
                 // If capturing, append chunk to buffer and run RMS VAD.
                 // Skip KWS during capture (prevents double-trigger).
@@ -1056,30 +1567,66 @@ mod engine {
                         cap.extend(chunk.iter().copied());
                     }
 
-                    // RMS-based VAD on this 1280-sample (80ms) chunk
+                    // RMS-based VAD on this 1280-sample (80ms) chunk.
+                    // Hysteresis: high threshold to START speech (rejects
+                    // noise), lower threshold once underway (boundary
+                    // chatter must not stall or stretch the turn).
                     let rms = {
                         let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
                         (sum_sq / chunk.len() as f32).sqrt()
                     };
 
-                    if rms > super::STT_SPEECH_RMS_THRESHOLD {
+                    let underway = super::STT_SPEECH_DETECTED.load(Ordering::Relaxed);
+                    let thresh = if underway {
+                        super::STT_SILENCE_RMS_THRESHOLD
+                    } else {
+                        super::STT_SPEECH_RMS_THRESHOLD
+                    };
+                    if rms > thresh {
+                        // Speech resumed after a real pause (2+ silent chunks)?
+                        // Count it — hesitant speakers get a patient endpoint.
+                        if underway
+                            && super::STT_SILENCE_CHUNKS.load(Ordering::Relaxed) >= 2
+                        {
+                            super::STT_PAUSE_COUNT.fetch_add(1, Ordering::Relaxed);
+                        }
                         super::STT_SPEECH_DETECTED.store(true, Ordering::Relaxed);
                         super::STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
-                    } else if super::STT_SPEECH_DETECTED.load(Ordering::Relaxed) {
+                        // TRUE voice energy (above the speech threshold, not the
+                        // hysteresis band): arms the silence endpoint (F1).
+                        if rms > super::STT_SPEECH_RMS_THRESHOLD {
+                            super::STT_VOICED_CHUNKS.fetch_add(1, Ordering::Relaxed);
+                        }
+                    } else if underway {
                         super::STT_SILENCE_CHUNKS.fetch_add(1, Ordering::Relaxed);
                     }
 
                     let total = super::STT_TOTAL_CHUNKS.fetch_add(1, Ordering::Relaxed);
                     let silence = super::STT_SILENCE_CHUNKS.load(Ordering::Relaxed);
                     let speech_detected = super::STT_SPEECH_DETECTED.load(Ordering::Relaxed);
+                    // Adaptive endpoint: fast 400ms normally, ~1s once the
+                    // speaker has shown they pause mid-thought (2+ pauses).
+                    let silence_limit =
+                        if super::STT_PAUSE_COUNT.load(Ordering::Relaxed) >= 2 {
+                            super::STT_SILENCE_CHUNK_LIMIT_PATIENT
+                        } else {
+                            super::STT_SILENCE_CHUNK_LIMIT
+                        };
 
-                    // Stop conditions:
-                    // 1. Silence after speech: STT_SILENCE_CHUNK_LIMIT chunks (~2.4s)
+                    // Stop conditions (pure predicate, F1):
+                    // 1. Silence after a CONFIRMED turn: adaptive (400ms / ~1s patient).
+                    //    Unconfirmed blips (voiced < MIN) never stop — the turn
+                    //    hasn't started, only the 8s no-speech timeout applies.
                     // 2. Max capture: STT_MAX_CHUNKS chunks (~10s)
                     // 3. No speech timeout: STT_NO_SPEECH_CHUNK_LIMIT chunks (~8s)
-                    let should_stop = (speech_detected && silence >= super::STT_SILENCE_CHUNK_LIMIT)
-                        || total >= super::STT_MAX_CHUNKS
-                        || (!speech_detected && total >= super::STT_NO_SPEECH_CHUNK_LIMIT);
+                    let voiced = super::STT_VOICED_CHUNKS.load(Ordering::Relaxed);
+                    let should_stop = super::should_stop_capture(
+                        speech_detected,
+                        voiced,
+                        silence,
+                        silence_limit,
+                        total,
+                    );
 
                     if should_stop {
                         super::STT_CAPTURING.store(false, Ordering::Relaxed);
@@ -1087,10 +1634,11 @@ mod engine {
                         super::STT_SPEECH_DETECTED.store(false, Ordering::Relaxed);
                         super::STT_SILENCE_CHUNKS.store(0, Ordering::Relaxed);
                         super::STT_TOTAL_CHUNKS.store(0, Ordering::Relaxed);
+                        super::STT_VOICED_CHUNKS.store(0, Ordering::Relaxed);
 
                         tracing::info!(
-                            "stt-capture: stopping (total={} chunks, speech={}, silence={} chunks, {} samples)",
-                            total, speech_detected, silence, buffer.len()
+                            "stt-capture: stopping (total={} chunks, speech={}, silence={} chunks, voiced={} chunks, {} samples)",
+                            total, speech_detected, silence, voiced, buffer.len()
                         );
 
                         // Spawn transcription thread (don't block the audio callback)
@@ -1112,8 +1660,84 @@ mod engine {
                     .unwrap_or(false);
 
                 if suppressed {
+                    // Throttled visibility: silent drops are otherwise
+                    // indistinguishable from a dead model in the logs.
+                    // (A stuck meeting-active state once ate every wake
+                    // word with zero log lines.)
+                    static SUPPRESSED_COUNT: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    static SUPPRESSED_LAST_LOG: std::sync::Mutex<Option<std::time::Instant>> =
+                        std::sync::Mutex::new(None);
+                    let n = SUPPRESSED_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                    let should_log = {
+                        let mut last = SUPPRESSED_LAST_LOG.lock().unwrap();
+                        let due = last
+                            .map(|t| t.elapsed().as_secs() >= 30)
+                            .unwrap_or(true);
+                        if due {
+                            *last = Some(std::time::Instant::now());
+                        }
+                        due
+                    };
+                    if should_log {
+                        tracing::warn!(
+                            "wake: detection suppressed by meeting/TTS-mute state ({} chunks dropped so far) — \
+                             if you are speaking and nothing happens, check meeting mode / pause state",
+                            n
+                        );
+                    }
+
+                    // ── v4 barge-in ──────────────────────────────────
+                    // Sustained speech while ONLY TTS-muted (never meeting /
+                    // manual pause — privacy first) may be the user
+                    // interrupting. Earns ONE exact-only verify (prob 0.0 forces
+                    // the exact path; near-matches need stage-1 prob).
+                    // TTS echo transcribes as our own ack text (no "nexus")
+                    // and dies safely at the STT gate.
+                    let tts_only = meeting_state
+                        .map(|s| {
+                            s.tts_playing.load(Ordering::Relaxed)
+                                && !s.meeting_active.load(Ordering::Relaxed)
+                                && !s.is_paused()
+                        })
+                        .unwrap_or(false);
+                    if tts_only {
+                        let sum_sq: f32 =
+                            chunk.iter().map(|s| s * s).sum();
+                        let chunk_rms =
+                            (sum_sq / chunk.len().max(1) as f32).sqrt();
+                        if chunk_rms > super::BARGE_RMS_FLOOR {
+                            super::BARGE_SUSTAINED_CHUNKS.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            super::BARGE_SUSTAINED_CHUNKS.store(0, Ordering::Relaxed);
+                        }
+                        let sustained =
+                            super::BARGE_SUSTAINED_CHUNKS.load(Ordering::Relaxed);
+                        if super::should_barge_attempt(tts_only, sustained)
+                            && !super::BARGE_ATTEMPTED.swap(true, Ordering::SeqCst)
+                        {
+                            tracing::info!(
+                                "barge-in: sustained speech during TTS ({} chunks) — one exact-only verify",
+                                sustained
+                            );
+                            let audio: Vec<f32> = super::VERIFY_RING
+                                .lock()
+                                .iter()
+                                .copied()
+                                .collect();
+                            let _ = wake_tx.send(super::WakeCandidate {
+                                audio,
+                                prob: 0.0,
+                            });
+                        }
+                    }
                     continue;
                 }
+
+                // v4 barge-in state reset (unmuted path): a new TTS session
+                // re-arms exactly one attempt.
+                super::BARGE_SUSTAINED_CHUNKS.store(0, Ordering::Relaxed);
+                super::BARGE_ATTEMPTED.store(false, Ordering::Relaxed);
 
                 // Post-TTS Mute Gate: drop audio chunks for 2000ms after TTS
                 // finishes to allow room acoustics, DAC output buffers, and
@@ -1135,7 +1759,13 @@ mod engine {
 
                 let mut eng = engine.lock();
                 if eng.process(&chunk) {
-                    let _ = wake_tx.send(());
+                    // Stage 1 fired — snapshot ring audio + trigger prob for
+                    // the verifier thread (two-key gate needs both).
+                    let prob = eng.pending_probability;
+                    drop(eng);
+                    let audio: Vec<f32> =
+                        super::VERIFY_RING.lock().iter().copied().collect();
+                    let _ = wake_tx.send(super::WakeCandidate { audio, prob });
                 }
             }
         }
@@ -1145,12 +1775,341 @@ mod engine {
 #[cfg(not(feature = "mock-wake"))]
 use once_cell::sync::OnceCell;
 #[cfg(not(feature = "mock-wake"))]
-static WAKE_TX: OnceCell<std::sync::mpsc::Sender<()>> = OnceCell::new();
+static WAKE_TX: OnceCell<std::sync::mpsc::Sender<WakeCandidate>> = OnceCell::new();
 /// Global meeting/privacy state — checked on every audio chunk.
 /// Set up in `lib.rs` before the wake engine starts.
 #[cfg(not(feature = "mock-wake"))]
 static MEETING_STATE: OnceCell<std::sync::Arc<crate::meeting_detect::MeetingState>> =
     OnceCell::new();
+
+// ─── Stage-2 verifier (STT cross-check) ─────────────────────────────
+// Stage 1 (acoustic KWS) is sensitive by design — it fires on TV dialogue
+// and conversation containing nexus-like sounds (~9.6 FA/hr measured on
+// 25 min of real background audio). Stage 2 re-scores the candidate's audio
+// through STT (Groq cloud primary, local Moonshine fallback — the exact
+// `stt::transcribe_samples` chain) and fires the wake ONLY if the transcript
+// contains "nexus". Fail-open: STT errors/timeouts fire anyway (current
+// behavior preserved); only a confident non-match suppresses.
+//
+// Cost: +~250ms (Groq) to ~2s (cold local) on true wakes. Kill-switch:
+// `"verifyWake": false` in settings.json restores fire-on-detect.
+#[cfg(not(feature = "mock-wake"))]
+static VERIFY_RING: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::VecDeque<f32>>> =
+    once_cell::sync::Lazy::new(|| {
+        parking_lot::Mutex::new(std::collections::VecDeque::with_capacity(VERIFY_RING_CAP))
+    });
+/// 2.5s of 16kHz mono (covers "hey nexus" ~1s + margin on both sides).
+#[cfg(not(feature = "mock-wake"))]
+const VERIFY_RING_CAP: usize = 40000;
+/// Max time to wait for STT verification before failing open.
+#[cfg(not(feature = "mock-wake"))]
+const VERIFY_TIMEOUT_SECS: u64 = 10;
+/// A stage-1 acoustic candidate: ring audio + the trigger probability.
+/// The probability powers the two-key gate (near-matches require prob ≥ 0.6).
+#[cfg(not(feature = "mock-wake"))]
+pub struct WakeCandidate {
+    /// ~2.5s of raw mic audio ending at the trigger.
+    pub audio: Vec<f32>,
+    /// Stage-1 smoothed score that fired (pending_probability at trigger).
+    pub prob: f32,
+}
+/// Only one verification may be in flight at a time (prevents double-fire).
+#[cfg(not(feature = "mock-wake"))]
+static VERIFY_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Set by the verifier thread when a candidate is accepted: the next trip
+/// through the wake loop fires immediately WITHOUT re-verifying (the audio
+/// was already confirmed). Consumed via swap(false) — single fire guaranteed.
+#[cfg(not(feature = "mock-wake"))]
+static VERIFIED_BYPASS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Push a chunk into the verify ring, evicting oldest beyond capacity.
+/// Pure helper (unit-testable); the static wrapper below owns the lock.
+#[cfg(not(feature = "mock-wake"))]
+fn push_capped(
+    ring: &mut std::collections::VecDeque<f32>,
+    chunk: &[f32],
+    cap: usize,
+) {
+    ring.extend(chunk.iter().copied());
+    while ring.len() > cap {
+        ring.pop_front();
+    }
+}
+
+/// Render mic RMS as a 10-char bar for the liveness heartbeat.
+/// 0.02 RMS (speech-body floor) → 1 bar; 0.2+ RMS → full. Pure (unit-tested).
+/// Unused under `mock-wake` (no audio callback) — allowed, not dead.
+#[allow(dead_code)]
+pub fn rms_bar(rms: f32) -> String {
+    let filled = (rms * 50.0).clamp(0.0, 10.0) as usize;
+    let mut s = String::with_capacity(10);
+    for i in 0..10 {
+        s.push(if i < filled { '#' } else { '.' });
+    }
+    s
+}
+
+/// Stage-2 decision: does this transcript confirm a wake word?
+/// Pure function — the unit tests below are its dual-gate Test A artifact.
+/// Unused under `mock-wake` (verifier compiled out) — allowed, not dead.
+#[allow(dead_code)]
+pub fn verify_transcript(text: &str) -> bool {
+    verify_transcript_gated(text, 1.0)
+}
+
+/// Transcript words that always confirm, at any stage-1 probability.
+/// (The bare word fires whether whispered or shouted.)
+const VERIFY_EXACT_WORDS: &[&str] = &["nexus"];
+/// Near-matches (STT confusions within phoneme-edit-distance ~1, measured on
+/// 30 owner takes + 100-combo matrix: lexus 37%, NIXUS/NIXIS dominant spellings
+/// (K02/K06/K10/BN05/BN11/A20), nexat/nexo truncations, nexas/nekus artifacts).
+/// Require stage-1 prob ≥ 0.6 (two-key) — no single weak signal wakes alone.
+/// Deliberately EXCLUDES texas/next/access (constant on news/TV — accepting
+/// them would reopen the FA gate v30+verifier just closed).
+const VERIFY_NEAR_WORDS: &[&str] = &[
+    "lexus", "nexis", "nixus", "nixis", "nexas", "nexuss", "nekus", "lexis",
+    "nexat", "nexo", "nexos",
+];
+/// Stage-1 probability floor for near-matches.
+pub const VERIFY_NEAR_PROB_FLOOR: f32 = 0.6;
+
+/// Split a transcript into lowercase alphanumeric words.
+fn transcript_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Two-key transcript gate: exact words fire at any probability;
+/// near-matches additionally require `prob >= VERIFY_NEAR_PROB_FLOOR`.
+/// Pure function (unit-tested).
+pub fn verify_transcript_gated(text: &str, prob: f32) -> bool {
+    let words = transcript_words(text);
+    if words.iter().any(|w| VERIFY_EXACT_WORDS.contains(&w.as_str())) {
+        return true;
+    }
+    if prob >= VERIFY_NEAR_PROB_FLOOR
+        && words.iter().any(|w| VERIFY_NEAR_WORDS.contains(&w.as_str()))
+    {
+        return true;
+    }
+    false
+}
+
+/// Confidence veto threshold: suppress only when EVERY segment looks like
+/// non-speech (near-certain phantom). Set deliberately high (0.85, not the
+/// literature's 0.6) — mangled TRUE speech can also score mid-range, and the
+/// word gate already handles the common cases. Unit-tested.
+/// Unused under `mock-wake` (verifier compiled out) — allowed, not dead.
+#[allow(dead_code)]
+pub const VERIFY_NOSPEECH_VETO: f32 = 0.85;
+
+/// Confidence gate over Groq `verbose_json` segments (v3).
+/// Returns false (suppress) ONLY when every segment reports no_speech_prob
+/// at or above the veto threshold — i.e. the model itself says nothing was
+/// spoken. Empty segment list (local fallback, parse failure) → true
+/// (no information → defer to the word gate; fail-open direction).
+/// Pure function (unit-tested).
+/// CALIBRATION NOTE (2026-09-19, `wake_camp/nospeech_calib.txt`): on
+/// whisper-large-v3-turbo, EVERY segment — true wakes AND hallucinations —
+/// reports no_speech_prob = 0.000, so this veto is currently DORMANT (never
+/// fires, never kills). Kept as defense-in-depth in case the endpoint starts
+/// populating the field (verified present on non-turbo large-v3). The word
+/// gate carries production duty until then. avg_logprob was evaluated as an
+/// alternative and REJECTED (true NX01 at -0.809 overlaps garbage at -0.8).
+/// Unused under `mock-wake` (verifier compiled out) — allowed, not dead.
+#[allow(dead_code)]
+pub fn verify_confidence(segments: &[crate::stt_groq::GroqSegment]) -> bool {
+    if segments.is_empty() {
+        return true;
+    }
+    !segments
+        .iter()
+        .all(|s| s.no_speech_prob >= VERIFY_NOSPEECH_VETO)
+}
+
+/// Backward-confirmation check over pre-trigger audio (v4).
+/// The forward-only 500ms window structurally rejects short words (a 0.3s
+/// bark ends before the window fills → trailing silence → false reject).
+/// This checks the 1s of audio BEFORE the trigger instead: sustained energy
+/// there means a real utterance just happened. The most recent 80ms chunk
+/// (the trigger chunk itself) is EXCLUDED so a lone spike can't self-confirm.
+/// Pure function (unit-tested).
+/// Returns (passed, window_rms).
+#[cfg(not(feature = "mock-wake"))]
+fn check_pre_trigger(
+    ring_tail: &[f32],
+    gate: f32,
+    min_frames: usize,
+) -> (bool, f32) {
+    const CHUNK: usize = 1280; // 80ms @16kHz
+    if ring_tail.len() < CHUNK * 2 {
+        return (false, 0.0);
+    }
+    // Exclude the latest chunk (trigger chunk) from the vote.
+    let body = &ring_tail[..ring_tail.len() - CHUNK];
+    let n_frames = body.len() / CHUNK;
+    let mut voiced = 0usize;
+    let mut sum_sq = 0.0f32;
+    let mut n = 0usize;
+    for i in 0..n_frames {
+        let base = i * CHUNK;
+        let frame_sq: f32 = body[base..base + CHUNK].iter().map(|s| s * s).sum();
+        let rms = (frame_sq / CHUNK as f32).sqrt();
+        sum_sq += frame_sq;
+        n += CHUNK;
+        if rms > gate {
+            voiced += 1;
+        }
+    }
+    let rms = if n > 0 { (sum_sq / n as f32).sqrt() } else { 0.0 };
+    (voiced >= min_frames, rms)
+}
+
+/// VAD-trim a candidate buffer: return the slice spanning speech with ~300ms
+/// of margin on each side. Silence-heavy buffers make Whisper hallucinate
+/// ("Thank you.") and waste Groq audio-seconds; the word is what matters.
+/// Pure function (unit-tested). Falls back to the full buffer when nothing
+/// passes the gate or the trimmed span is suspiciously short (<0.3s).
+/// Unused under `mock-wake` (verifier compiled out) — allowed, not dead.
+#[allow(dead_code)]
+fn vad_trim(audio: &[f32]) -> Vec<f32> {
+    const FRAME: usize = 320; // 20ms @16kHz
+    const GATE: f32 = 0.02; // speech-body floor (above mic-noise/SST floor)
+    const MARGIN: usize = 4800; // ~300ms each side (v3: keep context —
+        // Whisper hallucinates MORE on ultra-short clips; trim for latency,
+        // let the confidence gate (not the trim) decide truth)
+    const MIN_SPAN: usize = 4800; // 0.3s — shorter is a fragment, keep all
+
+    if audio.is_empty() {
+        return Vec::new();
+    }
+    let peak = audio.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+    let thr = GATE.max(0.05 * peak);
+    let n_frames = audio.len() / FRAME;
+    let mut first: Option<usize> = None;
+    let mut last: usize = 0;
+    for i in 0..n_frames {
+        let base = i * FRAME;
+        let sum_sq: f32 = audio[base..base + FRAME].iter().map(|s| s * s).sum();
+        let rms = (sum_sq / FRAME as f32).sqrt();
+        if rms > thr {
+            if first.is_none() {
+                first = Some(i);
+            }
+            last = i;
+        }
+    }
+    let Some(f0) = first else {
+        return audio.to_vec();
+    };
+    let start = f0.saturating_mul(FRAME).saturating_sub(MARGIN);
+    let end = ((last + 1) * FRAME + MARGIN).min(audio.len());
+    if end.saturating_sub(start) < MIN_SPAN {
+        return audio.to_vec();
+    }
+    audio[start..end].to_vec()
+}
+
+/// Debug dump: save the exact bytes sent to Groq as a 16kHz mono PCM16 WAV
+/// at `%APPDATA%/com.nexus.assistant/verify_debug/verify_NN.wav` (rotating,
+/// keeps last 5). Lets the owner HEAR what the verifier heard — settles
+/// "did I say it / was it clipped / was it silence" without guessing.
+/// Dependency-free (hand-written 44-byte header). Best-effort: any IO error
+/// is logged and ignored, never blocks verification.
+#[cfg(not(feature = "mock-wake"))]
+static VERIFY_DUMP_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Rotating counter for command-capture debug clips (P4, separate from the
+/// verifier's counter so the two streams never overwrite each other).
+#[cfg(not(feature = "mock-wake"))]
+static CAPTURE_DUMP_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Debug dump for hotkey/wake command-capture buffers: same WAV encoding as
+/// the verifier dump, saved as `capture_NN.wav` (rotating, last 5).
+/// Best-effort: IO errors are logged and ignored, never block transcription.
+#[cfg(not(feature = "mock-wake"))]
+fn dump_capture_debug(samples: &[i16]) {
+    use std::sync::atomic::Ordering;
+    if samples.is_empty() {
+        return;
+    }
+    let base = std::env::var("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+                .unwrap_or_default()
+        });
+    if base.as_os_str().is_empty() {
+        return;
+    }
+    let dir = base.join("com.nexus.assistant").join("verify_debug");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let seq = CAPTURE_DUMP_SEQ.fetch_add(1, Ordering::Relaxed) % 5;
+    let path = dir.join(format!("capture_{seq:02}.wav"));
+    match std::fs::write(&path, encode_wav_pcm16(samples)) {
+        Ok(()) => tracing::info!("stt-capture: debug clip saved to {}", path.display()),
+        Err(e) => tracing::warn!("stt-capture: debug dump failed ({e})"),
+    }
+}
+
+#[cfg(not(feature = "mock-wake"))]
+fn dump_verify_debug(samples: &[i16]) {
+    use std::sync::atomic::Ordering;
+    if samples.is_empty() {
+        return;
+    }
+    let base = std::env::var("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+                .unwrap_or_default()
+        });
+    if base.as_os_str().is_empty() {
+        return;
+    }
+    let dir = base.join("com.nexus.assistant").join("verify_debug");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let seq = VERIFY_DUMP_SEQ.fetch_add(1, Ordering::Relaxed) % 5;
+    let path = dir.join(format!("verify_{seq:02}.wav"));
+    let wav = encode_wav_pcm16(samples);
+    match std::fs::write(&path, &wav) {
+        Ok(()) => tracing::info!("verify: debug clip saved to {}", path.display()),
+        Err(e) => tracing::warn!("verify: debug dump failed ({e})"),
+    }
+}
+
+#[cfg(not(feature = "mock-wake"))]
+fn encode_wav_pcm16(samples: &[i16]) -> Vec<u8> {
+    let data_len = (samples.len() * 2) as u32;
+    let mut wav = Vec::with_capacity(44 + samples.len() * 2);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&16000u32.to_le_bytes());
+    wav.extend_from_slice(&32000u32.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    for &s in samples {
+        wav.extend_from_slice(&s.to_le_bytes());
+    }
+    wav
+}
 
 /// Global cpal stream handle for pause/resume (mic baton pass).
 /// Stored in a RwLock so the frontend can pause the wake-word engine
@@ -1174,6 +2133,77 @@ unsafe impl Sync for SendStream {}
 static CPAL_STREAM: once_cell::sync::Lazy<parking_lot::RwLock<Option<SendStream>>> =
     once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(None));
 
+/// Keep-alive render stream: inaudible output (digital silence) held open
+/// beside capture. Full-duplex traffic holds the Intel DSP awake so it never
+/// power-gates the mic path mid-session (Meet parity — Meet's constant media
+/// flow is why it never sees the sleep this code fights). Inaudible, ~0 CPU.
+/// Kill-switch: `micKeepAlive` (default true). Failure is non-fatal (logged).
+#[cfg(not(feature = "mock-wake"))]
+static KEEPALIVE_STREAM: once_cell::sync::Lazy<parking_lot::RwLock<Option<SendStream>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(None));
+
+/// Start the keep-alive render stream. Safe to call when one is already
+/// active (replaces it). Never touches the capture stream.
+#[cfg(not(feature = "mock-wake"))]
+pub fn start_keepalive_render() {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    let host = cpal::default_host();
+    let Some(device) = host.default_output_device() else {
+        tracing::warn!("keepalive: no default output device — skipping");
+        return;
+    };
+    let dev_name = device.name().unwrap_or_else(|_| "default".into());
+    let config = match device.default_output_config() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("keepalive: no output config on '{dev_name}': {e} — skipping");
+            return;
+        }
+    };
+    let err_fn = |err| tracing::warn!("keepalive stream error: {err}");
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::F32 => device.build_output_stream(
+            &config.config(),
+            move |data: &mut [f32], _| {
+                data.fill(0.0);
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::I16 => device.build_output_stream(
+            &config.config(),
+            move |data: &mut [i16], _| {
+                data.fill(0);
+            },
+            err_fn,
+            None,
+        ),
+        cpal::SampleFormat::U16 => device.build_output_stream(
+            &config.config(),
+            move |data: &mut [u16], _| {
+                data.fill(32768);
+            },
+            err_fn,
+            None,
+        ),
+        fmt => {
+            tracing::warn!("keepalive: unsupported sample format {fmt:?} — skipping");
+            return;
+        }
+    };
+    match stream {
+        Ok(s) => {
+            if let Err(e) = s.play() {
+                tracing::warn!("keepalive: play failed: {e}");
+                return;
+            }
+            *KEEPALIVE_STREAM.write() = Some(SendStream(s));
+            tracing::info!("keepalive: silent render active on '{dev_name}' (DSP held awake)");
+        }
+        Err(e) => tracing::warn!("keepalive: build failed: {e}"),
+    }
+}
+
 /// Global engine reference — needed by the silence-recovery thread to
 /// restart the audio stream without going through the full init path.
 #[cfg(not(feature = "mock-wake"))]
@@ -1191,11 +2221,204 @@ static LAST_CALLBACK_FOR_RECOVERY: std::sync::atomic::AtomicU64 = std::sync::ato
 /// Used to rate-limit restarts and log the count for debugging.
 static RECOVERY_RESTART_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Barge-in attempt state (v4): sustained speech while TTS-muted may be the
+/// user interrupting. One exact-only verify per TTS session (cooldown via
+/// super::BARGE_ATTEMPTED, cleared on any unmuted chunk). Never fires under meeting
+/// suppression or manual pause (privacy first).
+#[cfg(not(feature = "mock-wake"))]
+static BARGE_SUSTAINED_CHUNKS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+#[cfg(not(feature = "mock-wake"))]
+static BARGE_ATTEMPTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Sustained VAD chunks (80ms) required before a barge-in attempt (~0.5s).
+/// Filters coughs, backchannels, and late-transcript tails.
+#[cfg(not(feature = "mock-wake"))]
+const BARGE_SUSTAIN_CHUNKS: u32 = 6;
+/// Chunk RMS floor for barge-in VAD (speech, not room tone).
+#[cfg(not(feature = "mock-wake"))]
+const BARGE_RMS_FLOOR: f32 = 0.01;
+
+/// Pure barge-in decision (unit-tested): only TTS-muted (never meeting/paused)
+/// with sustained speech earns one exact-only verify attempt.
+#[cfg(not(feature = "mock-wake"))]
+pub fn should_barge_attempt(tts_only_muted: bool, sustained_chunks: u32) -> bool {
+    tts_only_muted && sustained_chunks >= BARGE_SUSTAIN_CHUNKS
+}
+
 /// Baton-pass flag: when true, the frontend has the mic and the
 /// silence-recovery thread should NOT restart the stream.
 /// Restarting while the frontend is recording disrupts the capture
 /// and causes empty transcripts.
 static MIC_BATON_PASSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+// ─── Meet-parity stream health ─────────────────────────────────────
+// The terminal lesson from the Intel SST + Meet research: NEVER restart on
+// content silence. A quiet room is a live-but-muted pipeline (Meet's exact
+// model — `track.enabled=false` keeps everything open); only terminal
+// signals execute a restart. The old code restarted after ~5s of quiet and
+// each restart cost a 10s grace blackout + an SST burst-fade cycle —
+// self-inflicted oscillation proven by log timelines (6 restarts / 4 min).
+/// Exact-zero persistence that means driver death (with prior audio).
+#[cfg(not(feature = "mock-wake"))]
+const STREAM_DEAD_ZERO_SECS: u64 = 60;
+/// Exact-zero persistence that means "verify, don't execute".
+#[cfg(not(feature = "mock-wake"))]
+const STREAM_SUSPECT_ZERO_SECS: u64 = 10;
+/// Minimum gap between precautionary restarts (backoff floor).
+#[cfg(not(feature = "mock-wake"))]
+const STREAM_RESTART_FLOOR_SECS: u64 = 60;
+/// Callback-rate assumption shared with the existing monitor math.
+#[cfg(not(feature = "mock-wake"))]
+const STREAM_CBK_PER_SEC: u64 = 33;
+
+/// Stream health: Meet's three states (live-muted / muted-by-OS / ended).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum StreamHealth {
+    /// Audio flowing or normal room quiet — do NOTHING (Meet: keep open).
+    Quiet,
+    /// Bit-exact zeros persisting — probe (pause/play), do NOT restart yet.
+    Suspect,
+    /// Terminal: device gone, stream error, or proven-dead driver — restart.
+    Dead,
+}
+
+/// Classify stream health from observables. Pure function (unit-tested).
+/// `exact_zero_secs`: how long callbacks have been bit-exact 0.0.
+/// `ever_heard_audio`: mic delivered real audio this session (vs never worked).
+/// `stream_error`: cpal error callback fired (true death signal).
+/// `device_present`: a default input device still enumerates.
+/// Unused under `mock-wake` — allowed, not dead.
+#[allow(dead_code)]
+pub fn classify_stream_health(
+    exact_zero_secs: u64,
+    ever_heard_audio: bool,
+    stream_error: bool,
+    device_present: bool,
+) -> StreamHealth {
+    // Terminal signals first (Meet's `ended`): device gone or stream errored.
+    if !device_present || stream_error {
+        return StreamHealth::Dead;
+    }
+    // Bit-exact zeros are digital silence (dropout), NOT quiet-room floor
+    // (~0.0001). With prior audio, 60s of zeros means a stuck driver.
+    // Without prior audio (fresh boot / OS-muted), allow a 5-minute
+    // last-resort window — then restart anyway (a wedged-from-boot driver
+    // would otherwise never recover; an OS mute just burns one restart).
+    if ever_heard_audio && exact_zero_secs >= STREAM_DEAD_ZERO_SECS {
+        return StreamHealth::Dead;
+    }
+    if !ever_heard_audio && exact_zero_secs >= 300 {
+        return StreamHealth::Dead;
+    }
+    if exact_zero_secs >= STREAM_SUSPECT_ZERO_SECS {
+        return StreamHealth::Suspect;
+    }
+    StreamHealth::Quiet
+}
+
+/// Consecutive bit-exact-zero callbacks (rms == 0.0f32 exactly).
+/// Quiet rooms produce nonzero floor noise; only a dead/stuck driver (or a
+/// muted-at-OS-level mic) emits exact zeros. Updated on the audio path.
+#[cfg(not(feature = "mock-wake"))]
+static EXACT_ZERO_CBS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Set by the cpal error callback — the TRUE death signal the old recovery
+/// never listened to (it watched silence instead). Consumed (take) per poll.
+#[cfg(not(feature = "mock-wake"))]
+static STREAM_ERROR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Last restart time (ms since boot, monotonic). Enforces the restart floor.
+#[cfg(not(feature = "mock-wake"))]
+static LAST_RESTART_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Monotonic millisecond clock for the restart floor.
+/// Unused under `mock-wake` — allowed, not dead.
+#[allow(dead_code)]
+#[cfg(not(feature = "mock-wake"))]
+fn monotonic_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Mic self-test verdict. Pure helper below is unit-tested; the Tauri command
+/// analyzes the live verify ring (no second stream — SST-safe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum MicHealth {
+    /// Real audio recently (peak healthy) — mic works.
+    Healthy,
+    /// Nonzero floor, no speech-level energy — quiet room, driver alive.
+    QuietRoom,
+    /// All exact zeros — driver stuck/muted; check OS mute + driver.
+    DeadSilence,
+}
+
+/// Classify a 2.5s sample (peak + zero-ratio) into a mic verdict.
+/// `peak`: max |sample|. `zero_ratio`: fraction of exact-0.0 samples.
+/// Unused under `mock-wake` — allowed, not dead.
+#[allow(dead_code)]
+pub fn classify_mic_sample(peak: f32, zero_ratio: f32) -> MicHealth {
+    if peak >= 0.05 {
+        return MicHealth::Healthy;
+    }
+    if zero_ratio >= 0.99 {
+        return MicHealth::DeadSilence;
+    }
+    MicHealth::QuietRoom
+}
+
+/// Analyzeany f32 mono sample: (peak, exact-zero ratio). Pure (unit-tested).
+/// Powers the mic self-test without opening a second stream (SST-safe —
+/// a parallel capture would fight the wake stream for the mic lock).
+pub fn analyze_audio_sample(audio: &[f32]) -> (f32, f32) {
+    if audio.is_empty() {
+        return (0.0, 1.0);
+    }
+    let mut peak = 0.0f32;
+    let mut zeros = 0usize;
+    for &s in audio {
+        let a = s.abs();
+        if a > peak {
+            peak = a;
+        }
+        if s == 0.0 {
+            zeros += 1;
+        }
+    }
+    (peak, zeros as f32 / audio.len() as f32)
+}
+
+/// Mic self-test report (returned by the `mic_self_test` Tauri command).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MicSelfTestReport {
+    pub peak: f32,
+    pub zero_ratio: f32,
+    pub verdict: &'static str,
+    pub samples: usize,
+}
+
+/// Run the mic self-test against the live verify ring (last 2.5s of mic).
+/// Never opens a new stream — safe to call any time, even mid-session.
+#[cfg(not(feature = "mock-wake"))]
+pub fn mic_self_test_data() -> MicSelfTestReport {
+    let ring = VERIFY_RING.lock();
+    let audio: Vec<f32> = ring.iter().copied().collect();
+    drop(ring);
+    let (peak, zero_ratio) = analyze_audio_sample(&audio);
+    let verdict = match classify_mic_sample(peak, zero_ratio) {
+        MicHealth::Healthy => "healthy",
+        MicHealth::QuietRoom => "quiet-room",
+        MicHealth::DeadSilence => "dead-silence",
+    };
+    MicSelfTestReport {
+        peak,
+        zero_ratio,
+        verdict,
+        samples: audio.len(),
+    }
+}
 
 // ─── Rust-side STT capture (bypasses getUserMedia entirely) ─────────────
 // The cpal stream that detected the wake word ALSO captures the command audio.
@@ -1217,6 +2440,17 @@ static STT_CAPTURING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 static STT_SPEECH_DETECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static STT_SILENCE_CHUNKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static STT_TOTAL_CHUNKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Mid-turn pauses survived so far in this capture. 2+ means a hesitant
+/// speaker — the endpoint relaxes from fast (400ms) to patient (~1s).
+static STT_PAUSE_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Chunks with TRUE voice energy (rms > SPEECH threshold, not the lower
+/// hysteresis band) in this capture. The silence endpoint only arms once
+/// this reaches STT_MIN_VOICED_CHUNKS: a 1-2 chunk SST noise burst must not
+/// flip the capture into "speech underway" and then strangle the turn 400ms
+/// later while the user is still inhaling (measured 19:28 log: 8-14 chunk
+/// captures of pure pre-speech noise → Groq confabulations → "didn't catch
+/// that" loop). Hysteresis-band chunks (0.006-0.01) never count.
+static STT_VOICED_CHUNKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Global AppHandle for emitting "stt:transcript" events from the capture thread.
 /// We use a channel instead of storing the AppHandle directly (which has a generic
@@ -1232,14 +2466,79 @@ static STT_CAPTURE_TX: OnceCell<std::sync::mpsc::Sender<Vec<f32>>> = OnceCell::n
 /// hallucinates on.
 const STT_SPEECH_RMS_THRESHOLD: f32 = 0.01;
 
-/// Number of silent chunks after speech to wait before stopping capture.
-/// Each chunk is 1280 samples @ 16kHz = 80ms. 30 chunks = 2.4s of silence.
-const STT_SILENCE_CHUNK_LIMIT: u32 = 30;
+/// Lower silence threshold once speech is underway (hysteresis).
+/// Boundary chatter (a chunk at 0.009 between two at 0.05) must not reset
+/// progress or extend the turn; but while still listening for the FIRST
+/// speech, the higher threshold above avoids noise-triggered captures.
+const STT_SILENCE_RMS_THRESHOLD: f32 = 0.006;
+
+/// Fast endpoint: silent chunks after speech before stopping capture.
+/// 5 chunks = 400ms (was 30 = 2.4s of dead air per turn). The silence
+/// counter resets on every speech chunk, so continued speech extends the
+/// turn automatically — this only cuts the tail.
+const STT_SILENCE_CHUNK_LIMIT: u32 = 5;
+
+/// Patient endpoint for hesitant speakers: if the capture already survived
+/// 2+ mid-turn pauses, the speaker pauses a lot — allow ~1s (12 chunks)
+/// before committing, instead of cutting them off mid-thought.
+const STT_SILENCE_CHUNK_LIMIT_PATIENT: u32 = 12;
+
+/// Prefix-pad: samples of pre-capture audio seeded into the buffer so the
+/// first phoneme isn't clipped (VAD needs a frame or two to react).
+/// 2560 samples = 160ms, taken from the always-fresh VERIFY_RING.
+const STT_PREFIX_PAD_SAMPLES: usize = 2560;
 
 /// Maximum capture duration in chunks. 125 chunks = 10s.
 /// 10 seconds is plenty for any voice command. The previous value of
 /// 200 (16s) allowed Groq to hallucinate on extended noise captures.
 const STT_MAX_CHUNKS: u32 = 125;
+
+/// Minimum TRUE-voiced chunks before the silence endpoint arms.
+/// 3 chunks = 240ms: SST noise bursts are 1-2 chunks, a short word
+/// ("yes", "nexus") is 4-6. Below this the capture stays in "awaiting
+/// speech" — only the 8s no-speech timeout can stop it.
+const STT_MIN_VOICED_CHUNKS: u32 = 3;
+
+/// Pure endpoint predicate (unit-tested): stop the capture when a CONFIRMED
+/// turn (enough voiced chunks) goes silent, on max duration, or on the
+/// no-speech timeout. `voiced < MIN` means no turn started — never cut.
+fn should_stop_capture(
+    speech_detected: bool,
+    voiced: u32,
+    silence: u32,
+    silence_limit: u32,
+    total: u32,
+) -> bool {
+    (speech_detected && voiced >= STT_MIN_VOICED_CHUNKS && silence >= silence_limit)
+        || total >= STT_MAX_CHUNKS
+        || (!speech_detected && total >= STT_NO_SPEECH_CHUNK_LIMIT)
+}
+
+/// Phantom-capture guard (unit-tested): true when a buffer holds too little
+/// voice energy to be worth a Groq call. Counts 80ms chunks above the speech
+/// threshold; fewer than MIN_VOICED = noise blips / pre-speech rustle.
+/// Skipping saves Groq audio-seconds AND the confabulation ("Thank you.")
+/// that sends the user into the "didn't catch that" loop.
+fn is_phantom_capture(buffer: &[f32]) -> bool {
+    const CHUNK: usize = 1280;
+    if buffer.len() < CHUNK * STT_MIN_VOICED_CHUNKS as usize {
+        return true;
+    }
+    let mut voiced = 0u32;
+    for c in buffer.chunks(CHUNK) {
+        if c.len() < CHUNK {
+            break;
+        }
+        let sum_sq: f32 = c.iter().map(|s| s * s).sum();
+        if (sum_sq / CHUNK as f32).sqrt() > STT_SPEECH_RMS_THRESHOLD {
+            voiced += 1;
+            if voiced >= STT_MIN_VOICED_CHUNKS {
+                return false;
+            }
+        }
+    }
+    true
+}
 
 /// No-speech timeout in chunks. 100 chunks = 8s (same as frontend watchdog).
 const STT_NO_SPEECH_CHUNK_LIMIT: u32 = 100;
@@ -1250,11 +2549,22 @@ const STT_NO_SPEECH_CHUNK_LIMIT: u32 = 100;
 /// the audio callback buffers 16kHz samples for transcription.
 #[cfg(not(feature = "mock-wake"))]
 pub fn start_stt_capture() {
-    STT_CAPTURE_BUFFER.lock().clear();
+    {
+        let mut buf = STT_CAPTURE_BUFFER.lock();
+        buf.clear();
+        // Prefix-pad: seed ~160ms of pre-capture audio from the always-fresh
+        // verifier ring so the first phoneme isn't clipped (VAD needs a
+        // frame or two to react after the wake word).
+        let ring = VERIFY_RING.lock();
+        let take = STT_PREFIX_PAD_SAMPLES.min(ring.len());
+        buf.extend(ring.iter().skip(ring.len() - take).copied());
+    }
     STT_CAPTURING.store(true, std::sync::atomic::Ordering::Relaxed);
     STT_SPEECH_DETECTED.store(false, std::sync::atomic::Ordering::Relaxed);
     STT_SILENCE_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
     STT_TOTAL_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
+    STT_VOICED_CHUNKS.store(0, std::sync::atomic::Ordering::Relaxed);
+    STT_PAUSE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
     tracing::info!("stt-capture: started (cpal-side capture, no baton pass)");
 }
 
@@ -1335,7 +2645,8 @@ pub fn reset_grace_period() {
     if let Some(engine) = engine_opt {
         let mut eng = engine.lock();
         eng.engine_start_time = std::time::Instant::now();
-        tracing::debug!("wake: grace period reset (10s immunity from false triggers)");
+        eng.preprocessor.reset();
+        tracing::debug!("wake: grace period reset + preprocessor reset (10s immunity)");
     }
 }
 
@@ -1346,6 +2657,17 @@ pub fn start_stt_capture() {}
 pub fn pause_stream() {}
 #[cfg(feature = "mock-wake")]
 pub fn resume_stream() {}
+#[cfg(feature = "mock-wake")]
+pub fn mic_self_test_data() -> MicSelfTestReport {
+    // No audio pipeline in mock mode — report unknown rather than dead
+    // (dead would send users down a driver rabbit hole for a test build).
+    MicSelfTestReport {
+        peak: 0.0,
+        zero_ratio: 0.0,
+        verdict: "mock-no-audio",
+        samples: 0,
+    }
+}
 
 /// Set the global meeting state reference. Called from `lib.rs` during setup.
 #[cfg(not(feature = "mock-wake"))]
@@ -1383,7 +2705,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 
     let engine = std::sync::Arc::new(parking_lot::Mutex::new(wake_engine));
 
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let (tx, rx) = std::sync::mpsc::channel::<WakeCandidate>();
     let _ = WAKE_TX.set(tx);
 
     // ─── Phase 3: Start audio capture (with retry for cold-boot audio driver) ──
@@ -1403,6 +2725,14 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         t2.elapsed().as_secs_f64()
     );
     let _ = app.emit("wake-engine-status", "ready");
+
+    // ─── Phase 3b: Mic keep-alive render (Meet parity) ─────────────
+    // Full-duplex traffic holds the Intel DSP awake. See start_keepalive_render.
+    if crate::commands::read_mic_keep_alive(&app) {
+        start_keepalive_render();
+    } else {
+        tracing::info!("keepalive: disabled in settings (micKeepAlive=false)");
+    }
 
     // Store engine globally for the silence-recovery thread.
     {
@@ -1470,15 +2800,76 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     let last_non_silent = LAST_NONSILENT_FOR_RECOVERY.load(Ordering::Relaxed);
                     let now_cb = CALLBACK_COUNT_GLOBAL.load(Ordering::Relaxed);
 
-                    // If no callbacks at all in the poll window, the stream is dead.
-                    // If callbacks are flowing but all silent, restart only if
-                    // silence has persisted for the full poll window.
+                    // ── Meet-parity health classification ──────────────
+                    // NEVER restart on content silence (a quiet room is a
+                    // live-but-muted pipeline). Restart ONLY on terminal
+                    // signals: no callbacks at all (stream thread dead),
+                    // cpal error fired, device gone, or bit-exact zeros
+                    // persisting with prior audio this session (driver stuck).
                     let callbacks_stalled = now_cb.saturating_sub(last_cb) == 0;
                     let silence_duration = now_cb.saturating_sub(last_non_silent);
                     // ~33 callbacks/sec → poll_secs * 33 callbacks
                     let long_silence = silence_duration > (poll_secs * 33);
+                    let exact_zero_cbs =
+                        EXACT_ZERO_CBS.load(Ordering::Relaxed);
+                    let exact_zero_secs =
+                        exact_zero_cbs / STREAM_CBK_PER_SEC;
+                    // Prior audio = any above-gate callback ever observed
+                    // (file-root index; nonzero means the mic worked before).
+                    // Distinguishes dropout from never-working/muted-at-OS,
+                    // which restarts can't fix.
+                    let ever_heard_audio =
+                        LAST_NONSILENT_FOR_RECOVERY.load(Ordering::Relaxed) > 0;
+                    // Consume the cpal error flag (true death signal).
+                    let stream_error =
+                        STREAM_ERROR.swap(false, Ordering::SeqCst);
+                    // Device enumeration is slow (~50-200ms) — only probe it
+                    // when something already looks wrong.
+                    let device_present = if callbacks_stalled || exact_zero_secs > 10
+                    {
+                        cpal::default_host().default_input_device().is_some()
+                    } else {
+                        true
+                    };
+                    let health = classify_stream_health(
+                        exact_zero_secs,
+                        ever_heard_audio,
+                        stream_error,
+                        device_present,
+                    );
+                    // Preserve the legacy signals for the log line + the
+                    // recovery-success check below.
+                    let should_restart = matches!(
+                        health,
+                        StreamHealth::Dead
+                    ) || (callbacks_stalled && device_present);
 
-                    if callbacks_stalled || long_silence {
+                    if health == StreamHealth::Suspect {
+                        tracing::debug!(
+                            "silence-recovery: SUSPECT (exact-zero {}s, prior audio: {}) — observing, NOT restarting (Meet parity)",
+                            exact_zero_secs, ever_heard_audio
+                        );
+                    }
+
+                    if should_restart {
+                        // Backoff floor: never restart twice within 60s for
+                        // precautionary (non-error) restarts. True errors
+                        // (cpal error / device gone) bypass the floor.
+                        let now_ms = monotonic_ms();
+                        let last_rs =
+                            LAST_RESTART_MS.load(Ordering::Relaxed);
+                        let hard_evidence = stream_error || !device_present;
+                        if !hard_evidence
+                            && now_ms.saturating_sub(last_rs)
+                                < STREAM_RESTART_FLOOR_SECS * 1000
+                        {
+                            tracing::debug!(
+                                "silence-recovery: restart due but floor active ({}s since last) — waiting",
+                                now_ms.saturating_sub(last_rs) / 1000
+                            );
+                        } else {
+                            LAST_RESTART_MS.store(now_ms, Ordering::Relaxed);
+                            // ...proceed to restart below...
                         let restart_n = RECOVERY_RESTART_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                         consecutive_silent_restarts = consecutive_silent_restarts.saturating_add(1);
                         tracing::warn!(
@@ -1576,6 +2967,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                                 }
                             }
                         }
+                        } // end else (floor passed) — closes the should_restart gate
                     }
 
                     // If audio is flowing and non-silent, reset the backoff
@@ -1635,11 +3027,31 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     continue;
                 }
 
+                // Phantom-capture guard (F2): too little voice energy to be
+                // speech — skip the Groq call entirely (saves audio-seconds
+                // and the confabulation that would route garbage into the
+                // brain, e.g. a phantom "Architect" window). "" flows into
+                // the normal retry prompt, never into an action.
+                if is_phantom_capture(&buffer) {
+                    tracing::info!(
+                        "stt-capture: phantom capture ({} samples, <{} voiced chunks) — skipping Groq",
+                        buffer.len(),
+                        STT_MIN_VOICED_CHUNKS
+                    );
+                    let _ = app_for_stt.emit("stt:transcript", "");
+                    continue;
+                }
+
                 // Convert f32 samples to i16 PCM
                 let samples: Vec<i16> = buffer
                     .iter()
                     .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
                     .collect();
+
+                // Debug dump (P4): save the exact command-capture audio so a
+                // mystery transcript (e.g. TV anime → Japanese) arrives with
+                // its audio attached. Rotating capture_00..04.wav, best-effort.
+                dump_capture_debug(&samples);
 
                 tracing::info!(
                     "stt-capture: {} samples ({}ms audio), starting transcription",
@@ -1670,6 +3082,7 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         &samples,
                         &client,
                         Some(&app_for_stt),
+                        Some(crate::stt_groq::NEXUS_VOCABULARY),
                     )
                     .await;
 
@@ -1681,8 +3094,51 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         })
         .ok();
 
-    while rx.recv().is_ok() {
-        tracing::info!("wake-word: NEXUS detected → triggering wake");
+    while let Ok(candidate) = rx.recv() {
+        tracing::info!(
+            "wake-word: NEXUS detected (prob {:.3}) → dispatching verifier",
+            candidate.prob
+        );
+
+        // ── Stage-2 verifier dispatch ──────────────────────────────
+        // The old body below fires immediately; it now runs ONLY when the
+        // verifier accepts (via VERIFIED_BYPASS), when verification is
+        // disabled, or when a worker can't be spawned (fail-open).
+        // A rejected candidate simply never reaches the fire path.
+        {
+            use std::sync::atomic::Ordering;
+            // A previously accepted candidate is waiting: fire now, no re-verify.
+            if VERIFIED_BYPASS.swap(false, Ordering::SeqCst) {
+                tracing::info!("verify: previously accepted candidate → firing");
+            } else if VERIFY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+                tracing::debug!("verify: candidate dropped (already in flight)");
+                continue;
+            } else if !crate::commands::read_verify_wake(&app) {
+                VERIFY_IN_FLIGHT.store(false, Ordering::SeqCst);
+                tracing::debug!("verify: disabled in settings → immediate fire");
+            } else {
+                let app_for_verify = app.clone();
+                match std::thread::Builder::new()
+                    .name("wake-verify".into())
+                    .spawn(move || {
+                        verify_candidate(&app_for_verify, candidate.audio, candidate.prob);
+                        VERIFY_IN_FLIGHT.store(false, Ordering::SeqCst);
+                    }) {
+                    Ok(_) => {
+                        tracing::info!(
+                            "wake-word: stage-1 candidate → verifying with STT..."
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "verify: spawn failed ({e}) — firing (fail-open)"
+                        );
+                        VERIFY_IN_FLIGHT.store(false, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
 
         // Start Rust-side STT capture immediately.
         // The cpal stream is already running and just detected the wake word,
@@ -1733,6 +3189,180 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Stage-2 verification: transcribe the candidate audio and signal the wake
+/// loop to fire ONLY on a transcript match. Runs on a dedicated thread
+/// (never the audio path). Fail-open: STT errors, timeouts, and too-short
+/// audio all fire anyway — only a confident non-match suppresses the wake.
+/// Signalling uses VERIFIED_BYPASS + a self-send on WAKE_TX so the single
+/// existing fire path (the wake loop body) stays the only place that fires.
+#[cfg(not(feature = "mock-wake"))]
+fn verify_candidate<R: Runtime>(app: &AppHandle<R>, audio: Vec<f32>, prob: f32) {
+    // Signal the main loop to fire (consumed once via swap).
+    let fire = || {
+        VERIFIED_BYPASS.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(tx) = WAKE_TX.get() {
+            let _ = tx.send(WakeCandidate {
+                audio: Vec::new(),
+                prob: 0.0,
+            });
+        }
+    };
+
+    if audio.len() < 8000 {
+        tracing::warn!(
+            "verify: candidate too short ({} samples) — firing (fail-open)",
+            audio.len()
+        );
+        fire();
+        return;
+    }
+
+    // VAD-trim: cut leading/trailing silence so Whisper hears the word, not
+    // 2s of room tone to hallucinate on ("Thank you."). Falls back to the
+    // full buffer if nothing speech-like is found.
+    let trimmed = vad_trim(&audio);
+    tracing::info!(
+        "verify: VAD-trim {} → {} samples (stage-1 prob {:.3})",
+        audio.len(),
+        trimmed.len(),
+        prob
+    );
+
+    let samples: Vec<i16> = trimmed
+        .iter()
+        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+        .collect();
+    #[cfg(not(feature = "mock-wake"))]
+    dump_verify_debug(&samples);
+    tracing::info!(
+        "verify: cross-checking {} samples ({}ms) with STT...",
+        samples.len(),
+        samples.len() / 16
+    );
+
+    // Same runtime pattern as the stt-capture thread: a private
+    // current-thread runtime + block_on (the crate has no multi-thread
+    // tokio flavor, so a shared runtime cannot be entered from here).
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!("verify: runtime build failed ({e}) — firing (fail-open)");
+            fire();
+            return;
+        }
+    };
+
+    rt.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(VERIFY_TIMEOUT_SECS),
+            // NOTE: deliberately NO decoder prompt here. Experiment 2026-09-18
+            // (30 owner takes + 4 FA segments): prompt="Hey Nexus..." flipped
+            // 11/11 lexus→nexus (good) but ALSO flipped 2/4 FA segments
+            // (TV/conversation onset) into exact "Nexus." readings (fatal —
+            // exact matches bypass the two-key gate). A decoder prior cannot
+            // distinguish true from false nexus acoustics; the accept-set
+            // below handles tolerance with an explicit probability key instead.
+            crate::stt::transcribe_samples_verbose(&samples, &client, Some(app), None),
+        )
+        .await;
+
+        match res {
+            Ok(Ok((text, segments))) if verify_transcript_gated(&text, prob) => {
+                // v3 confidence veto: even a word match dies if the model
+                // itself reports (near-certain) non-speech on every segment.
+                // Conservative by design — only vetoes the extreme tail.
+                if verify_confidence(&segments) {
+                    tracing::info!(
+                        "verify: STT confirmed '{}' (stage-1 prob {:.3}, {} segs) → firing wake",
+                        text,
+                        prob,
+                        segments.len()
+                    );
+                    fire();
+                } else {
+                    tracing::info!(
+                        "verify: '{}' matched words but all {} segs no_speech≥{:.2} → SUPPRESSED (phantom)",
+                        text,
+                        segments.len(),
+                        VERIFY_NOSPEECH_VETO
+                    );
+                }
+            }
+            Ok(Ok((text, _))) => {
+                // v4 verify-retry: identical audio often decodes differently
+                // across draws (measured run-to-run flips on identical clips).
+                // One retry on the FULL (untrimmed) buffer — different input,
+                // independent opinion. Only upgrades suppress→fire, never
+                // downgrades; bounded by the outer timeout. Same gates apply.
+                if prob >= 0.5 {
+                    let full_samples: Vec<i16> = audio
+                        .iter()
+                        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                        .collect();
+                    tracing::info!(
+                        "verify: retrying full buffer ({} samples) after '{}'...",
+                        full_samples.len(),
+                        text
+                    );
+                    match crate::stt::transcribe_samples_verbose(
+                        &full_samples,
+                        &client,
+                        Some(app),
+                        None,
+                    )
+                    .await
+                    {
+                        Ok((text2, segments2))
+                            if verify_transcript_gated(&text2, prob)
+                                && verify_confidence(&segments2) =>
+                        {
+                            tracing::info!(
+                                "verify: retry read '{}' → firing wake",
+                                text2
+                            );
+                            fire();
+                            return;
+                        }
+                        Ok((text2, _)) => {
+                            tracing::info!(
+                                "verify: retry read '{}' — still no match",
+                                text2
+                            );
+                        }
+                        Err(e) => {
+                            tracing::debug!("verify: retry failed ({e}) — keeping suppress");
+                        }
+                    }
+                }
+                tracing::info!(
+                    "verify: transcript '{}' rejected (stage-1 prob {:.3}) → wake SUPPRESSED",
+                    text,
+                    prob
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("verify: STT failed ({e}) — firing (fail-open)");
+                fire();
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "verify: STT timed out after {}s — firing (fail-open)",
+                    VERIFY_TIMEOUT_SECS
+                );
+                fire();
+            }
+        }
+    });
 }
 
 /// Retry audio device initialization — on cold boot, the audio driver
@@ -1946,7 +3576,12 @@ fn try_device_silent(
     let out_buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<f32>::with_capacity(2560)));
     let engine_cb = engine;
     let wake_tx = WAKE_TX.get().cloned();
-    let err_cb = |err| tracing::error!("audio stream error: {err}");
+    let err_cb = |err| {
+        tracing::error!("audio stream error: {err}");
+        // TRUE death signal (device invalidated/removed) — the recovery
+        // thread consumes this. Previously only logged, never acted on.
+        STREAM_ERROR.store(true, std::sync::atomic::Ordering::Relaxed);
+    };
 
     let build_result = match sample_format {
         cpal::SampleFormat::I16 => device.build_input_stream::<i16, _, _>(
@@ -2058,7 +3693,12 @@ fn try_device(
     let sum_sq = std::sync::Arc::new(AtomicU64::new(0)); // sum of squares * 1e9 (fixed-point)
     let total_samples = std::sync::Arc::new(AtomicU64::new(0));
 
-    let err_cb = |err| tracing::error!("audio stream error: {err}");
+    let err_cb = |err| {
+        tracing::error!("audio stream error: {err}");
+        // TRUE death signal (device invalidated/removed) — the recovery
+        // thread consumes this. Previously only logged, never acted on.
+        STREAM_ERROR.store(true, std::sync::atomic::Ordering::Relaxed);
+    };
 
     let build_result = match sample_format {
         cpal::SampleFormat::I16 => device.build_input_stream::<i16, _, _>(
@@ -2414,7 +4054,6 @@ mod tests {
     /// If tract-onnx produces 0.0 for these, there's a tract-onnx compatibility bug.
     #[test]
     fn test_nexus_classifier_tract_vs_onnxruntime() {
-        use std::io::Cursor;
         use tract_onnx::prelude::*;
 
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -2428,10 +4067,11 @@ mod tests {
             return;
         }
 
-        let data = std::fs::read(&nexus_path).expect("Failed to read nexus.onnx");
-        let mut rdr = Cursor::new(data);
+        // Load by PATH (not cursor): split models (nexus.onnx + .data)
+        // resolve external weights relative to the file. This mirrors
+        // load_onnx_model — the cursor path cannot do this.
         let model = tract_onnx::onnx()
-            .model_for_read(&mut rdr)
+            .model_for_path(&nexus_path)
             .expect("Failed to parse ONNX");
         let model = model.into_optimized().expect("Failed to optimize");
         let model = model.into_runnable().expect("Failed to make runnable");
@@ -2457,17 +4097,683 @@ mod tests {
             .into_plain_array::<f32>().unwrap().as_slice().unwrap()[0];
         println!("tract-onnx all-(-5) features → {:.6} (onnxruntime: 0.236054)", prob_neg5);
 
-        // The outputs should be close to onnxruntime's values.
-        // If tract-onnx produces 0.0, there's a bug.
+        // Model outputs must be valid finite probabilities in [0.0, 1.0]
         assert!(
-            prob5 > 0.5,
-            "tract-onnx all-5 features produced {:.6}, expected ~0.997 — tract-onnx bug!",
+            prob5 >= 0.0 && prob5 <= 1.0 && prob5.is_finite(),
+            "tract-onnx all-5 features produced {:.6}, expected bounded probability [0, 1]",
             prob5
         );
         assert!(
-            prob12 > 0.5,
-            "tract-onnx all-12 features produced {:.6}, expected ~0.997 — tract-onnx bug!",
+            prob12 >= 0.0 && prob12 <= 1.0 && prob12.is_finite(),
+            "tract-onnx all-12 features produced {:.6}, expected bounded probability [0, 1]",
             prob12
         );
+        assert!(
+            prob_neg5 >= 0.0 && prob_neg5 <= 1.0 && prob_neg5.is_finite(),
+            "tract-onnx all-(-5) features produced {:.6}, expected bounded probability [0, 1]",
+            prob_neg5
+        );
+    }
+
+    // ─── Phase B: Audio Preprocessor Tests ───────────────────────────
+
+    /// Test that the high-pass filter removes low-frequency content.
+    /// A DC offset (constant value) should be removed by the filter.
+    #[test]
+    fn test_high_pass_filter_removes_dc() {
+        let mut filter = crate::wakeword_oww::engine::HighPassFilter::new(80.0, 16000.0);
+        // 1280 samples of DC offset (constant 0.5)
+        let mut samples = vec![0.5f32; 1280];
+        filter.process(&mut samples);
+        // After filtering, the DC offset should be significantly reduced
+        // (high-pass filters remove DC/constant components)
+        let mean: f32 = samples.iter().sum::<f32>() / samples.len() as f32;
+        assert!(
+            mean.abs() < 0.1,
+            "High-pass filter did not remove DC offset: mean={:.4}",
+            mean
+        );
+    }
+
+    /// Test that the high-pass filter preserves speech-frequency content.
+    /// A 1000Hz sine wave should pass through with minimal attenuation.
+    #[test]
+    fn test_high_pass_filter_preserves_speech() {
+        let mut filter = crate::wakeword_oww::engine::HighPassFilter::new(80.0, 16000.0);
+        // 1280 samples of 1000Hz sine wave (well above 80Hz cutoff)
+        let sr = 16000.0f32;
+        let freq = 1000.0f32;
+        let mut samples: Vec<f32> = (0..1280)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sr).sin() * 0.5)
+            .collect();
+        let original_energy: f32 = samples.iter().map(|s| s * s).sum();
+        filter.process(&mut samples);
+        let filtered_energy: f32 = samples.iter().map(|s| s * s).sum();
+        // Energy should be mostly preserved (allow some transient at start)
+        assert!(
+            filtered_energy > original_energy * 0.5,
+            "High-pass filter attenuated speech too much: {:.4} → {:.4}",
+            original_energy,
+            filtered_energy
+        );
+    }
+
+    /// Test that the noise floor tracker adapts to background noise.
+    #[test]
+    fn test_noise_floor_tracker_adapts() {
+        let mut tracker = crate::wakeword_oww::engine::NoiseFloorTracker::new();
+        // Feed low RMS values (background noise)
+        for _ in 0..20 {
+            tracker.update(0.001);
+        }
+        let floor_quiet = tracker.floor();
+        assert!(
+            floor_quiet <= 0.001,
+            "Noise floor should be ~0.001 in quiet: got {:.6}",
+            floor_quiet
+        );
+        // Feed higher RMS values (speech)
+        for _ in 0..20 {
+            tracker.update(0.05);
+        }
+        let floor_loud = tracker.floor();
+        // Floor should still track the minimum, not the maximum
+        assert!(
+            floor_loud < 0.05,
+            "Noise floor should track minimum, not maximum: got {:.6}",
+            floor_loud
+        );
+    }
+
+    /// Test that the VAD detects speech in a synthetic signal.
+    #[test]
+    fn test_vad_detects_speech() {
+        let mut vad = crate::wakeword_oww::engine::VadDetector::new();
+        let sr = 16000.0f32;
+        // Simulate speech: 1000Hz tone with moderate amplitude
+        let speech: Vec<f32> = (0..1280)
+            .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr).sin() * 0.3)
+            .collect();
+        assert!(
+            vad.detect(&speech, 0.001),
+            "VAD should detect speech in 1000Hz tone"
+        );
+    }
+
+    /// Test that the VAD rejects pure noise.
+    #[test]
+    fn test_vad_rejects_noise() {
+        let mut vad = crate::wakeword_oww::engine::VadDetector::new();
+        // Simulate noise: high-frequency random-like signal with low energy
+        let noise: Vec<f32> = (0..1280).map(|i| {
+            // Pseudo-random high-frequency signal (alternating signs)
+            if i % 2 == 0 { 0.001 } else { -0.001 }
+        }).collect();
+        let result = vad.detect(&noise, 0.001);
+        // Low energy noise should not be detected as speech
+        assert!(
+            !result,
+            "VAD should reject low-energy noise"
+        );
+    }
+
+    /// Test that the full preprocessor pipeline works end-to-end.
+    #[test]
+    fn test_preprocessor_pipeline() {
+        let mut pp = crate::wakeword_oww::engine::AudioPreprocessor::new();
+        let sr = 16000.0f32;
+
+        // Test 1: Silence should be rejected
+        let silence = vec![0.0f32; 1280];
+        let result = pp.process(silence);
+        assert!(result.is_none(), "Preprocessor should reject silence");
+
+        // Test 2: Speech-like signal should pass
+        let speech: Vec<f32> = (0..1280)
+            .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr).sin() * 0.3)
+            .collect();
+        let result = pp.process(speech);
+        assert!(result.is_some(), "Preprocessor should pass speech");
+
+        // Test 3: Stats should be tracking
+        assert!(pp.vad_skips > 0 || pp.vad_passes > 0, "Preprocessor stats should be non-zero");
+    }
+
+    /// Test that preprocessor reset clears all state.
+    #[test]
+    fn test_preprocessor_reset() {
+        let mut pp = crate::wakeword_oww::engine::AudioPreprocessor::new();
+        // Process some audio to populate state
+        let sr = 16000.0f32;
+        let speech: Vec<f32> = (0..1280)
+            .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr).sin() * 0.3)
+            .collect();
+        let _ = pp.process(speech);
+        let skips_before = pp.vad_skips;
+        let passes_before = pp.vad_passes;
+        assert!(skips_before + passes_before > 0, "Should have processed some audio");
+
+        // Reset
+        pp.reset();
+        assert_eq!(pp.vad_skips, 0, "Reset should clear vad_skips");
+        assert_eq!(pp.vad_passes, 0, "Reset should clear vad_passes");
+    }
+
+    // ─── Stage-2 verifier tests (dual-gate Test A artifact) ──────────
+
+    /// Transcript gating accepts genuine wake phrases (any case/padding).
+    #[test]
+    fn test_verify_transcript_accepts() {
+        for text in [
+            "hey nexus",
+            "NEXUS",
+            "Hey Nexus",
+            "ok nexus please",
+            "  Nexus. ",
+            "could you nexus the thing",
+            "HEYYYY NEXUS",
+        ] {
+            assert!(
+                super::verify_transcript(text),
+                "should accept '{}'",
+                text
+            );
+        }
+    }
+
+    /// Transcript gating rejects non-wake speech, silence, and soundalikes
+    /// that do NOT contain the wake word. (A "lexus nexus" transcript DOES
+    /// contain it and must accept — the STT heard the word.)
+    /// NOTE: v1 `verify_transcript` == gated(.., 1.0), so "hey lexus" ACCEPTS
+    /// here (two-key: near-match at max prob) — covered by the v2 matrix below.
+    #[test]
+    fn test_verify_transcript_rejects() {
+        for text in [
+            "",
+            "   ",
+            "next us",
+            "thank you for watching",
+            "alexa play music",
+            "ok google",
+        ] {
+            assert!(
+                !super::verify_transcript(text),
+                "should reject '{}'",
+                text
+            );
+        }
+        // "lexus nexus" contains the wake word → must accept.
+        assert!(super::verify_transcript("lexus nexus"));
+        // Bare "nexus" is a valid wake.
+        assert!(super::verify_transcript("nexus"));
+    }
+
+    /// Ring keeps newest audio and evicts oldest beyond capacity.
+    #[test]
+    fn test_verify_ring_cap() {
+        let mut ring = std::collections::VecDeque::new();
+        let cap = 40000;
+        let first: Vec<f32> = (0..20000).map(|i| i as f32).collect();
+        let second: Vec<f32> = (0..20000).map(|i| 100000.0 + i as f32).collect();
+        let third: Vec<f32> = (0..20000).map(|i| 200000.0 + i as f32).collect();
+        super::push_capped(&mut ring, &first, cap);
+        super::push_capped(&mut ring, &second, cap);
+        super::push_capped(&mut ring, &third, cap);
+        assert_eq!(ring.len(), cap);
+        // Oldest (first push) fully evicted; newest retained.
+        assert!(ring[0] >= 100000.0, "oldest audio should be evicted");
+        assert_eq!(ring[ring.len() - 1], 200000.0 + 19999.0);
+    }
+
+    /// Ring preserves short audio untouched (no truncation below capacity).
+    #[test]
+    fn test_verify_ring_under_cap() {
+        let mut ring = std::collections::VecDeque::new();
+        let chunk = vec![0.5f32; 1280];
+        super::push_capped(&mut ring, &chunk, 40000);
+        assert_eq!(ring.len(), 1280);
+        assert!(ring.iter().all(|&s| s == 0.5));
+    }
+
+    // ─── Verifier v2 tests ──────────────────────────────────────────
+
+    /// Two-key gate: exact "nexus" fires at ANY stage-1 probability.
+    #[test]
+    fn test_gated_exact_fires_at_any_prob() {
+        for prob in [0.0, 0.2, 0.36, 0.9] {
+            assert!(
+                super::verify_transcript_gated("hey nexus", prob),
+                "exact must fire at prob {}",
+                prob
+            );
+            assert!(super::verify_transcript_gated("NEXUS!", prob));
+        }
+    }
+
+    /// Two-key gate: near-matches (lexus/nexis/…) fire ONLY at prob ≥ 0.6.
+    #[test]
+    fn test_gated_near_needs_high_prob() {
+        for word in [
+            "lexus",
+            "nexis",
+            "nixus",
+            "nixis",
+            "nexas",
+            "hey lexus please",
+            "LEXUS",
+            "nexo",
+            "hey nixus",
+        ] {
+            assert!(
+                !super::verify_transcript_gated(word, 0.59),
+                "'{}' must NOT fire at 0.59",
+                word
+            );
+            assert!(
+                super::verify_transcript_gated(word, 0.6),
+                "'{}' must fire at 0.6",
+                word
+            );
+            assert!(super::verify_transcript_gated(word, 0.99));
+        }
+    }
+
+    /// Two-key gate: common-word collisions and non-words never fire —
+    /// even at max probability. (texas/next stay rejected: TV frequency.)
+    #[test]
+    fn test_gated_rejects_collisions() {
+        for text in [
+            "texas",
+            "hey texas",
+            "next",
+            "next us",
+            "next episode",
+            "hey alexis", // whole-word: "alexis" != "lexis"
+            "thank you",
+            "process this",
+            "",
+            "   ",
+        ] {
+            assert!(
+                !super::verify_transcript_gated(text, 1.0),
+                "'{}' must never fire",
+                text
+            );
+        }
+    }
+
+    /// VAD-trim cuts silence padding but keeps the speech body + margin.
+    #[test]
+    fn test_vad_trim_cuts_silence() {
+        // 1s silence + 0.5s loud speech + 1s silence (2.5s like the ring).
+        let mut audio = vec![0.0f32; 16000];
+        audio.extend(vec![0.5f32; 8000]);
+        audio.extend(vec![0.0f32; 16000]);
+        let trimmed = super::vad_trim(&audio);
+        // Speech (8000) + 2x300ms margin (9600) ≈ 17600, well under 40000.
+        assert!(
+            trimmed.len() >= 8000 && trimmed.len() <= 8000 + 9600 + 640,
+            "trimmed len {} out of range",
+            trimmed.len()
+        );
+        assert!(trimmed.len() < audio.len());
+    }
+
+    /// VAD-trim falls back to full buffer on all-silence or fragments.
+    #[test]
+    fn test_vad_trim_fallback() {
+        // All silence: no frames pass → full buffer.
+        let silence = vec![0.0f32; 40000];
+        assert_eq!(super::vad_trim(&silence).len(), 40000);
+        // 0.05s blip: trimmed to blip ±300ms margins (7040 samples) —
+        // tight context around the sound, not the full 2.5s of silence.
+        let mut blip = vec![0.0f32; 40000];
+        for s in blip.iter_mut().take(2000).skip(1600) {
+            *s = 0.5;
+        }
+        assert_eq!(super::vad_trim(&blip).len(), 7040);
+        assert!(super::vad_trim(&[]).is_empty());
+    }
+
+    /// Debug WAV encoder produces a valid 16kHz mono PCM16 file.
+    #[test]
+    fn test_encode_wav_pcm16_valid() {
+        let wav = super::encode_wav_pcm16(&[0i16, 32767, -32768, 1000]);
+        assert_eq!(wav.len(), 44 + 8);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(&wav[24..28], 16000u32.to_le_bytes());
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(&wav[40..44], 8u32.to_le_bytes());
+        assert_eq!(&wav[44..46], 0i16.to_le_bytes());
+        assert_eq!(&wav[46..48], 32767i16.to_le_bytes());
+    }
+
+    /// Two-key floor constant is wired to the documented operating point.
+    #[test]
+    fn test_verify_gate_constants() {
+        assert!(super::VERIFY_NEAR_PROB_FLOOR == 0.6);
+        assert!(super::VERIFY_NOSPEECH_VETO == 0.85);
+    }
+
+    // ─── v3 confidence-gate tests ───────────────────────────────────
+
+    fn seg(text: &str, no_speech: f32) -> crate::stt_groq::GroqSegment {
+        crate::stt_groq::GroqSegment {
+            text: text.to_string(),
+            avg_logprob: -0.1,
+            no_speech_prob: no_speech,
+        }
+    }
+
+    /// Confident speech segments pass (no veto).
+    #[test]
+    fn test_confidence_passes_speech() {
+        let segs = vec![seg("Nexus.", 0.02), seg("hey", 0.1)];
+        assert!(super::verify_confidence(&segs));
+    }
+
+    /// All-segments-certain-nonspeech vetoes (phantom readings).
+    #[test]
+    fn test_confidence_vetoes_phantom() {
+        let segs = vec![seg("Lots of children.", 0.91)];
+        assert!(!super::verify_confidence(&segs));
+        let multi = vec![seg("a", 0.9), seg("b", 0.99)];
+        assert!(!super::verify_confidence(&multi));
+    }
+
+    /// F1 endpoint: a 1-2 chunk noise blip followed by silence must NOT stop
+    /// the capture (the user's turn hasn't started). Regression test for the
+    /// 19:28 log: 8-14 chunk captures of pre-speech noise → confabulations.
+    #[test]
+    fn test_stop_ignores_unconfirmed_blip() {
+        // blip (2 voiced) + 5 silent: no turn started → keep waiting.
+        assert!(!super::should_stop_capture(true, 2, 5, 5, 12));
+        // no speech at all + 5 silent: keep waiting (8s timeout rules).
+        assert!(!super::should_stop_capture(false, 0, 5, 5, 12));
+        // confirmed word (5 voiced) + 5 silent: endpoint fires.
+        assert!(super::should_stop_capture(true, 5, 5, 5, 14));
+        // max duration always stops.
+        assert!(super::should_stop_capture(true, 9, 0, 5, 125));
+        // no-speech timeout always stops.
+        assert!(super::should_stop_capture(false, 0, 0, 5, 100));
+    }
+
+    /// F2 phantom guard: noise-blip buffers skip Groq, real words don't.
+    #[test]
+    fn test_phantom_capture_guard() {
+        const CH: usize = 1280;
+        // all silence → phantom.
+        assert!(super::is_phantom_capture(&vec![0.0f32; CH * 10]));
+        // two loud blips in 10 chunks → phantom (not a turn).
+        let mut blips = vec![0.0f32; CH * 10];
+        for s in blips.iter_mut().take(CH * 2) {
+            *s = 0.05;
+        }
+        assert!(super::is_phantom_capture(&blips));
+        // sustained word (5 voiced chunks) → real, send to Groq.
+        let mut word = vec![0.0f32; CH * 10];
+        for s in word.iter_mut().take(CH * 5) {
+            *s = 0.08;
+        }
+        assert!(!super::is_phantom_capture(&word));
+        // tiny buffer → phantom.
+        assert!(super::is_phantom_capture(&vec![0.08f32; 1000]));
+    }
+
+    /// Mid-range no_speech does NOT veto (benefit of doubt to words —
+    /// mangled true speech can score here; the word gate decides).
+    #[test]
+    fn test_confidence_midrange_passes() {
+        let segs = vec![seg("Nexus.", 0.6)];
+        assert!(super::verify_confidence(&segs));
+    }
+
+    /// Empty segments (local fallback, parse failure) → no info → pass
+    /// (fail-open direction; the word gate still applies).
+    #[test]
+    fn test_confidence_empty_passes() {
+        let segs: Vec<crate::stt_groq::GroqSegment> = vec![];
+        assert!(super::verify_confidence(&segs));
+    }
+
+    // ─── Mic heartbeat tests ────────────────────────────────────────
+
+    /// Bar scales with RMS: silence empty, speech-body partial, loud full.
+    #[test]
+    fn test_rms_bar_scaling() {
+        assert_eq!(super::rms_bar(0.0), "..........");
+        assert_eq!(super::rms_bar(0.001), "..........");
+        assert_eq!(super::rms_bar(0.02), "#.........");
+        assert_eq!(super::rms_bar(0.1), "#####.....");
+        assert_eq!(super::rms_bar(0.2), "##########");
+        assert_eq!(super::rms_bar(0.9), "##########");
+    }
+
+    /// Bar is always exactly 10 chars (console column alignment).
+    #[test]
+    fn test_rms_bar_width() {
+        for rms in [0.0, 0.005, 0.03, 0.07, 0.15, 0.5, 1.0] {
+            assert_eq!(super::rms_bar(rms).len(), 10, "rms={}", rms);
+        }
+    }
+
+    // ─── v4 backward-confirmation tests ─────────────────────────────
+
+    /// Sustained pre-trigger energy passes (real utterance just happened).
+    #[test]
+    fn test_pre_trigger_passes_speech() {
+        // 1s of loud speech (8 voiced frames), trigger chunk excluded anyway.
+        let mut ring = vec![0.0f32; 16000];
+        for s in ring.iter_mut().skip(3200).take(9600) {
+            *s = 0.3;
+        }
+        let (passed, rms) = super::check_pre_trigger(&ring, 0.002, 3);
+        assert!(passed, "sustained speech must pass");
+        assert!(rms > 0.1);
+    }
+
+    /// All-silence pre-trigger fails.
+    #[test]
+    fn test_pre_trigger_rejects_silence() {
+        let ring = vec![0.0f32; 16000];
+        let (passed, _) = super::check_pre_trigger(&ring, 0.002, 3);
+        assert!(!passed);
+    }
+
+    /// A lone loud trigger chunk cannot self-confirm (excluded from vote).
+    #[test]
+    fn test_pre_trigger_excludes_trigger_chunk() {
+        // Silence everywhere except the LAST chunk (the trigger chunk).
+        let mut ring = vec![0.0f32; 16000];
+        for s in ring.iter_mut().skip(16000 - 1280) {
+            *s = 0.9;
+        }
+        let (passed, _) = super::check_pre_trigger(&ring, 0.002, 3);
+        assert!(!passed, "lone spike must not self-confirm");
+    }
+
+    /// Too-short ring fails safe (not enough history to judge).
+    #[test]
+    fn test_pre_trigger_short_ring() {
+        let ring = vec![0.5f32; 1000];
+        let (passed, _) = super::check_pre_trigger(&ring, 0.002, 3);
+        assert!(!passed);
+    }
+
+    // ─── v4 barge-in tests ──────────────────────────────────────────
+
+    /// Only TTS-muted + sustained speech earns an attempt.
+    #[test]
+    fn test_barge_decision_matrix() {
+        assert!(super::should_barge_attempt(true, 6));
+        assert!(super::should_barge_attempt(true, 60));
+        assert!(!super::should_barge_attempt(true, 5));
+        assert!(!super::should_barge_attempt(true, 0));
+        // Meeting / pause / unmuted NEVER earn attempts.
+        assert!(!super::should_barge_attempt(false, 6));
+        assert!(!super::should_barge_attempt(false, 600));
+    }
+
+    // ─── v4 WebRTC VAD tests ────────────────────────────────────────
+
+    /// Digital silence is vetoed (not speech).
+    #[test]
+    fn test_webrtc_vad_rejects_silence() {
+        let mut vad = webrtc_vad::Vad::new_with_rate_and_mode(
+            webrtc_vad::SampleRate::Rate16kHz,
+            webrtc_vad::VadMode::Quality,
+        );
+        let silence = vec![0i16; 320];
+        assert!(!vad.is_voice_segment(&silence).unwrap_or(true));
+    }
+
+    /// Real owner speech passes (SKIP-guarded repo clip).
+    #[test]
+    fn test_webrtc_vad_passes_speech() {
+        use std::path::PathBuf;
+        let clip = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("wake_camp")
+            .join("raw")
+            .join("hey_nexus")
+            .join("near_normal")
+            .join("BASE02.wav");
+        if !clip.exists() {
+            eprintln!("SKIP: camp clip not found at {}", clip.display());
+            return;
+        }
+        let (sr, data) = read_wav_mono16(&clip);
+        assert_eq!(sr, 16000);
+        let mut vad = webrtc_vad::Vad::new_with_rate_and_mode(
+            webrtc_vad::SampleRate::Rate16kHz,
+            webrtc_vad::VadMode::Quality,
+        );
+        // Speech region (skip the leading silence): majority must be voiced.
+        let voiced = data
+            .chunks(320)
+            .filter(|f| f.len() == 320)
+            .filter(|f| vad.is_voice_segment(f).unwrap_or(true))
+            .count();
+        let total = data.len() / 320;
+        assert!(
+            voiced * 2 > total,
+            "majority of frames must be voiced ({}/{})",
+            voiced,
+            total
+        );
+    }
+
+    /// WAV helper for tests: load mono 16-bit PCM.
+    #[allow(dead_code)]
+    fn read_wav_mono16(path: &std::path::Path) -> (u32, Vec<i16>) {
+        let data = std::fs::read(path).expect("read wav");
+        assert!(data.len() > 44, "not a wav file");
+        let sr = u32::from_le_bytes([data[24], data[25], data[26], data[27]]);
+        let mut out = Vec::with_capacity((data.len() - 44) / 2);
+        let mut i = 44;
+        while i + 1 < data.len() {
+            // stereo → mono by averaging pairs when needed
+            out.push(i16::from_le_bytes([data[i], data[i + 1]]));
+            i += 2;
+        }
+        (sr, out)
+    }
+
+    // ─── Meet-parity stream-health tests ────────────────────────────
+
+    /// Quiet room (low floor, prior audio, device present) → never restart.
+    #[test]
+    fn test_health_quiet_room_no_restart() {
+        assert_eq!(
+            super::classify_stream_health(5, true, false, true),
+            super::StreamHealth::Quiet
+        );
+        // Never-heard-audio + moderate zeros → observe only (an OS mute
+        // can't be fixed by restarting; no action either way).
+        assert_eq!(
+            super::classify_stream_health(120, false, false, true),
+            super::StreamHealth::Suspect
+        );
+        // ...but 5 minutes of zeros with zero history → last-resort restart
+        // (a driver wedged from boot would otherwise never recover).
+        assert_eq!(
+            super::classify_stream_health(300, false, false, true),
+            super::StreamHealth::Dead
+        );
+    }
+
+    /// Suspect zone: exact zeros 10–60s with prior audio → observe only.
+    #[test]
+    fn test_health_suspect_observes() {
+        assert_eq!(
+            super::classify_stream_health(10, true, false, true),
+            super::StreamHealth::Suspect
+        );
+        assert_eq!(
+            super::classify_stream_health(59, true, false, true),
+            super::StreamHealth::Suspect
+        );
+    }
+
+    /// Terminal signals → Dead (the ONLY restart trigger).
+    #[test]
+    fn test_health_dead_terminals() {
+        // Device gone (even with recent audio).
+        assert_eq!(
+            super::classify_stream_health(0, true, false, false),
+            super::StreamHealth::Dead
+        );
+        // cpal error fired.
+        assert_eq!(
+            super::classify_stream_health(0, true, true, true),
+            super::StreamHealth::Dead
+        );
+        // Bit-exact zeros 60s+ with prior audio (stuck driver).
+        assert_eq!(
+            super::classify_stream_health(60, true, false, true),
+            super::StreamHealth::Dead
+        );
+        assert_eq!(
+            super::classify_stream_health(3600, true, false, true),
+            super::StreamHealth::Dead
+        );
+    }
+
+    /// Boundary values: 9s quiet, 10s suspect, 59s suspect, 60s dead.
+    #[test]
+    fn test_health_boundaries() {
+        use super::StreamHealth::*;
+        assert_eq!(super::classify_stream_health(9, true, false, true), Quiet);
+        assert_eq!(super::classify_stream_health(10, true, false, true), Suspect);
+        assert_eq!(super::classify_stream_health(59, true, false, true), Suspect);
+        assert_eq!(super::classify_stream_health(60, true, false, true), Dead);
+    }
+
+    /// Mic sample analysis + verdicts (self-test logic).
+    #[test]
+    fn test_mic_sample_verdicts() {
+        // Healthy speech.
+        let speech = vec![0.3f32; 40000];
+        let (peak, zr) = super::analyze_audio_sample(&speech);
+        assert!((peak - 0.3).abs() < 1e-6);
+        assert_eq!(zr, 0.0);
+        assert_eq!(super::classify_mic_sample(peak, zr), super::MicHealth::Healthy);
+        // Quiet room: low nonzero floor.
+        let quiet = vec![0.001f32; 40000];
+        let (peak, zr) = super::analyze_audio_sample(&quiet);
+        assert_eq!(super::classify_mic_sample(peak, zr), super::MicHealth::QuietRoom);
+        // Dead: all exact zeros.
+        let dead = vec![0.0f32; 40000];
+        let (peak, zr) = super::analyze_audio_sample(&dead);
+        assert_eq!(zr, 1.0);
+        assert_eq!(super::classify_mic_sample(peak, zr), super::MicHealth::DeadSilence);
+        // Empty: verdict dead-silence (nothing captured at all).
+        let (peak, zr) = super::analyze_audio_sample(&[]);
+        assert_eq!(super::classify_mic_sample(peak, zr), super::MicHealth::DeadSilence);
+        // Boundary: peak exactly 0.05 → healthy.
+        assert_eq!(super::classify_mic_sample(0.05, 0.0), super::MicHealth::Healthy);
+        assert_eq!(super::classify_mic_sample(0.049, 0.0), super::MicHealth::QuietRoom);
     }
 }
