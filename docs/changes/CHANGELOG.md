@@ -5,6 +5,13 @@
 
 ---
 
+## CI Windows Streamlining & Rust Compilation Fixes (2026-09-22)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-22 | fix(wake): fixed missing `STREAM_DEAD_ZERO_SECS` / `STREAM_SUSPECT_ZERO_SECS` in mock-wake build; updated `enigo 0.5` key matching in `screen.rs` | [39-ci-windows-streamline-and-rust-compilation-fixes.md](./39-ci-windows-streamline-and-rust-compilation-fixes.md) |
+| — | 2026-09-22 | ci: streamlined GitHub Actions CI to Windows, frontend, and Python validation; eliminated Linux/macOS false failures; fixed PowerShell quote parsing in installer build | [39-ci-windows-streamline-and-rust-compilation-fixes.md](./39-ci-windows-streamline-and-rust-compilation-fixes.md) |
+
 ## Apex Wake Word Evolution, Data Poisoning Quarantine & Adaptive Microphone DSP (2026-09-22)
 
 | Commit | Date | Summary | Details |

@@ -2260,16 +2260,16 @@ static MIC_BATON_PASSED: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 // each restart cost a 10s grace blackout + an SST burst-fade cycle —
 // self-inflicted oscillation proven by log timelines (6 restarts / 4 min).
 /// Exact-zero persistence that means driver death (with prior audio).
-#[cfg(not(feature = "mock-wake"))]
+#[allow(dead_code)]
 const STREAM_DEAD_ZERO_SECS: u64 = 60;
 /// Exact-zero persistence that means "verify, don't execute".
-#[cfg(not(feature = "mock-wake"))]
+#[allow(dead_code)]
 const STREAM_SUSPECT_ZERO_SECS: u64 = 10;
 /// Minimum gap between precautionary restarts (backoff floor).
-#[cfg(not(feature = "mock-wake"))]
+#[allow(dead_code)]
 const STREAM_RESTART_FLOOR_SECS: u64 = 60;
 /// Callback-rate assumption shared with the existing monitor math.
-#[cfg(not(feature = "mock-wake"))]
+#[allow(dead_code)]
 const STREAM_CBK_PER_SEC: u64 = 33;
 
 /// Stream health: Meet's three states (live-muted / muted-by-OS / ended).

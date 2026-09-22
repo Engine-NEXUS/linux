@@ -50,9 +50,8 @@ jobs:
         env:
           NEXUS_SERVER_URL: https://nexus-worker.chitkullakshya.workers.dev
           CARGO_INCREMENTAL: 0
-        # Override beforeBuildCommand to empty string via --config to avoid
-        # path resolution issues in CI (frontend is already built above).
-        run: npx --yes @tauri-apps/cli build --bundles nsis --features custom-protocol --config '{"build":{"beforeBuildCommand":""}}'
+        # Build NSIS installer bundle
+        run: npx --yes @tauri-apps/cli build --bundles nsis --features custom-protocol
 
       - name: Upload Windows Setup Executable (.exe) Artifact
         uses: actions/upload-artifact@v4

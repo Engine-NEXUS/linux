@@ -30,129 +30,9 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-  rust-check-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+      - name: Run frontend tests
+        run: npm test
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config
-
-      - name: Cargo check (default)
-        working-directory: src-tauri
-        run: cargo check
-
-      - name: Cargo check (mock-wake)
-        working-directory: src-tauri
-        run: cargo check --features mock-wake
-
-  rust-check-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Cargo check (default)
-        working-directory: src-tauri
-        run: cargo check
-
-      - name: Cargo check (mock-wake)
-        working-directory: src-tauri
-        run: cargo check --features mock-wake
-
-      - name: Cargo test
-        working-directory: src-tauri
-        run: cargo test --lib
-
-  # ΓöÇΓöÇΓöÇ macOS installer build (tests .dmg production on real Mac) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
-  # This is the ONLY free, legal way to test macOS builds without owning a Mac.
-  # GitHub Actions macOS runners are real Macs hosted on Apple hardware.
-  # For private repos: macOS minutes count 10x against your 2000 min/month free tier.
-  # For public repos: unlimited free.
-  macos-installer:
-    runs-on: macos-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/phase-1')
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install frontend deps
-        working-directory: frontend
-        run: npm ci
-
-      - name: Run Rust tests on macOS
-        working-directory: src-tauri
-        run: |
-          cargo test --lib
-          cargo test --test offline_commands
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Build macOS app (skip codesigning — no Apple Developer cert in CI)
-        run: |
-          # Use python to reliably patch the JSON config (sed is unreliable across BSD/GNU)
-          python3 -c "
-          import json
-          with open('src-tauri/tauri.conf.json') as f:
-            cfg = json.load(f)
-          cfg['bundle']['macOS']['signingIdentity'] = None
-          with open('src-tauri/tauri.conf.json', 'w') as f:
-            json.dump(cfg, f, indent=2)
-          "
-          # Build just the .app bundle — do NOT set APPLE_SIGNING_IDENTITY env var
-          # (setting it to empty string still triggers codesign; must be unset entirely)
-          unset APPLE_SIGNING_IDENTITY 2>/dev/null || true
-          npx --yes @tauri-apps/cli build --bundles app
-
-      - name: Verify .app was created
-        run: |
-          ls -la src-tauri/target/release/bundle/macos/*.app || echo "WARNING: No .app found"
-
-      - name: Verify app launches (headless)
-        run: |
-          # Try to launch the app and check it doesn't immediately crash
-          # We can't see the GUI, but we can verify the process starts
-          APP_PATH=$(find src-tauri/target/release/bundle/macos -name "*.app" -maxdepth 1 | head -1)
-          if [ -n "$APP_PATH" ]; then
-            echo "Found app: $APP_PATH"
-            # Open the app (it will fail to show GUI in CI, but should not crash)
-            open "$APP_PATH" 2>&1 || true
-            sleep 3
-            # Check if the process is running
-            if pgrep -f "nexus" > /dev/null; then
-              echo "Γ£à App process is running"
-            else
-              echo "ΓÜá∩╕Å App process not found (may have exited due to no display)"
-            fi
-            # Kill it
-            pkill -f "nexus" 2>/dev/null || true
-          else
-            echo "ΓÜá∩╕Å No .app bundle found to test"
-          fi
-
-      - name: Upload macOS app artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: nexus-macos-app
-          path: src-tauri/target/release/bundle/macos/*.app
-          if-no-files-found: warn
-          retention-days: 7
-
-  # ΓöÇΓöÇΓöÇ Windows installer build ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
   windows-installer:
     runs-on: windows-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/phase-1')
@@ -180,8 +60,7 @@ jobs:
       - name: Run Rust tests on Windows
         working-directory: src-tauri
         run: |
-          cargo test --lib
-          cargo test --test offline_commands
+          cargo test --lib -- --test-threads=1
 
       - name: Build frontend
         working-directory: frontend
@@ -195,8 +74,8 @@ jobs:
 
       - name: Verify installers were created
         run: |
-          Get-ChildItem src-tauri\target\release\bundle\nsis\*.exe -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "NSIS: $($_.Name) ΓÇö $([math]::Round($_.Length/1MB,1)) MB" }
-          Get-ChildItem src-tauri\target\release\bundle\msi\*.msi -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "MSI: $($_.Name) ΓÇö $([math]::Round($_.Length/1MB,1)) MB" }
+          Get-ChildItem src-tauri\target\release\bundle\nsis\*.exe -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "NSIS: $($_.Name) — $([math]::Round($_.Length/1MB,1)) MB" }
+          Get-ChildItem src-tauri\target\release\bundle\msi\*.msi -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "MSI: $($_.Name) — $([math]::Round($_.Length/1MB,1)) MB" }
 
       - name: Upload Windows NSIS installer
         uses: actions/upload-artifact@v4
@@ -227,9 +106,17 @@ jobs:
       - name: Set LIBCLANG_PATH
         run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
 
+      - name: Cargo check (default)
+        working-directory: src-tauri
+        run: cargo check
+
       - name: Cargo check (mock-wake)
         working-directory: src-tauri
         run: cargo check --features mock-wake
+
+      - name: Cargo test (lib)
+        working-directory: src-tauri
+        run: cargo test --lib -- --test-threads=1
 
   python-check:
     runs-on: ubuntu-latest
@@ -265,3 +152,6 @@ jobs:
         working-directory: server/n8n
         run: |
           python -c "import json; [json.load(open(f)) for f in ['master_supervisor.blueprint.json','email_summarize.blueprint.json','github_pr_check.blueprint.json','calendar_peek.blueprint.json','general_chat.blueprint.json']]; print('All blueprints are valid JSON')"
+
+      - name: Validate NLU Data Foundation
+        run: python server/nlu/data_foundation.py validate

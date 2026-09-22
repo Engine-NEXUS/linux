@@ -166,15 +166,15 @@ pub fn switch_browser_tab(index: u32) -> Result<String, String> {
         .key(Key::Control, Direction::Press)
         .map_err(|e| format!("ctrl press: {e}"))?;
     let digit = match index {
-        1 => Key::Num1,
-        2 => Key::Num2,
-        3 => Key::Num3,
-        4 => Key::Num4,
-        5 => Key::Num5,
-        6 => Key::Num6,
-        7 => Key::Num7,
-        8 => Key::Num8,
-        _ => Key::Num9,
+        1 => Key::Unicode('1'),
+        2 => Key::Unicode('2'),
+        3 => Key::Unicode('3'),
+        4 => Key::Unicode('4'),
+        5 => Key::Unicode('5'),
+        6 => Key::Unicode('6'),
+        7 => Key::Unicode('7'),
+        8 => Key::Unicode('8'),
+        _ => Key::Unicode('9'),
     };
     let r = enigo
         .key(digit, Direction::Click)
