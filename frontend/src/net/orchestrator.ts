@@ -21,6 +21,7 @@ import { useAssistant } from "../store/assistant";
 import { speak, stopTts } from "../audio/ttsPlayer";
 import { useSidebar } from "../sidebar/sidebarStore";
 import { clearLongRunningInFlight, isLocalAckGiven } from "./wsBridge";
+import { invoke } from "@tauri-apps/api/core";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -406,8 +407,6 @@ export async function processViaOrchestrator(
 ): Promise<{ request_id: string; subsystem: string; handled_locally: boolean } | null> {
   if (!isTauri()) return null;
 
-  const { invoke } = await import("@tauri-apps/api/core");
-
   // ─── Confirmation flow ───
   // If there's a pending command awaiting confirmation, check if
   // the user said "yes"/"approved"/"proceed" (confirm) or "no"/"cancel" (abort).
@@ -522,7 +521,6 @@ export async function processViaOrchestrator(
 /** Cancel the active orchestrator request (barge-in / new wake). */
 export async function cancelOrchestrator(): Promise<void> {
   if (!isTauri()) return;
-  const { invoke } = await import("@tauri-apps/api/core");
   try {
     await invoke("orchestrator_cancel");
     stopTts();
@@ -535,7 +533,6 @@ export async function cancelOrchestrator(): Promise<void> {
 /** Signal that a request is done (called after TTS finishes). */
 export async function signalOrchestratorDone(requestId: string): Promise<void> {
   if (!isTauri()) return;
-  const { invoke } = await import("@tauri-apps/api/core");
   try {
     await invoke("orchestrator_done", { requestId });
   } catch (err) {
