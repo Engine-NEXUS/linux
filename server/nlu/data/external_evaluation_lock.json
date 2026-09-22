@@ -13,7 +13,7 @@
       "id": "clinc150_oos_reviewed_test",
       "path": "server/nlu/data/evaluation/clinc150_oos_reviewed_test.jsonl",
       "rows": 852,
-      "sha256": "df631459aaaaaba9dfbedb86b78e5f4915677abe5abba0e0aad8400fa337e042",
+      "sha256": "908a794770d82780456c2039cddbc0ec89c1b28003d348192f4efcea38c91cef",
       "never_train": true,
       "mapping_version": "clinc-nexus-capability-v1"
     },
@@ -21,7 +21,7 @@
       "id": "clinc150_supported_mappings",
       "path": "server/nlu/data/evaluation/clinc150_supported_mappings.jsonl",
       "rows": 5,
-      "sha256": "ee117a88a7585b2c754a64ff33fa867de7a49ac069ecc96139814338df634844",
+      "sha256": "f77baf64775c687a273214abd4d04584198d870bfea8e6c79db40037a4d0060c",
       "never_train": true,
       "mapping_version": "clinc-nexus-capability-v1"
     }
