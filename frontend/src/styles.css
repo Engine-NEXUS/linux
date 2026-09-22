@@ -65,6 +65,14 @@ html, body {
   animation: pulse-speak 0.5s ease-in-out infinite;
 }
 
+/* Waiting: orb holds its frame with a steady glow (no pulse) while it
+   waits on the user with no audio — e.g. after a confirm prompt ends.
+   Distinct from both the speaking pulse and a dead/frozen orb. */
+.avatar-wrap--waiting {
+  animation: none;
+  filter: drop-shadow(0 0 18px rgba(120, 180, 255, 0.65));
+}
+
 @keyframes pulse-think {
   0%, 100% { transform: scale(1); }
   50% { transform: scale(1.08); }

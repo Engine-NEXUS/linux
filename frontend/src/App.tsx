@@ -27,6 +27,9 @@ export default function App() {
   //   - error handling
   useEffect(() => {
     void initOrchestratorListener();
+    void import("./audio/ttsActivity").then(({ initTtsActivityListener }) =>
+      initTtsActivityListener(),
+    );
   }, []);
 
   // 8-second auto-hide: if user doesn't respond while listening, slide back down.
@@ -48,6 +51,41 @@ export default function App() {
     return () => clearTimeout(t);
   }, [visible, state]);
 
+  // Speaking failsafe: if TTS ends (or dies) without firing onEnd, the
+  // orb would park in `speaking` with the loading-loop animation forever.
+  // If 60s pass in `speaking` with no audio actually playing, force the
+  // same reset the `done` handler performs. Genuinely long replies (audio
+  // still playing) re-arm instead of cutting.
+  useEffect(() => {
+    if (state !== "speaking") return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const arm = () => {
+      timer = setTimeout(() => {
+        timer = null;
+        if (cancelled || useAssistant.getState().state !== "speaking") return;
+        import("./audio/ttsPlayer")
+          .then(({ isRustTtsPlaying }) => {
+            if (cancelled || useAssistant.getState().state !== "speaking") return;
+            if (isRustTtsPlaying()) {
+              arm(); // long reply still playing — wait another 60s
+              return;
+            }
+            console.warn("[NEXUS] speaking failsafe: silent 60s, forcing reset");
+            const s = useAssistant.getState();
+            s.setLoadingVisible(false);
+            s.setVisible(true);
+            setTimeout(() => useAssistant.getState().reset(), 550);
+          })
+          .catch(() => {});
+      }, 60000);
+    };
+    arm();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [state]);
   // Native orb window visibility — only depends on `visible` (the orb).
   // The loading animation is now in a SEPARATE Tauri window, so hiding the
   // orb window does NOT affect the loading window.

@@ -14,56 +14,11 @@ sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 OUTPUT_DIR = Path(__file__).parent / "model"
 ONNX_PATH = OUTPUT_DIR / "nexus_nlu.onnx"
 
-INTENTS = [
-    # Local commands (12)
-    "open_app", "open_url", "close_app", "whatsapp_chat", "open_architect",
-    "open_settings", "search", "media_play_pause", "media_next",
-    "media_previous", "media_stop", "greeting",
-    # Analysis commands (4)
-    "analyse_repo", "analyse_pr", "analyse_latest_pr", "check_branch",
-    # GitHub PR operations (10)
-    "merge_pr", "approve_pr", "close_pr", "list_prs", "get_pr", "create_pr",
-    "update_branch", "revert_pr", "list_pr_files", "comment_pr",
-    # GitHub collaborator/org (6)
-    "add_collaborator", "remove_collaborator", "list_collaborators",
-    "add_org_member", "remove_org_member", "list_org_members",
-    # GitHub branch/release/workflow (8)
-    "delete_branch", "list_branches", "create_release", "list_releases",
-    "list_workflows", "list_workflow_runs", "rerun_workflow", "cancel_workflow",
-    # Live mode commands (11) — NEW
-    "type_text", "press_key", "press_hotkey", "confirm_send", "cancel_action",
-    "browser_new_tab", "browser_navigate", "browser_search",
-    "whatsapp_open", "whatsapp_search", "focus_app",
-    # Fallback (1)
-    "unknown",
-]
-
-SLOT_TYPES = [
-    "O",
-    "B-app_name", "I-app_name",
-    "B-url", "I-url",
-    "B-contact", "I-contact",
-    "B-query", "I-query",
-    "B-repo", "I-repo",
-    "B-owner", "I-owner",
-    "B-pr_number", "I-pr_number",
-    "B-author", "I-author",
-    "B-username", "I-username",
-    "B-org", "I-org",
-    "B-branch", "I-branch",
-    "B-release_tag", "I-release_tag",
-    "B-workflow_id", "I-workflow_id",
-    "B-title", "I-title",
-    "B-head", "I-head",
-    "B-base", "I-base",
-    "B-body", "I-body",
-    "B-greeting_type", "I-greeting_type",
-    # Live mode slots (NEW)
-    "B-text", "I-text",
-    "B-key", "I-key",
-    "B-keys", "I-keys",
-    "B-target", "I-target",
-]
+# Single source of truth: labels live in train.py. Duplicating them here
+# once shipped a 52-class ONNX over a 55-class checkpoint (shape mismatch).
+# Import, don't copy.
+sys.path.insert(0, str(Path(__file__).parent))
+from train import INTENTS, SLOT_TYPES  # noqa: E402
 
 
 class JointNLUModel(nn.Module):

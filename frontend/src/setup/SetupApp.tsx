@@ -100,7 +100,7 @@ export function SetupApp() {
     if (step === 3) checkServer();
   }, [step, checkServer]);
 
-  const handleConnect = async (provider: "google" | "github") => {
+  const handleConnect = async (provider: "google" | "github" | "swiggy") => {
     // Fallback: if serverUrl hasn't loaded yet, try loading it now
     let url = serverUrl;
     if (!url) {

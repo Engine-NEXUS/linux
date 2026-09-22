@@ -1,0 +1,102 @@
+augmentation_batch_size: 16
+augmentation_rounds: 5
+background_paths:
+- /kaggle/working/audioset_16k
+background_paths_duplication_rate:
+- 1
+batch_n_per_class:
+  ACAV100M_sample: 1024
+  adversarial_negative: 50
+  positive: 50
+custom_negative_phrases:
+- nexus
+- neck us
+- next us
+- nexus dot
+- hey nexus
+- nexus prime
+- nexus one
+- nexus phone
+- next
+- necklace
+- lexus
+- nervous
+- focus
+- because
+- thus
+- us
+- plus
+- bonus
+- hey siri
+- ok google
+- alexa
+- hey alexa
+- hey cortana
+- computer
+- jarvis
+- hey jarvis
+- linux
+- windows
+- macos
+- unix
+- docker
+- kubernetes
+- nexus repository
+- sonatype
+- breakfast
+- text us
+- send us
+- help us
+- let us
+- met us
+- net us
+- get us
+- next one
+- next two
+- next three
+- next command
+- next file
+- next line
+- what next
+- who next
+- go next
+- show next
+- find next
+- search next
+- open next
+- annex us
+- axis
+- taxi us
+- maximus
+- prometheus
+- thus us
+- status
+- check this
+- fix this
+- text this
+- send this
+- copy this
+- paste this
+false_positive_validation_data_path: /kaggle/working/validation_set_features.npy
+feature_data_files:
+  ACAV100M_sample: /kaggle/working/openwakeword_features_ACAV100M_2000_hrs_16bit.npy
+layer_size: 128
+max_negative_weight: 3000
+model_name: nexus
+model_type: dnn
+n_samples: 2000
+n_samples_val: 200
+output_dir: /kaggle/working/nexus_model
+piper_sample_generator_path: /kaggle/working/piper-sample-generator
+rir_paths:
+- /kaggle/working/mit_rirs
+steps: 100000
+target_accuracy: 0.9
+target_false_positives_per_hour: 0.1
+target_phrase:
+- nexus
+- hey nexus
+target_recall: 0.85
+tts_batch_size: 50
+validation_feature_data_files:
+- /kaggle/working/validation_set_features.npy

@@ -813,6 +813,174 @@ function cmdCollect() {
   run(py, [collectScript, ...extraArgs], { cwd: ROOT });
 }
 
+/// Verify every registered MCP server end to end (read-only, no sends).
+/// Registry check + reachability probe + one read-only tool call +
+/// one expected failure per server. Exit 0 only if all are reachable.
+/// Contributors run: nexus mcp check
+function cmdMcpCheck() {
+  const checkScript = join(ROOT, "scripts", "mcp_check.py");
+  if (!existsSync(checkScript)) {
+    err("MCP check script not found: " + checkScript);
+    process.exit(1);
+  }
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+  run(py, [checkScript], { cwd: ROOT });
+}
+
+/// Inspect training dataset category coverage, voice sample health, and targeted recommendations.
+/// Contributors run: nexus stats
+function cmdStats() {
+  const statsScript = join(ROOT, "scripts", "nlu_stats.py");
+  if (!existsSync(statsScript)) {
+    err("NLU stats script not found: " + statsScript);
+    process.exit(1);
+  }
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+  const extraArgs = process.argv.slice(3);
+  run(py, [statsScript, ...extraArgs], { cwd: ROOT });
+}
+
+/// Record wake word audio samples or view wake dataset statistics.
+/// Examples:
+///   nexus wake record 300
+///   nexus wake record positive 300
+///   nexus wake record negative 100
+///   nexus wake stats
+function cmdWake() {
+  const wakeScript = join(ROOT, "scripts", "record_wake_samples.py");
+  if (!existsSync(wakeScript)) {
+    err("Wake recorder script not found: " + wakeScript);
+    process.exit(1);
+  }
+
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+
+  // Check audio recording dependencies
+  info("Checking wake word recording dependencies (sounddevice, numpy, scipy)...");
+  const depCheck = spawnSync(py, ["-c", "import sounddevice; import numpy; import scipy; print('ok')"], {
+    encoding: "utf-8",
+  });
+  if (depCheck.stdout?.trim() !== "ok") {
+    info("Installing audio recording dependencies...");
+    run(py, ["-m", "pip", "install", "sounddevice", "numpy", "scipy"], {
+      allowFail: true,
+      hint: "If pip fails, create a venv: python -m venv .venv && activate it",
+    });
+  } else {
+    ok("Audio recording dependencies OK");
+  }
+
+  const sub = process.argv[3]?.toLowerCase();
+  let args = [];
+
+  if (sub === "probe" || sub === "calibrate") {
+    const probeScript = join(ROOT, "scripts", "probe_microphone.py");
+    if (!existsSync(probeScript)) {
+      err("Probe script not found: " + probeScript);
+      process.exit(1);
+    }
+    info("Starting microphone hardware acoustic prober...");
+    run(py, [probeScript], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "test" || sub === "live" || sub === "benchmark") {
+    const testScript = join(ROOT, "scripts", "test_wake_live.py");
+    if (!existsSync(testScript)) {
+      err("Test script not found: " + testScript);
+      process.exit(1);
+    }
+    const testArgs = process.argv.slice(4);
+    if (sub === "benchmark" && !testArgs.includes("--batch")) {
+      testArgs.push("--batch");
+    }
+    info("Starting wake word live tester / benchmark...");
+    run(py, [testScript, ...testArgs], { cwd: ROOT });
+    return;
+  }
+
+  if (!sub || sub === "record") {
+    // Default to positive 300 if no extra arg, or check if next arg is a number/mode
+    const nextArg = process.argv[4];
+    const thirdArg = process.argv[5];
+    if (!nextArg) {
+      args = ["positive", "300"];
+    } else if (!isNaN(Number(nextArg))) {
+      args = ["positive", nextArg];
+    } else if (["positive", "negative", "free", "background"].includes(nextArg.toLowerCase())) {
+      args = [nextArg.toLowerCase(), thirdArg || "300"];
+    } else {
+      args = [nextArg, thirdArg || "300"];
+    }
+  } else if (["positive", "negative", "free", "background", "stats"].includes(sub)) {
+    args = process.argv.slice(3);
+  } else {
+    err(`Unknown wake sub-command: ${sub}`);
+    info("Usage:");
+    info("  nexus wake probe                 (probe microphone hardware & calibrate acoustic profile)");
+    info("  nexus wake test                  (real-time microphone listening test)");
+    info("  nexus wake test --batch          (benchmark model against all dataset WAVs)");
+    info("  nexus wake record 300            (record 300 positive wake words)");
+    info("  nexus wake record negative 100   (record 100 negative soundalikes)");
+    info("  nexus wake stats                 (show sample counts & size)");
+    process.exit(1);
+  }
+
+  info(`Starting wake recorder: ${args.join(" ")}...`);
+  run(py, [wakeScript, ...args], { cwd: ROOT });
+}
+
+function cmdData() {
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+
+  const area = process.argv[3];
+  const action = process.argv[4] || "validate";
+  if (area === "nlu") {
+    if (action === "import-clinc") {
+      const importer = join(ROOT, "server", "nlu", "import_clinc150.py");
+      run(py, [importer, ...process.argv.slice(5)], { cwd: ROOT });
+      return;
+    }
+    const script = join(ROOT, "server", "nlu", "data_foundation.py");
+    const allowed = new Set(["validate", "freeze-evaluation"]);
+    if (!allowed.has(action)) {
+      err(`Unknown NLU data action: ${action}`);
+      process.exit(1);
+    }
+    run(py, [script, action, ...process.argv.slice(5)], { cwd: ROOT });
+    return;
+  }
+  if (area === "wake") {
+    const script = join(ROOT, "scripts", "wake_data_foundation.py");
+    const mappedAction = action === "fingerprint" ? "fingerprint-models" : action;
+    const allowed = new Set(["validate", "fingerprint-models"]);
+    if (!allowed.has(mappedAction)) {
+      err(`Unknown wake data action: ${action}`);
+      process.exit(1);
+    }
+    run(py, [script, mappedAction, ...process.argv.slice(5)], { cwd: ROOT });
+    return;
+  }
+  err("Usage: nexus data <nlu|wake> <validate|freeze-evaluation|import-clinc|fingerprint>");
+  process.exit(1);
+}
+
 function cmdHelp() {
   console.log(`
 ${C.bold}NEXUS — Unified Cross-Platform Developer Command${C.reset}
@@ -833,6 +1001,10 @@ ${C.cyan}Commands:${C.reset}
   ${C.green}train${C.reset}    Retrain the BERT-Mini NLU model (clean → generate → train → export)
   ${C.green}audit${C.reset}    Audit NLU data/model quality, coverage, leakage, slots, and OOS behavior
   ${C.green}collect${C.reset}  Collect real voice samples for NLU training (speak phrases → transcribe → save)
+  ${C.green}wake${C.reset}     Record wake word audio samples for wake model training (nexus wake record 300)
+  ${C.green}stats${C.reset}    Inspect dataset category coverage, voice health, and training recommendations
+  ${C.green}data${C.reset}     Validate NLU provenance/evaluation locks and wake data/model manifests
+  ${C.green}mcp check${C.reset} Verify every registered MCP server end to end (read-only, no sends)
   ${C.green}help${C.reset}     Show this help
 
 ${C.cyan}Examples:${C.reset}
@@ -841,8 +1013,13 @@ ${C.cyan}Examples:${C.reset}
   ${IS_WIN ? "nexus" : "./nexus"} dev         # develop with hot reload
   ${IS_WIN ? "nexus" : "./nexus"} build       # rebuild after changes
   ${IS_WIN ? "nexus" : "./nexus"} train       # retrain the NLU model with new data
+  ${IS_WIN ? "nexus" : "./nexus"} stats       # inspect dataset coverage & weakest categories
   ${IS_WIN ? "nexus" : "./nexus"} audit       # audit the current NLU dataset and ONNX model
   ${IS_WIN ? "nexus" : "./nexus"} collect     # speak phrases → save real voice samples for training
+  ${IS_WIN ? "nexus" : "./nexus"} wake record 300 # record 300 real wake word samples ("NEXUS")
+  ${IS_WIN ? "nexus" : "./nexus"} wake stats  # inspect wake word audio dataset statistics
+  ${IS_WIN ? "nexus" : "./nexus"} data nlu validate
+  ${IS_WIN ? "nexus" : "./nexus"} data wake validate
 
 ${C.cyan}Environment:${C.reset}
   NEXUS_SERVER_URL   Cloudflare Worker URL (default: baked at build time)
@@ -874,6 +1051,16 @@ switch (command) {
   case "train":   cmdTrain(); break;
   case "audit":   cmdAudit(); break;
   case "collect": cmdCollect(); break;
+  case "wake":    cmdWake(); break;
+  case "stats":
+  case "status":
+  case "coverage":
+    cmdStats(); break;
+  case "mcp":
+    if (process.argv[3] === "check") { cmdMcpCheck(); break; }
+    err("Usage: nexus mcp check");
+    process.exit(1);
+  case "data":    cmdData(); break;
   case "help":
   case "--help":
   case "-h":

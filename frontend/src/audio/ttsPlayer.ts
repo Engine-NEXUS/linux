@@ -196,7 +196,49 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
   const voiceId = settings?.edgeTtsVoice || "en-US-AvaNeural";
   const speed = settings?.speechRate ?? 1.15;
 
-  return playKokoro(text, voiceId, speed, myGen, onEnd);
+  // Sentence-streamed speech for long results: synthesize + play the first
+  // sentence while later ones still generate (first audio in ~300ms instead
+  // of after full synthesis). Short texts go direct — identical behavior.
+  // Barge-in safe: playKokoro checks the generation per chunk, so a stop
+  // mid-queue silences the rest. Periods only split on whitespace so
+  // decimals ("3.14") and versions stay whole.
+  const chunks = splitForSpeech(text);
+  if (chunks.length <= 1) {
+    return playKokoro(text, voiceId, speed, myGen, onEnd);
+  }
+  for (let i = 0; i < chunks.length; i++) {
+    if (ttsGeneration !== myGen) {
+      console.log("[TTS] streamed speak stopped — barge-in");
+      return;
+    }
+    const last = i === chunks.length - 1;
+    await playKokoro(chunks[i], voiceId, speed, myGen, last ? onEnd : undefined);
+  }
+}
+
+/**
+ * Split long text into speakable sentence chunks. Short text returns
+ * a single chunk (no behavior change). Long punctuation-free stretches
+ * force-flush at ~400 chars so audio never stalls.
+ */
+export function splitForSpeech(text: string): string[] {
+  const trimmed = text.trim();
+  if (trimmed.length < 150) return [trimmed];
+  const parts = trimmed.match(/[^.!?…]+[.!?…]+(\s+|$)|[^.!?…]+$/g);
+  const sentences = (parts ?? [trimmed]).map((s) => s.trim()).filter(Boolean);
+  const chunks: string[] = [];
+  let buf = "";
+  const flush = () => {
+    if (buf.trim()) chunks.push(buf.trim());
+    buf = "";
+  };
+  for (const s of sentences) {
+    if ((buf + " " + s).trim().length > 400) flush();
+    buf = buf ? buf + " " + s : s;
+    if (/[.!?…]$/.test(s.trim())) flush();
+  }
+  flush();
+  return chunks.length ? chunks : [trimmed];
 }
 
 /**
@@ -217,6 +259,7 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
 
   const myGen = ttsGeneration;
   rustTtsPlaying = true;
+  void emitTtsEvent("tts-started");
   try {
     await invoke("speak_cached", { text: phrase });
     if (ttsGeneration !== myGen) return;
@@ -225,9 +268,11 @@ export async function speakCached(phrase: string, onEnd?: () => void): Promise<v
     // Fallback to regular speak if cached phrase not available
     console.warn("[TTS] speak_cached failed, falling back to speak:", e);
     rustTtsPlaying = false;
+    void emitTtsEvent("tts-ended");
     return speak(phrase, onEnd);
   } finally {
     rustTtsPlaying = false;
+    void emitTtsEvent("tts-ended");
   }
 }
 

@@ -78,7 +78,7 @@ let unlistenDeepLink: UnlistenFn | null = null;
  * Returns a promise that resolves when the OAuth flow completes (or rejects on error/timeout).
  */
 export async function connectOAuth(
-  provider: "google" | "github",
+  provider: "google" | "github" | "swiggy",
   userId: string,
   onBrowserOpened?: () => void,
 ): Promise<boolean> {

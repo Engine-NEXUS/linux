@@ -20,7 +20,7 @@ import {
  * Overwrites on each save (std::fs::write).
  */
 
-type Tab = "display" | "audio" | "auth";
+type Tab = "display" | "audio" | "auth" | "connections";
 
 interface Settings {
   autostart: boolean;
@@ -48,6 +48,12 @@ interface Settings {
   orbSize?: number;
   // Gemini API key (Phase 3)
   geminiApiKey?: string;
+  // Cerebras API key (9Router — fastest free provider, ~80ms)
+  cerebrasApiKey?: string;
+  // Moonshine STT model (medium_streaming=6.65% WER, small_streaming=7.84%)
+  moonshineModel?: string;
+  // Telegram owner chat id (remote bridge; token lives in vault)
+  telegramChatId?: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -74,12 +80,16 @@ const DEFAULT_SETTINGS: Settings = {
   orbVerticalPct: 1.0,
   orbSize: 200,
   geminiApiKey: "",
+  cerebrasApiKey: "",
+  moonshineModel: "medium_streaming",
+  telegramChatId: "",
 };
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "display", label: "Display" },
   { id: "audio", label: "Audio" },
   { id: "auth", label: "Accounts" },
+  { id: "connections", label: "Connections" },
 ];
 
 export function SettingsSidebarApp() {
@@ -193,6 +203,7 @@ export function SettingsSidebarApp() {
         {tab === "display" && <DisplayTab settings={settings} update={update} />}
         {tab === "audio" && <AudioTab settings={settings} update={update} />}
         {tab === "auth" && <AuthTab settings={settings} update={update} />}
+        {tab === "connections" && <ConnectionsTab settings={settings} update={update} />}
       </div>
 
       {/* Footer */}
@@ -447,6 +458,23 @@ function AudioTab({ settings, update }: {
             />
           </div>
         </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Moonshine model</div>
+            <div className="setting-desc">Local STT accuracy vs RAM tradeoff</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.moonshineModel ?? "medium_streaming"}
+              onChange={(e) => update("moonshineModel", e.target.value)}
+            >
+              <option value="medium_streaming">Medium v2 (245M, 6.65% WER, ~400MB)</option>
+              <option value="small_streaming">Small v2 (123M, 7.84% WER, ~300MB)</option>
+              <option value="tiny_streaming">Tiny (34M, 12% WER, ~100MB)</option>
+            </select>
+          </div>
+        </div>
       </div>
     </>
   );
@@ -592,6 +620,263 @@ function AuthTab({ settings, update }: {
             onChange={(e) => update("groqApiKey", e.target.value)}
           />
         </div>
+
+        <div className="auth-card">
+          <div className="auth-card-header">
+            <span className="auth-card-title">Cerebras API Key</span>
+          </div>
+          <input
+            type="password"
+            className="settings-input"
+            placeholder="csk-..."
+            value={settings.cerebrasApiKey ?? ""}
+            onChange={(e) => update("cerebrasApiKey", e.target.value)}
+          />
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ─── Connections Tab (MCP vault — one login per service group) ──────
+// Each card shows vault status (live/expired/missing) with Reconnect +
+// Delete. Google reconnects via OAuth (Accounts tab flow writes the token
+// into the vault on next MCP call); token services paste a key directly.
+// Session bridges (WhatsApp/LinkedIn) show bridge health + instructions.
+const VAULT_META: Record<string, { title: string; hint: string; kind: "oauth" | "token" | "session"; tokenUrl?: string }> = {
+  google: { title: "Google (Gmail, Calendar, Contacts, Drive, Sheets, Meet)", hint: "One OAuth login covers all six. Reconnect in Accounts tab, then Delete here only clears the local copy.", kind: "oauth" },
+  telegram: { title: "Telegram remote (owner-only phone control)", hint: "Create a bot via @BotFather, paste its token below, then put your chat id (from @userinfobot) in the Owner chat id field and press Save + restart.", kind: "token" },
+  swiggy: { title: "Swiggy (Food, Instamart, Dineout)", hint: "One OAuth login covers all three. Login opens your browser; NEXUS stores and refreshes the token. A pasted token works too.", kind: "token" },
+  spotify: { title: "Spotify", hint: "1. Open the Spotify dashboard (button below). 2. Create a token with user-read scope. 3. Paste it here.", kind: "token", tokenUrl: "https://developer.spotify.com/dashboard" },
+  vercel: { title: "Vercel", hint: "1. Open Vercel account settings (button below). 2. Create a token (read-only recommended). 3. Paste it here.", kind: "token", tokenUrl: "https://vercel.com/account/tokens" },
+  render: { title: "Render", hint: "1. Open Render API keys (button below). 2. Create a key. 3. Paste it here. OAuth preferred — keys are broadly scoped.", kind: "token", tokenUrl: "https://dashboard.render.com/u/keys" },
+};
+
+function ConnectionsTab({ settings, update }: {
+  settings: Settings;
+  update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
+}) {
+  const [vault, setVault] = useState<Record<string, string>>({});
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [swiggyConnecting, setSwiggyConnecting] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const entries = await invoke<{ service: string; status: string }[]>("vault_status");
+      const map: Record<string, string> = {};
+      for (const e of entries) map[e.service] = e.status;
+      setVault(map);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => { refresh().catch(() => {}); }, [refresh]);
+
+  // Live refresh when the idle vault monitor reports a credential change
+  // (expiry/reconnect while the tab is open).
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlisten = await listen<string>("vault:changed", () => {
+        refresh().catch(() => {});
+      });
+    })();
+    return () => { unlisten?.(); };
+  }, [refresh]);
+
+  const handleSave = async (service: string) => {
+    setError(null);
+    try {
+      await invoke("vault_set_token", { service, token: drafts[service] ?? "", expiresInSecs: 0 });
+      setDrafts((d) => ({ ...d, [service]: "" }));
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleDelete = async (service: string) => {
+    setError(null);
+    try {
+      await invoke("vault_clear_token", { service });
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Swiggy OAuth: browser login → Worker stores + refreshes server-side;
+  // the vault pulls a fresh token on next use (or the user pastes one).
+  const handleSwiggyLogin = async () => {
+    setError(null);
+    setSwiggyConnecting(true);
+    try {
+      if (!settings.serverUrl) throw new Error("Server URL not configured");
+      setSidecarBaseUrl(settings.serverUrl);
+      await connectOAuth("swiggy", settings.userId || "local-user");
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSwiggyConnecting(false);
+    }
+  };
+
+  const badge = (status?: string) => (
+    <span className={`status-badge ${status === "live" ? "status-badge--connected" : "status-badge--disconnected"}`}>
+      {status === "live" ? "Live" : status === "expired" ? "Expired" : "Missing"}
+    </span>
+  );
+
+  return (
+    <>
+      {error && (
+        <div className="auth-card" style={{ borderColor: "rgba(255,80,80,0.3)" }}>
+          <span style={{ fontSize: 12, color: "rgba(255,150,150,0.9)" }}>{error}</span>
+        </div>
+      )}
+
+      <div className="settings-section">
+        <div className="settings-section-title">MCP Connections (vault)</div>
+
+        {Object.entries(VAULT_META).map(([service, meta]) => (
+          <div className="auth-card" key={service}>
+            <div className="auth-card-header">
+              <span className="auth-card-title">{meta.title}</span>
+              {badge(vault[service])}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>{meta.hint}</div>
+            {meta.kind === "token" && service !== "telegram" && (
+              <input
+                type="password"
+                className="settings-input"
+                placeholder="paste token…"
+                value={drafts[service] ?? ""}
+                onChange={(e) => setDrafts((d) => ({ ...d, [service]: e.target.value }))}
+              />
+            )}
+            {service === "telegram" && (
+              <>
+                <input
+                  type="password"
+                  className="settings-input"
+                  placeholder="bot token from @BotFather…"
+                  value={drafts[service] ?? ""}
+                  onChange={(e) => setDrafts((d) => ({ ...d, [service]: e.target.value }))}
+                />
+                <input
+                  type="text"
+                  className="settings-input"
+                  placeholder="owner chat id (from @userinfobot)…"
+                  value={settings.telegramChatId ?? ""}
+                  onChange={(e) => update("telegramChatId", e.target.value)}
+                />
+                <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>
+                  Save (footer) persists the chat id — restart NEXUS to start the bridge. Only this chat is ever answered.
+                </div>
+              </>
+            )}
+            {service === "swiggy" && (
+              <button
+                className="settings-btn settings-btn--primary"
+                disabled={swiggyConnecting || !settings.serverUrl}
+                onClick={handleSwiggyLogin}
+              >
+                {swiggyConnecting ? "Waiting for login…" : "Login with Swiggy"}
+              </button>
+            )}
+            {meta.kind === "token" && meta.tokenUrl && (
+              <button
+                className="settings-btn"
+                onClick={() => { import("@tauri-apps/plugin-shell").then(({ open }) => open(meta.tokenUrl!)).catch(() => window.open(meta.tokenUrl!, "_blank")); }}
+              >
+                Get token
+              </button>
+            )}
+            <div className="auth-card-actions">
+              {meta.kind === "token" && (
+                <button
+                  className="settings-btn settings-btn--primary"
+                  disabled={!(drafts[service] ?? "").trim()}
+                  onClick={() => handleSave(service)}
+                >
+                  Save token
+                </button>
+              )}
+              <button className="settings-btn settings-btn--danger" onClick={() => handleDelete(service)}>
+                Delete
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Session bridges (local)</div>
+
+        <BridgeCards />
+      </div>
+    </>
+  );
+}
+
+function BridgeCards() {
+  const [bridges, setBridges] = useState<Record<string, { reachable: boolean; note: string }>>({});
+  const [checking, setChecking] = useState(false);
+
+  const refresh = useCallback(async () => {
+    setChecking(true);
+    try {
+      const list = await invoke<{ server: string; url: string; reachable: boolean; latency_ms: number; note: string }[]>("mcp_status");
+      const map: Record<string, { reachable: boolean; note: string }> = {};
+      for (const b of list) map[b.server] = { reachable: b.reachable, note: b.note };
+      setBridges(map);
+    } catch {
+      // probe failed entirely — leave cards in unknown state
+    } finally {
+      setChecking(false);
+    }
+  }, []);
+
+  useEffect(() => { refresh().catch(() => {}); }, [refresh]);
+
+  const card = (key: string, title: string, hint: string) => {
+    const st = bridges[key];
+    return (
+      <div className="auth-card" key={key}>
+        <div className="auth-card-header">
+          <span className="auth-card-title">{title}</span>
+          <span className={`status-badge ${st?.reachable ? "status-badge--connected" : "status-badge--disconnected"}`}>
+            {st ? (st.reachable ? "Reachable" : "Down") : "…"}
+          </span>
+        </div>
+        <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>{hint}</div>
+        {st && (
+          <div style={{ fontSize: 12, opacity: 0.65, margin: "0 0 8px" }}>{st.note}</div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <>
+      {card("whatsapp", "WhatsApp bridge (:8765)", "Run the bridge binary, then scan the QR once — the session persists. Reads never mark messages read.")}
+      {card("amazon", "Amazon bridge (:8766)", "Run the product-search bridge locally. Read-only: search, details, reviews.")}
+      <div className="auth-card">
+        <div className="auth-card-header">
+          <span className="auth-card-title">LinkedIn session</span>
+        </div>
+        <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>
+          Uses your logged-in browser session cookie. Re-login in the browser if writes start failing.
+        </div>
+      </div>
+      <div className="auth-card-actions">
+        <button className="settings-btn" disabled={checking} onClick={refresh}>
+          {checking ? "Checking…" : "Recheck bridges"}
+        </button>
       </div>
     </>
   );

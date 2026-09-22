@@ -197,6 +197,26 @@ def balance_classes(examples, max_per_class=80):
     return result
 
 
+def check_floors(examples, floor=30):
+    """Report intents below the minimum-sample floor.
+
+    Non-blocking (warn only): a thin intent trains poorly, and the report
+    tells the user exactly what to collect next (`nexus collect` resumes
+    at the weakest intents automatically). Returns the weak list.
+    """
+    from collections import Counter
+    counts = Counter(ex.get("intent", "") for ex in examples)
+    weak = sorted((i, c) for i, c in counts.items() if c < floor)
+    if weak:
+        print("[RETRAIN] WARNING — intents below floor "
+              f"({floor} rows): " + ", ".join(f"{i}={c}" for i, c in weak))
+        print("[RETRAIN] Run `nexus collect --status` to see coverage, "
+              "then `nexus collect` to fill the gaps (resumes at weakest).")
+    else:
+        print(f"[RETRAIN] Floor check passed: all intents >= {floor} rows.")
+    return weak
+
+
 def merge_and_save(approved, rejected):
     """Merge approved phrasings into the dataset and remove rejected ones."""
     dataset = load_dataset()
@@ -215,6 +235,10 @@ def merge_and_save(approved, rejected):
 
     # Balance classes
     train = balance_classes(train, max_per_class=80)
+
+    # Floor gate (warn-only): thin intents train poorly — report exactly
+    # what `nexus collect` should fill next.
+    check_floors(train)
 
     # Shuffle (deterministic seed for reproducibility)
     import random
