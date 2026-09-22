@@ -1,0 +1,17 @@
+{
+  "device_name": "Microphone Array (Intel\u00ae Smart ",
+  "host_api": "MME",
+  "native_sample_rate": 44100,
+  "native_channels": 4,
+  "measured_noise_floor_rms": 1.5e-05,
+  "measured_noise_floor_dbfs": -96.69,
+  "measured_peak": 0.0,
+  "detected_fan_rumble_hz": 113.3,
+  "rumble_prominence_db": 22.3,
+  "highpass_cutoff_hz": 128.3,
+  "pre_gain": 2.5,
+  "silence_rms_threshold": 0.003,
+  "impulsive_ratio": 8.0,
+  "kws_threshold": 0.5,
+  "calibrated_at": "2026-09-22 22:51:39"
+}
