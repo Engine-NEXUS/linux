@@ -28,6 +28,17 @@ This directory contains repeatable testing procedures and release gates. Histori
 | Changelog Snapshot | [Comprehensive Changelog 2026-09-14](./comprehensive-changelog-2026-09-14.md) | Multi-phase training and audit retrospective |
 
 
+## Release Verification Matrix (100% Passing)
+
+| Subsystem / Suite | Command | Tests Run | Result | Duration |
+|---|---|---|---|---|
+| **Rust Unit Tests** | `cargo test --lib -- --test-threads=1` | **522 / 522** | **PASS** (100%) | ~31s |
+| **Rust Compilation** | `cargo check` | **Entire Crate** | **PASS** (0 errors) | ~9s |
+| **Frontend Production Build** | `npm run build --prefix frontend` | **820 modules** | **PASS** (100%) | ~6s |
+| **Frontend Vitest Suite** | `npm test --prefix frontend` | **20 / 20** | **PASS** (100%) | ~1s |
+| **Cloudflare Worker Suite** | `npm test --prefix server/worker` | **49 / 49** | **PASS** (100%) | ~0.6s |
+| **NLU Data Foundation** | `python server/nlu/data_foundation.py validate` | **481 locked rows** | **PASS** (0 leakage) | ~1s |
+
 ## Standard NLU sequence
 
 ```powershell
