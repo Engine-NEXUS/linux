@@ -46,7 +46,6 @@ jobs:
         run: npm run build
 
       - name: Build Windows Executable (.exe) Installer via Tauri
-        working-directory: ./src-tauri
         env:
           NEXUS_SERVER_URL: https://nexus-worker.chitkullakshya.workers.dev
           CARGO_INCREMENTAL: 0
