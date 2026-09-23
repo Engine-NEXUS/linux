@@ -5,6 +5,13 @@
 
 ---
 
+## Apex Wake Word Evolution — 560 Clean Samples Retrain (2026-09-23)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-23 | feat(wake): audited 562 positive takes with `faster-whisper` + RMS gates; quarantined 2 bad takes; retrained ONNX classifier on 560 pristine recordings + 20,754 negative/noise windows | [40-apex-wake-word-retrain-560-positive-samples.md](./40-apex-wake-word-retrain-560-positive-samples.md) |
+| — | 2026-09-23 | feat(eval): achieved **98.2% peak validation recall** and **0.4% false alarm rate**; verified 43/43 wake tests and 522/522 total Rust tests passing | [40-apex-wake-word-retrain-560-positive-samples.md](./40-apex-wake-word-retrain-560-positive-samples.md) |
+
 ## CI Windows Streamlining & Rust Compilation Fixes (2026-09-22)
 
 | Commit | Date | Summary | Details |
