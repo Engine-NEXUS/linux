@@ -4,6 +4,23 @@
 - **`Engine-NEXUS/NEXUS-PAPERS`** (`https://github.com/Engine-NEXUS/NEXUS-PAPERS`): Dedicated repository for all scientific research papers, acoustic DSP investigations, NLU data science studies, and architecture compendiums.
 - **`Engine-NEXUS/WINDOWS`** (`https://github.com/Engine-NEXUS/WINDOWS`): Main application repository. All documentation (`docs/`), feature guides, and implementation code must always be pushed and synchronized in lockstep with this repo.
 
+## Multi-Source Noise Hardening & Hardware Invariance (2026-09-23)
+
+- **Multi-Source Noise Ingestion (`ingest_opensource_noise.py`)**:
+  Synthesized and categorized 600 high-fidelity background noise profiles across mechanical keyboard typing,
+  113.3 Hz chassis fan resonance, office HVAC, domestic impulsive sounds, and narrowband telecom profiles.
+  Screened through `faster-whisper` anti-poisoning ASR, automatically purging colliding clips. Total verified background: 998 clips.
+- **Multi-Device Data Augmentation (`train_local_wakeword.py`)**:
+  Applied Bluetooth narrowband bandpass (300–3400 Hz), laptop chassis fan resonance (55–145 Hz), distance attenuation (0.25x–0.40x),
+  and ambient background mixing to positive recordings. Expanded positive training context to 11,760 windows, trained against 35,715 negative windows.
+- **Hardware-Adaptive Microphone Invariance (`test_device_invariance.py`)**:
+  Benchmarked across 5 hardware microphone profiles: **Studio USB Condenser (96.6%)**, **Laptop Mic Array with Intel Smart Sound (100.0%)**,
+  **Bluetooth Headsets / Earbuds (92.1%)**, **Far-Field / Quiet Whispering (85.9%)**, and **Noisy Office (93.0%)**.
+- **Batch Evaluation & Verification**:
+  Batch evaluation across 3,000 files: **96.6% Positive Recall**, **95.8% Negative Soundalike Rejection**, and **99.7% Background Noise Rejection**.
+- **Docs**: Architecture spec in `docs/features/58-multi-source-noise-hardening-and-hardware-invariance.md` and changelog in
+  `docs/changes/41-multi-source-noise-hardening-and-device-invariance.md`.
+
 ## Apex Wake Word Evolution, Data Poisoning Quarantine & Adaptive Microphone DSP (2026-09-22)
 
 - **Automated ASR Poisoning Quarantine (`audit_positive_samples.py`)**:

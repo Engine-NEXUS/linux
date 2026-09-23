@@ -5,6 +5,14 @@
 
 ---
 
+## Multi-Source Noise Hardening & Hardware Invariance (2026-09-23)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-09-23 | feat(noise): ingested 600 multi-source background profiles (keyboard, fan, HVAC, domestic, telecom) screened with `faster-whisper` anti-poisoning | [41-multi-source-noise-hardening-and-device-invariance.md](./41-multi-source-noise-hardening-and-device-invariance.md) |
+| — | 2026-09-23 | feat(train): trained device-invariant ONNX classifier on 11,760 positive augmented windows + 35,715 negative windows; verified 96.6% recall & 99.7% noise rejection | [41-multi-source-noise-hardening-and-device-invariance.md](./41-multi-source-noise-hardening-and-device-invariance.md), [Feature doc](../features/58-multi-source-noise-hardening-and-hardware-invariance.md) |
+| — | 2026-09-23 | feat(eval): created multi-device hardware invariance benchmark (`test_device_invariance.py`), passing all 5 hardware microphone profiles | [41-multi-source-noise-hardening-and-device-invariance.md](./41-multi-source-noise-hardening-and-device-invariance.md) |
+
 ## Apex Wake Word Evolution — 560 Clean Samples Retrain (2026-09-23)
 
 | Commit | Date | Summary | Details |
