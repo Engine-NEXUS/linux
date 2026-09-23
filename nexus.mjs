@@ -896,7 +896,7 @@ function cmdWake() {
     return;
   }
 
-  if (sub === "test" || sub === "live" || sub === "benchmark") {
+  if (sub === "test" || sub === "live" || sub === "benchmark" || sub === "devices") {
     const testScript = join(ROOT, "scripts", "test_wake_live.py");
     if (!existsSync(testScript)) {
       err("Test script not found: " + testScript);
@@ -906,8 +906,33 @@ function cmdWake() {
     if (sub === "benchmark" && !testArgs.includes("--batch")) {
       testArgs.push("--batch");
     }
+    if (sub === "devices" && !testArgs.includes("--devices")) {
+      testArgs.push("--devices");
+    }
     info("Starting wake word live tester / benchmark...");
     run(py, [testScript, ...testArgs], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "train" || sub === "retrain") {
+    const trainScript = join(ROOT, "scripts", "train_local_wakeword.py");
+    if (!existsSync(trainScript)) {
+      err("Train script not found: " + trainScript);
+      process.exit(1);
+    }
+    info("Starting wake word neural classifier training...");
+    run(py, [trainScript], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "ingest" || sub === "noise") {
+    const ingestScript = join(ROOT, "scripts", "ingest_opensource_noise.py");
+    if (!existsSync(ingestScript)) {
+      err("Ingest script not found: " + ingestScript);
+      process.exit(1);
+    }
+    info("Starting multi-source noise ingestion & screening...");
+    run(py, [ingestScript], { cwd: ROOT });
     return;
   }
 
@@ -930,8 +955,11 @@ function cmdWake() {
     err(`Unknown wake sub-command: ${sub}`);
     info("Usage:");
     info("  nexus wake probe                 (probe microphone hardware & calibrate acoustic profile)");
-    info("  nexus wake test                  (real-time microphone listening test)");
-    info("  nexus wake test --batch          (benchmark model against all dataset WAVs)");
+    info("  nexus wake test                  (real-time live microphone listening test)");
+    info("  nexus wake test --batch          (benchmark model against all 3,000 dataset WAVs)");
+    info("  nexus wake test --devices        (benchmark model across 5 hardware microphone profiles)");
+    info("  nexus wake train                 (train device-invariant wake neural model)");
+    info("  nexus wake ingest                (ingest & screen open-source noise corpora)");
     info("  nexus wake record 300            (record 300 positive wake words)");
     info("  nexus wake record negative 100   (record 100 negative soundalikes)");
     info("  nexus wake stats                 (show sample counts & size)");
