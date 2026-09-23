@@ -280,9 +280,10 @@ def main():
     print(f"\nTraining Dataset: {len(X_train)} samples ({len(X_pos_train)} pos, {len(X_neg_train)} neg)")
     print(f"Validation Dataset: {len(X_val)} samples ({len(X_pos_val)} pos, {len(X_neg_val)} neg)")
     
-    # Initialize Model & Loss
+    # Initialize Model & Balanced Loss (pos_weight=1.2 balances false alarms vs misses)
+    # Previously pos_weight=8.0 biased the network heavily towards triggering on ambiguous noise/speech
     model = OwwClassifier()
-    pos_weight = torch.tensor([8.0])
+    pos_weight = torch.tensor([1.2])
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=60)

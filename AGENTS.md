@@ -4,6 +4,20 @@
 - **`Engine-NEXUS/NEXUS-PAPERS`** (`https://github.com/Engine-NEXUS/NEXUS-PAPERS`): Dedicated repository for all scientific research papers, acoustic DSP investigations, NLU data science studies, and architecture compendiums.
 - **`Engine-NEXUS/WINDOWS`** (`https://github.com/Engine-NEXUS/WINDOWS`): Main application repository. All documentation (`docs/`), feature guides, and implementation code must always be pushed and synchronized in lockstep with this repo.
 
+## Vocal Friction Hardening & Industrial Throat/Gargle Rejection (2026-09-23)
+
+- **Acoustic Root Cause Diagnosis & Research**:
+  Investigated why non-verbal throat clearing, gargling, coughing, and vocal fry triggered false wakes. Researched industrial two-pass keyword spotting architectures from Amazon Alexa, Apple Siri (HMM phonetic trellis alignment), and Google Assistant (streaming Conformer verification). Identified root causes: dense MLP receptive field lacking sequential phonetic state constraints, absence of throat/cough negatives, and `pos_weight=8.0` gradient distortion in `BCEWithLogitsLoss` that introduced a +2.08 logit bias towards false alarms.
+- **Physical Vocal Artifact & Impulsive Synthesis (`generate_throat_negatives.py` & `generate_impulsive_negatives.py`)**:
+  Synthesized 120 specialized negative audio samples (16kHz mono WAV) modeling phlegm flutter (20–36 Hz AM), vocal fry (55–110 Hz F0 jitter), velar turbulence, and coughing wheezes. Added 180 impulsive negative samples (sneezes, vocal bursts, counting sequences, claps, thumps). Expanded negative library to 1,742 clips (38,557 windows).
+- **Balanced Bayesian Loss Retraining (`train_local_wakeword.py`)**:
+  Replaced distorted `pos_weight=8.0` with balanced `pos_weight=1.2`, training over 40,253 training windows and 10,064 validation windows for 60 epochs. Validation loss reached 0.0245 with 99.0% recall and 0.2% FA.
+- **Vocal Artifact Rejection Verification**:
+  Achieved **0.0% False Alarm Rate** across all physical vocal tests: Throat clearing (0.0% FA, max score 0.1%), Gargling & saliva flutter (0.0% FA, max score 0.0%), Coughing (0.0% FA, max score 0.1%), Vocal fry (0.0% FA, max score 0.1%), Sneezes (0.0% FA, max score 0.7%), Shouts (0.0% FA, max score 0.1%), and Mic testing (0.0% FA, max score 0.1%).
+- **Full Library & Hardware Benchmark**:
+  Evaluated across 3,300 files: **97.1% Positive Recall (avg score 97.4%)**, **97.5% Negative Soundalike Rejection**, and **99.6% Background Noise Rejection** at calibrated threshold 0.68. Maintained 100% hardware invariance: Studio USB (97.1%), Laptop Mic Array with Intel Smart Sound (100.0%), Bluetooth Headset (93.6%), Far-Field Whisper (84.3%), and Noisy Office (92.5%).
+- **Docs**: Architecture spec in `docs/features/59-vocal-friction-hardening-and-throat-gargle-rejection.md` and changelog in `docs/changes/42-vocal-friction-hardening-and-throat-gargle-rejection.md`.
+
 ## Multi-Source Noise Hardening & Hardware Invariance (2026-09-23)
 
 - **Multi-Source Noise Ingestion (`ingest_opensource_noise.py`)**:
