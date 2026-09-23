@@ -136,6 +136,7 @@ class WakeWordPipeline:
         self.highpass_prev_x = 0.0
         self.highpass_prev_y = 0.0
         self.smooth_gain = 1.0
+        self.comfort_mel = np.zeros((MEL_FRAMES_PER_CHUNK, 32), dtype=np.float32)
 
     def reset_after_trigger(self):
         """Flush embedding buffer with comfort embeddings — prevents phantom cascade triggers
@@ -175,17 +176,15 @@ class WakeWordPipeline:
         else:
             self.noise_floor = 0.995 * self.noise_floor + 0.005 * rms
 
-        # 2. Hardware Noise Gate & Impulsive Filter
-        baseline_rms = max(self.prev_rms, self.noise_floor, 0.001)
-        is_impulsive = (rms > baseline_rms * self.impulsive_ratio)
+        # 2. Hardware Noise Gate
         self.prev_rms = rms
-
         is_speech = (rms >= self.silence_threshold)
         
-        if not is_speech or is_impulsive:
-            # Continuous sliding window: push comfort embedding so the 16-frame buffer
-            # continuously advances in real time rather than freezing past context
+        if not is_speech:
+            # Continuous sliding window: push comfort embedding and mel frame so buffers
+            # continuously advance in real time rather than freezing past context
             self.emb_buffer = (self.emb_buffer + [self.comfort_emb])[-EMBEDDING_FRAMES:]
+            self.mel_buffer = (self.mel_buffer + [self.comfort_mel])[-MEL_BUFFER_CHUNKS:]
             self.lookback = chunk[-LOOKBACK_SAMPLES:]
             self.smooth_gain = 1.0
             return 0.0, rms, 1.0
@@ -193,7 +192,7 @@ class WakeWordPipeline:
         # 3. Adaptive Hardware Dynamic AGC with smooth transitions
         target_gain = 1.0
         if rms < TARGET_RMS:
-            target_gain = min((TARGET_RMS / rms) * self.pre_gain, MAX_GAIN)
+            target_gain = min(TARGET_RMS / rms, MAX_GAIN)
         elif rms > 0.15:
             target_gain = 0.15 / rms
         

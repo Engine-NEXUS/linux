@@ -241,6 +241,7 @@ mod engine {
         /// Previous chunk RMS for impulsive spike rejection (coughs, throat clearing)
         pub prev_rms: f32,
         /// Ratio threshold for impulsive detection (default 8.0x)
+        #[allow(dead_code)]
         pub impulsive_ratio: f32,
     }
 
@@ -289,16 +290,7 @@ mod engine {
 
             // 3. Update noise floor
             let floor = self.noise_floor.update(rms);
-
-            // 3b. Impulsive sound gate: reject sudden short acoustic bursts (coughs, throat clears)
-            // Speech (N-E-X-U-S) rises continuously over 300-800ms; coughs spike in a single 80ms chunk
-            let baseline = self.prev_rms.max(floor).max(0.001);
-            let is_impulsive = rms > baseline * self.impulsive_ratio;
             self.prev_rms = rms;
-            if is_impulsive {
-                self.vad_skips += 1;
-                return None;
-            }
 
             // 4. VAD check
             if self.vad_enabled {
@@ -613,6 +605,9 @@ mod engine {
             if let Ok(t) = Tensor::from_shape(&[1, 1, 1, 96], &COMFORT_EMBEDDING) {
                 self.feature_buffer.push_back(t);
             }
+            if let Ok(t) = Tensor::from_shape(&[MELS_PER_CHUNK, 32], &[0f32; MELS_PER_CHUNK * 32]) {
+                self.mel_spectrogram_buffer.push_back(t);
+            }
         }
     }
 
@@ -887,7 +882,7 @@ mod engine {
             let silence_rms_threshold = self.acoustic_profile.silence_rms_threshold;
             let target_rms = 0.035f32; // Target nominal speech RMS
             let max_gain = 30.0f32;
-            let pre_gain = self.acoustic_profile.pre_gain;
+            let _pre_gain = self.acoustic_profile.pre_gain;
 
             let rms = if chunk.is_empty() {
                 0.0
@@ -950,10 +945,10 @@ mod engine {
                 }
             }
 
-            // AGC: amplify quiet speech to target RMS using acoustic profile pre-gain
+            // AGC: amplify quiet speech to target RMS
             // This ensures consistent model input across different laptop microphones.
             let chunk: Vec<f32> = if rms < target_rms {
-                let gain = ((target_rms / rms) * pre_gain).min(max_gain);
+                let gain = (target_rms / rms).min(max_gain);
                 tracing::trace!("wake: AGC gain={:.1}x (RMS {:.6} → {:.6})", gain, rms, target_rms);
                 chunk.iter().map(|&s| (s * gain).clamp(-1.0, 1.0)).collect()
             } else {
@@ -4207,13 +4202,12 @@ mod tests {
         let result = pp.process(silence);
         assert!(result.is_none(), "Preprocessor should reject silence");
 
-        // Test 2: Speech-like signal should pass (sustained speech across frames)
+        // Test 2: Speech-like signal should pass
         let speech: Vec<f32> = (0..1280)
             .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr).sin() * 0.3)
             .collect();
-        let _ = pp.process(speech.clone());
         let result = pp.process(speech);
-        assert!(result.is_some(), "Preprocessor should pass sustained speech");
+        assert!(result.is_some(), "Preprocessor should pass speech");
 
         // Test 3: Stats should be tracking
         assert!(pp.vad_skips > 0 || pp.vad_passes > 0, "Preprocessor stats should be non-zero");

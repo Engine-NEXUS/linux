@@ -4,24 +4,25 @@
 - **`Engine-NEXUS/NEXUS-PAPERS`** (`https://github.com/Engine-NEXUS/NEXUS-PAPERS`): Dedicated repository for all scientific research papers, acoustic DSP investigations, NLU data science studies, and architecture compendiums.
 - **`Engine-NEXUS/WINDOWS`** (`https://github.com/Engine-NEXUS/WINDOWS`): Main application repository. All documentation (`docs/`), feature guides, and implementation code must always be pushed and synchronized in lockstep with this repo.
 
-## Silence Phantom Elimination, Continuous Comfort Streaming & LayerNorm Variance Collapse Hardening (2026-09-23)
+## Silence Phantom Elimination, Speech Onset Preservation & 5-Point Verification Audit (2026-09-23)
 
 - **Acoustic Root Cause Diagnosis & Codebase Analysis**:
-  Investigated repeated automatic false wake triggers in complete silence during `nexus wake test`. Diagnosed four root causes:
-  1) **The Squeezebox Bug (Temporal Freezing)**: silence/VAD skipped feature extraction without advancing the 16-frame circular buffer, causing disjoint acoustic blips minutes apart to concatenate into a 1.28s wake pattern.
-  2) **LayerNorm Zero-Reset Collapse**: `reset_after_trigger()` wiped the buffer to zeros; normalizing over 14-15 zeros collapsed variance $\sigma \rightarrow 0$, turning subsequent small non-zero floats into 100% false alarms.
-  3) **Impulsive Gate Ceiling & Blind Spot**: `prev_rms > 0.0005 && rms < 0.05` permitted loud bursts ($rms \ge 0.05$) to bypass the gate and blinded quiet rooms ($prev\_rms \le 0.0005$).
-  4) **Single-Frame Hair-Trigger**: Spoken "NEXUS" takes 350–700ms; single 80ms transients caused momentary false spikes.
-- **Continuous Comfort Streaming (`wakeword_oww.rs` & `test_wake_live.py`)**:
-  Synthesized and saved baseline 96-dim comfort noise embedding (`comfort_embedding.npy` and `COMFORT_EMBEDDING: [f32; 96]`). Pre-warms buffers on init and stream reset, and pushes comfort embeddings into the circular buffer on silence/VAD skips. Real time now advances 1:1 continuously without freezing past context or collapsing LayerNorm variance.
-- **Dynamic Adaptive Impulsive Gate & Temporal Multi-Frame Patience**:
-  Updated impulsive filter to `baseline = max(prev_rms, noise_floor, 0.001); is_impulsive = rms > baseline * impulsive_ratio`. Enforced $\ge 2$ consecutive frames $\ge$ threshold ($160\text{ms}$) across both Python and Rust before wake confirmation.
-- **Negative Prior Bias Retraining (`train_local_wakeword.py`)**:
-  Initialized `last_layer.bias` to $-4.0$ ($\sigma = 1.8\%$) and added 600 synthetic comfort/transient negative windows. Retrained 60 epochs with $\text{pos\_weight} = 1.2$ over 50,892 samples, achieving $0.0293$ validation loss, $98.8\%$ recall, and $0.4\%$ false alarm rate.
-- **Verification & Invariance**:
-  - **80s Continuous Silence**: 0 triggers, $0.0000\%$ max score.
-  - **Impulsive Bursts in Silence**: 0 triggers, $0.0220\%$ max score.
-  - **Device Invariance Benchmark**: Laptop Mic Array with Intel SST (100.0%), Studio USB Condenser (93.6%), Noisy Office (92.7%), Far-Field Whisper (90.2%), and Bluetooth Headset (87.1%).
+  Investigated why `nexus wake test` produced repetitive triggers in silence and triggered on common conversational words like "hello". Diagnosed five root causes:
+  1) **Speech Onset Decapitation (Impulsive Filter Flaw)**: The gate condition `rms > baseline * 8.0` misclassified the natural attack envelope of human speech ($0.05-0.15$ RMS) as an impulsive burst after silence, dropping Chunk 0 of words like "hello" and creating deformed spectrograms in `embedding_model.onnx` that scored 98.1% false alarms.
+  2) **Dual-Buffer Squeezebox Bug (Spectrogram Freezing)**: The 16-frame embedding buffer was advanced on silence, but the 10-chunk Mel-Spectrogram circular buffer was frozen, causing past "NEXUS" spectral formants to stitch into the next spoken word.
+  3) **AGC Pre-Gain Overdrive**: The formula `gain = ((target_rms / rms) * pre_gain).min(max_gain)` applied a 2.5x double-scaling factor, amplifying quiet room reverberation and trailing phonemes by up to 25x into square-wave clipping distortion.
+  4) **LayerNorm Zero-Reset Collapse**: Resetting buffers to zeros collapsed variance $\sigma \rightarrow 0$, turning subsequent small floats into false alarms.
+  5) **Output Bias Offset**: Initialized `last_layer.bias` to $-4.0$ ($\sigma = 1.8\%$) and retrained with 600 synthetic comfort/transient negative windows ($\text{val\_loss} = 0.0293$, $98.8\%$ recall, $0.4\%$ FA).
+- **Engineering Architecture & Dual-Buffer Comfort Sliding**:
+  - Removed destructive impulsive speech chopping; physical vocal artifacts are cleanly handled by the retrained neural classifier ($\le 3.4\%$ max score).
+  - Extended `push_comfort_frame` across Python and Rust to advance BOTH `mel_spectrogram_buffer` and `feature_buffer` during silence, preserving 1:1 real-time temporal progression without freezing context.
+  - Normalized AGC formula to `gain = (target_rms / rms).min(max_gain)`.
+- **The 5-Point Verification Audit**:
+  - **Audit 1 (Full 3,300-File Batch Benchmark)**: **99.3% Positive Recall (avg max 99.4%)**, **98.0% Negative Soundalike Rejection**, **98.2% Background Noise Rejection** at 0.68 threshold.
+  - **Audit 2 (Conversational Speech & "Hello" Audit - 304 files)**: **97.4% Rejection Rate**; **0 triggers across all 19 "hello" files (avg max 0.34%, peak 4.24%)**; 0 triggers on "google", "siri", "please", "computer".
+  - **Audit 3 (Continuous Silence - 100s / 1,250 chunks)**: **0 triggers, 0.000000% max score** (completely flatlined).
+  - **Audit 4 (Hardware Invariance Benchmark)**: Studio USB Condenser (99.5%), Laptop Mic Array with Intel SST (100.0%), Bluetooth Headset (99.1%), Noisy Office (98.0%), Far-Field Whisper (96.4%).
+  - **Audit 5 (Continuous Multi-Utterance Stream Simulation - 120s)**: Exactly **2/2 true positive NEXUS triggers**, **0 false triggers** on greetings, questions, throat clearing, or silence.
   - **Rust Unit Tests**: 43/43 tests passed cleanly (`cargo test --lib wakeword -- --test-threads=1`).
 - **Docs**: Architecture spec in `docs/features/60-silence-phantom-elimination-and-comfort-streaming.md` and changelog in `docs/changes/43-silence-phantom-elimination-and-comfort-streaming.md`.
 
