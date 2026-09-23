@@ -35,7 +35,9 @@ This folder documents the design, architecture, model evolution, and testing of 
 - **[21-v3-training-plan.md](21-v3-training-plan.md)** — Step-by-step curriculum for multi-speaker real-voice recording and augmentation.
 - **[22-hundred-combo-review.md](22-hundred-combo-review.md)** — 100-combination combinatorial evaluation of acoustic hyperparameters.
 - **[22-v3-master-document.md](22-v3-master-document.md)** — Master engineering document for Alexa/Jarvis parity: $\ge 95\%$ recall at $\le 1$ false alarm/hour.
+- **[23-acoustic-dsp-anti-regression-and-dual-buffer-streaming.md](23-acoustic-dsp-anti-regression-and-dual-buffer-streaming.md)** — Master acoustic DSP anti-regression manual: dual-buffer comfort streaming, speech onset preservation, silence phantom elimination & 5-point verification audit.
 
 ### 🧪 5. Testing & Performance Metrics
 - **[11-testing-strategy.md](11-testing-strategy.md)** — Comprehensive test harness, synthetic noise injection, and FAR/FRR measurement.
 - **[12-performance-expectations.md](12-performance-expectations.md)** — Latency budget, memory footprint, CPU utilization, and accuracy benchmarks.
+
