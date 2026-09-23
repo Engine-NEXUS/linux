@@ -59,6 +59,7 @@ class OwwClassifier(nn.Module):
         self.relu2 = nn.ReLU()
         
         self.last_layer = nn.Linear(hidden_dim, 1)
+        nn.init.constant_(self.last_layer.bias, -4.0)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
@@ -104,7 +105,13 @@ def extract_windows_from_audio(audio, mel_sess, emb_sess, names, highpass_cutoff
 
     lookback = np.zeros(LOOKBACK, dtype=np.float32)
     mel_buf = [np.zeros((MEL_PER_CHUNK, 32), dtype=np.float32)] * MEL_CIRC
-    emb_buf = [np.zeros(96, dtype=np.float32)] * EMB_FRAMES
+    
+    comfort_path = OWW_DIR / "comfort_embedding.npy"
+    if comfort_path.exists():
+        comfort_emb = np.load(str(comfort_path)).astype(np.float32)
+    else:
+        comfort_emb = np.zeros(96, dtype=np.float32)
+    emb_buf = [comfort_emb.copy() for _ in range(EMB_FRAMES)]
     
     windows = []
     
@@ -113,6 +120,8 @@ def extract_windows_from_audio(audio, mel_sess, emb_sess, names, highpass_cutoff
         rms = float(np.sqrt(np.mean(chunk ** 2)))
         
         if rms < SILENCE_RMS:
+            # Advance embedding buffer with comfort embedding so time progresses continuously
+            emb_buf = (emb_buf + [comfort_emb])[-EMB_FRAMES:]
             continue
             
         if rms < TARGET_RMS:
@@ -247,6 +256,23 @@ def main():
         if wins:
             X_neg.extend(wins)
     print(f"   Total negative windows (Soundalikes + Noise): {len(X_neg)} from {len(neg_files) + len(bg_files)} clips.")
+
+    print("\n3b. Adding comfort-noise and sparse-transient negative windows to X_neg...")
+    comfort_path = OWW_DIR / "comfort_embedding.npy"
+    if comfort_path.exists():
+        comfort_emb = np.load(str(comfort_path)).astype(np.float32)
+        # 300 pure comfort noise windows
+        for _ in range(300):
+            noise_jitter = np.random.normal(0, 0.05, (EMB_FRAMES, 96)).astype(np.float32)
+            pure_comfort = np.tile(comfort_emb, (EMB_FRAMES, 1)) + noise_jitter
+            X_neg.append(pure_comfort)
+        # 300 sparse transient bursts (15 comfort frames + 1 transient noise frame)
+        for _ in range(300):
+            sparse_win = np.tile(comfort_emb, (EMB_FRAMES, 1)).astype(np.float32)
+            burst_idx = random.randint(0, EMB_FRAMES - 1)
+            sparse_win[burst_idx] = np.random.normal(0, 1.5, 96).astype(np.float32)
+            X_neg.append(sparse_win)
+        print(f"   Added 600 synthetic comfort/transient negative windows to eliminate post-reset spikes.")
 
     X_pos = np.array(X_pos, dtype=np.float32)
     y_pos = np.ones((len(X_pos), 1), dtype=np.float32)

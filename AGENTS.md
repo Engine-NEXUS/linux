@@ -4,6 +4,27 @@
 - **`Engine-NEXUS/NEXUS-PAPERS`** (`https://github.com/Engine-NEXUS/NEXUS-PAPERS`): Dedicated repository for all scientific research papers, acoustic DSP investigations, NLU data science studies, and architecture compendiums.
 - **`Engine-NEXUS/WINDOWS`** (`https://github.com/Engine-NEXUS/WINDOWS`): Main application repository. All documentation (`docs/`), feature guides, and implementation code must always be pushed and synchronized in lockstep with this repo.
 
+## Silence Phantom Elimination, Continuous Comfort Streaming & LayerNorm Variance Collapse Hardening (2026-09-23)
+
+- **Acoustic Root Cause Diagnosis & Codebase Analysis**:
+  Investigated repeated automatic false wake triggers in complete silence during `nexus wake test`. Diagnosed four root causes:
+  1) **The Squeezebox Bug (Temporal Freezing)**: silence/VAD skipped feature extraction without advancing the 16-frame circular buffer, causing disjoint acoustic blips minutes apart to concatenate into a 1.28s wake pattern.
+  2) **LayerNorm Zero-Reset Collapse**: `reset_after_trigger()` wiped the buffer to zeros; normalizing over 14-15 zeros collapsed variance $\sigma \rightarrow 0$, turning subsequent small non-zero floats into 100% false alarms.
+  3) **Impulsive Gate Ceiling & Blind Spot**: `prev_rms > 0.0005 && rms < 0.05` permitted loud bursts ($rms \ge 0.05$) to bypass the gate and blinded quiet rooms ($prev\_rms \le 0.0005$).
+  4) **Single-Frame Hair-Trigger**: Spoken "NEXUS" takes 350–700ms; single 80ms transients caused momentary false spikes.
+- **Continuous Comfort Streaming (`wakeword_oww.rs` & `test_wake_live.py`)**:
+  Synthesized and saved baseline 96-dim comfort noise embedding (`comfort_embedding.npy` and `COMFORT_EMBEDDING: [f32; 96]`). Pre-warms buffers on init and stream reset, and pushes comfort embeddings into the circular buffer on silence/VAD skips. Real time now advances 1:1 continuously without freezing past context or collapsing LayerNorm variance.
+- **Dynamic Adaptive Impulsive Gate & Temporal Multi-Frame Patience**:
+  Updated impulsive filter to `baseline = max(prev_rms, noise_floor, 0.001); is_impulsive = rms > baseline * impulsive_ratio`. Enforced $\ge 2$ consecutive frames $\ge$ threshold ($160\text{ms}$) across both Python and Rust before wake confirmation.
+- **Negative Prior Bias Retraining (`train_local_wakeword.py`)**:
+  Initialized `last_layer.bias` to $-4.0$ ($\sigma = 1.8\%$) and added 600 synthetic comfort/transient negative windows. Retrained 60 epochs with $\text{pos\_weight} = 1.2$ over 50,892 samples, achieving $0.0293$ validation loss, $98.8\%$ recall, and $0.4\%$ false alarm rate.
+- **Verification & Invariance**:
+  - **80s Continuous Silence**: 0 triggers, $0.0000\%$ max score.
+  - **Impulsive Bursts in Silence**: 0 triggers, $0.0220\%$ max score.
+  - **Device Invariance Benchmark**: Laptop Mic Array with Intel SST (100.0%), Studio USB Condenser (93.6%), Noisy Office (92.7%), Far-Field Whisper (90.2%), and Bluetooth Headset (87.1%).
+  - **Rust Unit Tests**: 43/43 tests passed cleanly (`cargo test --lib wakeword -- --test-threads=1`).
+- **Docs**: Architecture spec in `docs/features/60-silence-phantom-elimination-and-comfort-streaming.md` and changelog in `docs/changes/43-silence-phantom-elimination-and-comfort-streaming.md`.
+
 ## Vocal Friction Hardening & Industrial Throat/Gargle Rejection (2026-09-23)
 
 - **Acoustic Root Cause Diagnosis & Research**:

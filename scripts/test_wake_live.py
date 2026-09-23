@@ -117,23 +117,36 @@ class WakeWordPipeline:
         rc = 1.0 / (2.0 * np.pi * self.highpass_cutoff)
         self.highpass_alpha = rc / (rc + dt)
 
+        # Load or initialize comfort noise embedding
+        comfort_path = OWW_DIR / "comfort_embedding.npy"
+        if comfort_path.exists():
+            self.comfort_emb = np.load(str(comfort_path)).astype(np.float32)
+        else:
+            self.comfort_emb = np.zeros(96, dtype=np.float32)
+
         self.reset()
 
     def reset(self):
         """Reset circular buffers and filter state."""
         self.lookback = np.zeros(LOOKBACK_SAMPLES, dtype=np.float32)
         self.mel_buffer = [np.zeros((MEL_FRAMES_PER_CHUNK, 32), dtype=np.float32)] * MEL_BUFFER_CHUNKS
-        self.emb_buffer = [np.zeros(96, dtype=np.float32)] * EMBEDDING_FRAMES
+        self.emb_buffer = [self.comfort_emb.copy() for _ in range(EMBEDDING_FRAMES)]
         self.last_trigger_time = 0.0
         self.prev_rms = 0.0  # Track previous chunk RMS for impulsive-sound detection
         self.highpass_prev_x = 0.0
         self.highpass_prev_y = 0.0
+        self.smooth_gain = 1.0
 
     def reset_after_trigger(self):
-        """Flush embedding buffer after a trigger — prevents phantom cascade triggers
-        from residual NEXUS embeddings lingering in the 16-frame context window."""
-        self.emb_buffer = [np.zeros(96, dtype=np.float32)] * EMBEDDING_FRAMES
+        """Flush embedding buffer with comfort embeddings — prevents phantom cascade triggers
+        from residual NEXUS context while completely eliminating LayerNorm variance collapse."""
+        self.emb_buffer = [self.comfort_emb.copy() for _ in range(EMBEDDING_FRAMES)]
         self.mel_buffer = [np.zeros((MEL_FRAMES_PER_CHUNK, 32), dtype=np.float32)] * MEL_BUFFER_CHUNKS
+        self.lookback = np.zeros(LOOKBACK_SAMPLES, dtype=np.float32)
+        self.highpass_prev_x = 0.0
+        self.highpass_prev_y = 0.0
+        self.prev_rms = 0.0
+        self.smooth_gain = 1.0
 
     def apply_highpass(self, chunk: np.ndarray) -> np.ndarray:
         """Filter out chassis fan rumble (matches Rust HighPassFilter)."""
@@ -149,8 +162,8 @@ class WakeWordPipeline:
         """
         Process an 80ms chunk with hardware adaptation (matches Rust wakeword_oww.rs):
         1. Adaptive High-Pass fan filter
-        2. Dynamic Pre-Gain + AGC
-        3. Continuous Mel + Embedding sliding inference
+        2. Dynamic Pre-Gain + Smoothed AGC
+        3. Continuous Mel + Embedding sliding inference (real-time continuous)
         """
         # 1. High-pass fan noise filter
         chunk = self.apply_highpass(raw_chunk)
@@ -162,29 +175,34 @@ class WakeWordPipeline:
         else:
             self.noise_floor = 0.995 * self.noise_floor + 0.005 * rms
 
-        # 2. Hardware Noise Gate & Impulsive Filter (matches Rust wakeword_oww.rs)
+        # 2. Hardware Noise Gate & Impulsive Filter
+        baseline_rms = max(self.prev_rms, self.noise_floor, 0.001)
+        is_impulsive = (rms > baseline_rms * self.impulsive_ratio)
+        self.prev_rms = rms
+
         is_speech = (rms >= self.silence_threshold)
         
-        # Impulsive sound gate: coughs, throat-clears are short spikes (much louder than prev chunk)
-        is_impulsive = (self.prev_rms > 0.0005 and rms > self.prev_rms * self.impulsive_ratio and rms < 0.05)
-        self.prev_rms = rms
-        
         if not is_speech or is_impulsive:
+            # Continuous sliding window: push comfort embedding so the 16-frame buffer
+            # continuously advances in real time rather than freezing past context
+            self.emb_buffer = (self.emb_buffer + [self.comfort_emb])[-EMBEDDING_FRAMES:]
             self.lookback = chunk[-LOOKBACK_SAMPLES:]
+            self.smooth_gain = 1.0
             return 0.0, rms, 1.0
 
-        # 3. Adaptive Hardware Dynamic AGC
-        gain = 1.0
+        # 3. Adaptive Hardware Dynamic AGC with smooth transitions
+        target_gain = 1.0
         if rms < TARGET_RMS:
-            gain = min((TARGET_RMS / rms) * self.pre_gain, MAX_GAIN)
+            target_gain = min((TARGET_RMS / rms) * self.pre_gain, MAX_GAIN)
         elif rms > 0.15:
-            gain = 0.15 / rms
+            target_gain = 0.15 / rms
         
-        proc_chunk = np.clip(chunk * gain, -1.0, 1.0)
+        self.smooth_gain = 0.70 * self.smooth_gain + 0.30 * target_gain
+        proc_chunk = np.clip(chunk * self.smooth_gain, -1.0, 1.0)
 
-        # 4. Mel-Spectrogram Stage
-        framed = np.concatenate([self.lookback, proc_chunk]) * 32768.0
-        self.lookback = proc_chunk[-LOOKBACK_SAMPLES:]
+        # 4. Mel-Spectrogram Stage (gain-matched lookback eliminates step discontinuity)
+        framed = np.concatenate([self.lookback * self.smooth_gain, proc_chunk]) * 32768.0
+        self.lookback = chunk[-LOOKBACK_SAMPLES:]
 
         mel_out = self.mel_session.run(None, {self.mel_in_name: framed[None, :]})[0]
         mel_scaled = mel_out.reshape(MEL_FRAMES_PER_CHUNK, 32) / 10.0 + 2.0
@@ -199,7 +217,7 @@ class WakeWordPipeline:
         clf_input = np.stack(self.emb_buffer)[None, :, :].astype(np.float32)
         score = float(self.clf_session.run(None, {self.clf_in_name: clf_input})[0].reshape(-1)[0])
 
-        return score, rms, gain
+        return score, rms, self.smooth_gain
 
 
 def run_live_test(threshold=None, model_path=None):
@@ -212,9 +230,10 @@ def run_live_test(threshold=None, model_path=None):
     print("═" * 65)
     print(f"  • Trigger Threshold : {threshold:.2f} (Confidence)")
     print(f"  • Audio Stream      : 16 kHz Mono, 80ms chunks (1280 samples)")
-    print(f"  • Adaptive DSP      : {pipeline.highpass_cutoff:.1f}Hz HPF + {pipeline.pre_gain:.2f}x Pre-Gain + AGC (30x)")
+    print(f"  • Adaptive DSP      : {pipeline.highpass_cutoff:.1f}Hz HPF + {pipeline.pre_gain:.2f}x Pre-Gain + Smoothed AGC")
     if pipeline.profile.get("device_name"):
         print(f"  • Calibrated Mic    : {pipeline.profile.get('device_name')}")
+    print(f"  • Confirmation      : 2-Frame Temporal Patience (Rejects 1-frame spikes)")
     print(f"  • Instructions      : Speak 'NEXUS' or 'Hey NEXUS' naturally.")
     print(f"  • Press Ctrl+C to finish and view session metrics.")
     print("═" * 65 + "\n")
@@ -223,6 +242,8 @@ def run_live_test(threshold=None, model_path=None):
     scores_history = []
     start_time = time.time()
     last_trigger_ts = 0.0
+    consecutive_hits = 0
+    PATIENCE_FRAMES = 2  # Physical articulation of NEXUS takes >= 350ms (>= 4 frames)
 
     def make_meter(score, length=20):
         filled = int(score * length)
@@ -235,29 +256,34 @@ def run_live_test(threshold=None, model_path=None):
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
                             blocksize=CHUNK_SAMPLES) as stream:
             while True:
-                chunk, _ = stream.read(CHUNK_SAMPLES)
+                chunk, overflow = stream.read(CHUNK_SAMPLES)
                 audio_data = chunk.flatten()
                 
                 score, rms, gain = pipeline.process_chunk(audio_data)
                 now = time.time()
 
-                # Visual meter in console
-                if score >= threshold and (now - last_trigger_ts) > COOLDOWN_SECONDS:
+                if score >= threshold:
+                    consecutive_hits += 1
+                else:
+                    consecutive_hits = 0
+
+                # Multi-frame patience gate: require >= 2 consecutive frames
+                if consecutive_hits >= PATIENCE_FRAMES and (now - last_trigger_ts) > COOLDOWN_SECONDS:
                     trigger_count += 1
                     last_trigger_ts = now
+                    consecutive_hits = 0
                     scores_history.append(score)
                     ts = time.strftime("%H:%M:%S")
                     print(f"\r  🔔 \033[1;32m[TRIGGER #{trigger_count:02d}]\033[0m {ts} — Confidence: \033[1;32m{score:6.1%}\033[0m | RMS: {rms:.4f} (AGC {gain:.1f}x)  ")
                     print(f"     Status: \033[32m● WAKE WORD HEARD SIR!\033[0m\n")
-                    # CRITICAL: flush embedding buffer so residual NEXUS context
-                    # doesn't cascade into phantom false triggers on next quiet chunks
                     pipeline.reset_after_trigger()
                 else:
                     # Live score line
                     meter = make_meter(score)
                     rms_bar = "·" * int(min(rms * 500, 15))
                     status = "\033[33m👂 Listening\033[0m" if rms > 0.0005 else "\033[90m💤 Quiet\033[0m"
-                    print(f"\r  {status} {meter} | Gain: {gain:4.1f}x | Energy: {rms_bar:<15s}", end="", flush=True)
+                    pat_marker = f" [Hit: {consecutive_hits}/{PATIENCE_FRAMES}]" if consecutive_hits > 0 else ""
+                    print(f"\r  {status} {meter} | Gain: {gain:4.1f}x | Energy: {rms_bar:<15s}{pat_marker}", end="", flush=True)
 
     except KeyboardInterrupt:
         pass

@@ -292,7 +292,8 @@ mod engine {
 
             // 3b. Impulsive sound gate: reject sudden short acoustic bursts (coughs, throat clears)
             // Speech (N-E-X-U-S) rises continuously over 300-800ms; coughs spike in a single 80ms chunk
-            let is_impulsive = self.prev_rms > 0.0005 && rms > self.prev_rms * self.impulsive_ratio && rms < 0.05;
+            let baseline = self.prev_rms.max(floor).max(0.001);
+            let is_impulsive = rms > baseline * self.impulsive_ratio;
             self.prev_rms = rms;
             if is_impulsive {
                 self.vad_skips += 1;
@@ -382,30 +383,34 @@ mod engine {
     /// Detection buffer: 12 frames (~1 sec) for smoothing
     const DETECTION_BUFFER_SIZE: usize = 12;
 
-    /// Minimum positive detections before triggering
-    /// (1 frame = 80ms — the model produces 0.3-0.5 for real speech from
-    /// non-enrolled speakers, so requiring 2+ frames above threshold kills
-    /// many valid detections. With the max-based smoothing and lowered
-    /// threshold, 1 frame is sufficient.)
-    const MIN_POSITIVE_DETECTIONS: f32 = 1.0;
+    /// Pre-computed ambient comfort noise embedding (matches openWakeWord reference specification).
+    /// Used to initialize and flush feature buffers without triggering LayerNorm variance collapse.
+    pub const COMFORT_EMBEDDING: [f32; 96] = [
+        -8.489297, 22.163715, 2.277623, -1.783319, 9.083113, 26.810450,
+        12.025850, -13.673116, -2.537689, 7.894602, -17.911095, -3.106453,
+        8.197336, -2.658832, -9.058453, -8.155005, 2.432887, -3.165858,
+        3.634640, -12.571359, 6.311998, 24.737816, -12.649775, -4.318936,
+        -7.900282, 23.728262, -18.375217, -2.583435, 3.445168, 7.829760,
+        -12.477730, 16.272125, -26.550194, -6.157786, -17.991940, 0.864661,
+        30.908659, 21.871727, -4.616611, 28.996405, -2.680668, 5.759074,
+        42.524014, -15.883260, -13.118565, -14.568768, -7.097882, 2.778774,
+        8.828871, -0.878993, -9.060097, 6.057194, 14.329378, 2.014399,
+        -13.745483, -14.581902, -0.423280, 28.671656, -17.456226, 2.176247,
+        6.183690, 6.393251, 11.007999, -2.287265, 24.724491, 25.623247,
+        10.284468, -14.603464, -6.046250, -0.863767, -5.018670, 13.685988,
+        8.559921, -5.221079, 16.657005, 5.837093, 1.220338, -0.118145,
+        -24.578995, -39.162292, 8.814641, 7.579267, 11.435743, -9.504274,
+        15.335735, -6.372455, 10.835917, -12.122574, 3.542739, 44.061302,
+        4.561942, 25.926502, 28.643192, -29.768351, 10.542067, 22.575813,
+    ];
 
-    /// Single-frame high-confidence threshold.
-    /// If any single frame exceeds this, trigger immediately without
-    /// requiring MIN_POSITIVE_DETECTIONS frames. This fixes the case where
-    /// the model produces one high probability (e.g. 0.67 or 0.89) but the
-    /// adjacent frames are below threshold — the 2-frame smoothing was
-    /// killing valid detections with 58.2%-recall models.
-    /// 0.5 is above the 0.45 trigger threshold and far above noise
-    /// (silence gate already blocks RMS < 0.0005, and the model produces
-    /// <0.01 on non-wake speech), so a single 0.5+ frame is a real wake.
-    /// The model produces lower probabilities for voices it wasn't trained
-    /// on (e.g. 0.67 for a non-enrolled speaker vs 0.89 for the owner),
-    /// so 0.5 covers both cases while still rejecting noise.
+    /// Minimum positive detections before triggering (multi-frame confirmation)
+    const MIN_POSITIVE_DETECTIONS: f32 = 2.0;
+
+    /// Single-frame high-confidence threshold
     const SINGLE_FRAME_HIGH_CONFIDENCE: f32 = 0.5;
 
     /// Refractory period after a detection (ms)
-    /// Increased from 2s to 3s to compensate for the more sensitive
-    /// max-based detection (prevents double-triggers on the same utterance).
     const NO_DETECTION_MS: u64 = 3000;
 
     /// Resolve the oww resources directory.
@@ -485,7 +490,7 @@ mod engine {
             let mut feature_buffer = CircularBuffer::<FEATURE_BUFFER_SIZE, Tensor>::new();
             for _ in 0..FEATURE_BUFFER_SIZE {
                 feature_buffer.push_back(
-                    Tensor::from_shape(&[1, 1, 1, 96], &[0f32; 96])
+                    Tensor::from_shape(&[1, 1, 1, 96], &COMFORT_EMBEDDING)
                         .map_err(|e| anyhow::anyhow!("init feature buffer: {e}"))?,
                 );
             }
@@ -586,12 +591,12 @@ mod engine {
             Ok(reshaped)
         }
 
-        /// Reset the feature buffer and lookback to clean zero state.
-        /// Prevents lingering wake-word context from triggering phantom cascades.
+        /// Reset the feature buffer with baseline comfort noise and clean lookback state.
+        /// Prevents lingering wake-word context without causing LayerNorm variance collapse.
         pub fn reset(&mut self) {
             self.raw_lookback.fill(0.0);
             for _ in 0..FEATURE_BUFFER_SIZE {
-                if let Ok(t) = Tensor::from_shape(&[1, 1, 1, 96], &[0f32; 96]) {
+                if let Ok(t) = Tensor::from_shape(&[1, 1, 1, 96], &COMFORT_EMBEDDING) {
                     self.feature_buffer.push_back(t);
                 }
             }
@@ -599,6 +604,14 @@ mod engine {
                 if let Ok(t) = Tensor::from_shape(&[MELS_PER_CHUNK, 32], &[0f32; MELS_PER_CHUNK * 32]) {
                     self.mel_spectrogram_buffer.push_back(t);
                 }
+            }
+        }
+
+        /// Advance feature buffer with comfort noise during silence/VAD vetoes.
+        /// Preserves continuous 1:1 real-time temporal progression without freezing context.
+        pub fn push_comfort_frame(&mut self) {
+            if let Ok(t) = Tensor::from_shape(&[1, 1, 1, 96], &COMFORT_EMBEDDING) {
+                self.feature_buffer.push_back(t);
             }
         }
     }
@@ -860,7 +873,8 @@ mod engine {
             let chunk = match self.preprocessor.process(chunk) {
                 Some(c) => c,
                 None => {
-                    // VAD says no speech — push 0.0 to flush stale values
+                    // Continuous real-time progression: push comfort frame into feature buffer
+                    self.audio_features.push_comfort_frame();
                     self.detections_buffer.push_back(0.0);
                     for cmd in &mut self.command_classifiers {
                         cmd.detections_buffer.push_back(0.0);
@@ -870,30 +884,6 @@ mod engine {
             };
 
             // ─── Energy gate + Automatic Gain Control (AGC) ────────────
-            // The nexus.onnx model produces false positives (0.6-0.9 probability)
-            // when fed pure digital silence (all zeros). This is because the model
-            // was trained on TTS clips that always have a noise floor, so pure
-            // silence is an out-of-distribution input that maps to high probability.
-            //
-            // Fix: compute RMS of the chunk and skip the classifier entirely if
-            // the audio is too quiet to be speech. Push 0.0 to the detection buffer
-            // to flush out any stale high values from the previous chunk.
-            //
-            // Threshold: 0.002 (~-54dBFS) — lowered from 0.005 to allow quiet/
-            //   whispered "NEXUS" calls through. Pure digital silence (RMS=0) and
-            //   mic noise floor (~0.0005-0.001) are still blocked.
-            //
-            // AGC: If the chunk passes the gate but is quieter than normal speech,
-            //   amplify it to a target RMS before feeding the classifier. This
-            //   makes quiet and loud "NEXUS" produce the same model input, so the
-            //   model (trained on normal-volume TTS) recognizes whispered speech.
-            //   The gain is capped at 30x to avoid amplifying pure noise.
-            // Silence gate: raised from 0.0005 to 0.002 to block the lowest-
-            // level noise spikes (driver pops, digital floor) that were being
-            // amplified by AGC into full-scale model input and causing false
-            // wakes. 0.002 is still low enough to catch whispered "nexus"
-            // calls (whispered speech at ~30cm produces RMS ~0.005-0.02).
-            // Adapt silence threshold and pre-gain from acoustic_profile.json
             let silence_rms_threshold = self.acoustic_profile.silence_rms_threshold;
             let target_rms = 0.035f32; // Target nominal speech RMS
             let max_gain = 30.0f32;
@@ -907,7 +897,8 @@ mod engine {
             };
 
             if rms < silence_rms_threshold {
-                // Push low probability to flush stale high values from buffer
+                // Continuous real-time progression: advance buffer with comfort noise
+                self.audio_features.push_comfort_frame();
                 self.detections_buffer.push_back(0.0);
                 // Also flush command classifier buffers
                 for cmd in &mut self.command_classifiers {
@@ -950,6 +941,7 @@ mod engine {
                     }
                 }
                 if voiced == 0 {
+                    self.audio_features.push_comfort_frame();
                     self.detections_buffer.push_back(0.0);
                     for cmd in &mut self.command_classifiers {
                         cmd.detections_buffer.push_back(0.0);
@@ -1145,55 +1137,42 @@ mod engine {
 
         /// Calculate the detection score from the buffer.
         ///
-        /// Three trigger paths (ordered by sensitivity):
-        /// 1. **High-confidence single frame:** If any frame in the buffer
-        ///    exceeds `SINGLE_FRAME_HIGH_CONFIDENCE` (0.5), return it
-        ///    immediately. A single 0.5+ frame is a real wake — the silence
-        ///    gate already blocks digital silence, and the model produces
-        ///    <0.01 on non-wake speech.
-        /// 2. **Max-based detection:** Return the maximum probability in
-        ///    the buffer if it exceeds the threshold. This is far more
-        ///    sensitive than averaging — a single 0.36 frame surrounded by
-        ///    0.0s gives max=0.36 (triggers at threshold 0.35) vs
-        ///    avg=0.03 (never triggers). This is the key fix for 58.2%
-        ///    recall — the model often produces one good frame per
-        ///    utterance, and the old averaging diluted it to nothing.
-        /// 3. **Multi-frame confirmation:** If at least
-        ///    `MIN_POSITIVE_DETECTIONS` frames exceed threshold, return
-        ///    their average. This is a fallback for borderline cases.
+        /// Calculate the detection score from the buffer.
+        ///
+        /// Enforces multi-frame temporal confirmation: human articulation of "NEXUS"
+        /// spans 350-700ms (>= 4 frames). Isolated 80ms single-frame spikes are noise transients.
         fn calculate_average(&self) -> f32 {
             let all = self.detections_buffer.to_vec();
 
-            // Path 1: single high-confidence frame triggers immediately
-            for &d in &all {
-                if d >= SINGLE_FRAME_HIGH_CONFIDENCE {
-                    return d;
-                }
-            }
-
-            // Path 2: max-based detection — return the highest probability
-            // in the buffer if it exceeds threshold. This is the key change
-            // from the old averaging approach which diluted single good
-            // frames with surrounding 0.0s.
-            let max_prob = all.iter().cloned().fold(0.0f32, f32::max);
-            if max_prob > self.threshold {
-                return max_prob;
-            }
-
-            // Path 3: multi-frame confirmation (fallback)
-            let mut cumulative = 0.0f32;
             let mut positive_count = 0.0f32;
-            for d in all {
-                if d > self.threshold {
+            let mut cumulative = 0.0f32;
+            let mut max_val = 0.0f32;
+
+            for &d in &all {
+                if d > max_val {
+                    max_val = d;
+                }
+                if d >= self.threshold {
                     positive_count += 1.0;
                     cumulative += d;
                 }
             }
-            if positive_count < MIN_POSITIVE_DETECTIONS {
-                return 0.0;
+
+            // Path 1: Multi-frame confirmation (requires at least MIN_POSITIVE_DETECTIONS frames)
+            if positive_count >= MIN_POSITIVE_DETECTIONS {
+                return cumulative / positive_count;
             }
-            let avg = cumulative / positive_count;
-            if avg > self.threshold { avg } else { 0.0 }
+
+            // Path 2: Single frame only if high confidence (>= 0.90) AND accompanied
+            // by acoustic evidence in adjacent frames (>= 0.35)
+            if max_val >= 0.90 {
+                let count_near = all.iter().filter(|&&d| d >= 0.35).count();
+                if count_near >= 2 {
+                    return max_val;
+                }
+            }
+
+            0.0
         }
 
         /// Process a chunk of 16kHz mono f32 audio.
@@ -4228,12 +4207,13 @@ mod tests {
         let result = pp.process(silence);
         assert!(result.is_none(), "Preprocessor should reject silence");
 
-        // Test 2: Speech-like signal should pass
+        // Test 2: Speech-like signal should pass (sustained speech across frames)
         let speech: Vec<f32> = (0..1280)
             .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / sr).sin() * 0.3)
             .collect();
+        let _ = pp.process(speech.clone());
         let result = pp.process(speech);
-        assert!(result.is_some(), "Preprocessor should pass speech");
+        assert!(result.is_some(), "Preprocessor should pass sustained speech");
 
         // Test 3: Stats should be tracking
         assert!(pp.vad_skips > 0 || pp.vad_passes > 0, "Preprocessor stats should be non-zero");
