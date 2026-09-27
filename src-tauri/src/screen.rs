@@ -3,7 +3,7 @@
 //! Grounding order (see docs/mcp/09-screen-vision-control.md):
 //!   1. Browser tabs → hotkeys first (Ctrl+1..8, 100% reliable, instant).
 //!   2. Everything else → Windows UIA tree (exact names + boxes, free).
-//!   3. Canvas/custom UI → future (vision model / OCR), not this module.
+//!   3. Canvas/custom UI → vision model / OCR (`vision.rs`, Phase 1+).
 //!
 //! Ordinal rule: visible + enabled actionables in the foreground window,
 //! sorted top-to-bottom then left-to-right. "3rd option" = 3rd actionable.
@@ -184,9 +184,254 @@ pub fn switch_browser_tab(index: u32) -> Result<String, String> {
     Ok(format!("Switched to tab {index}, sir."))
 }
 
+// ─── Screen capture (Phase 1: feed screenshots to the vision model) ──
+// Cross-platform, zero new crates: Windows GDI (mirrors
+// `sidebar_backdrop.rs`), Linux via the xdg-desktop-portal Screenshot
+// API over the existing `zbus` dependency, macOS via `screencapture`.
+
+use image::DynamicImage;
+
+/// Max width (px) sent to the vision model — clicky parity (1280px JPEG).
+pub const VISION_MAX_WIDTH: u32 = 1280;
+/// Hard cap on the JPEG payload (~900KB keeps base64 small for free tiers).
+const VISION_MAX_BYTES: usize = 900_000;
+
+/// A captured screen: original dimensions + downscaled image.
+/// Original dims are kept so Phase-2 pointer coordinates (0-1000
+/// normalized) can map back to physical pixels.
+pub struct ScreenShot {
+    pub image: DynamicImage,
+    pub orig_w: u32,
+    pub orig_h: u32,
+    pub scaled_w: u32,
+    pub scaled_h: u32,
+}
+
+impl ScreenShot {
+    pub fn from_dynamic(img: DynamicImage) -> Self {
+        let (orig_w, orig_h) = (img.width().max(1), img.height().max(1));
+        let (tw, th) = target_dims(orig_w, orig_h, VISION_MAX_WIDTH);
+        let scaled = if tw == orig_w && th == orig_h {
+            img
+        } else {
+            img.resize(tw, th, image::imageops::FilterType::Triangle)
+        };
+        Self {
+            image: scaled,
+            orig_w,
+            orig_h,
+            scaled_w: tw,
+            scaled_h: th,
+        }
+    }
+
+    /// JPEG-encode the (already downscaled) image. Retries once smaller
+    /// when the payload would exceed the free-tier-friendly byte cap.
+    pub fn jpeg(&self) -> Vec<u8> {
+        for (scale, quality) in [(1.0, 80u8), (0.75, 70u8)] {
+            let img = if scale == 1.0 {
+                self.image.clone()
+            } else {
+                let tw = ((self.scaled_w as f32 * scale) as u32).max(1);
+                let th = ((self.scaled_h as f32 * scale) as u32).max(1);
+                self.image
+                    .resize(tw, th, image::imageops::FilterType::Triangle)
+            };
+            let mut buf = Vec::new();
+            let mut enc =
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
+            if enc.encode_image(&img).is_ok() && buf.len() <= VISION_MAX_BYTES {
+                return buf;
+            }
+            if scale < 1.0 {
+                return buf;
+            }
+        }
+        Vec::new()
+    }
+}
+
+/// Pure: (w, h) scaled to fit `max_w`, preserving aspect. Never upscales.
+pub fn target_dims(w: u32, h: u32, max_w: u32) -> (u32, u32) {
+    if w == 0 || h == 0 {
+        return (1, 1);
+    }
+    if w <= max_w {
+        return (w, h);
+    }
+    let s = max_w as f64 / w as f64;
+    (max_w, ((h as f64 * s).round() as u32).max(1))
+}
+
+#[cfg(target_os = "windows")]
+pub async fn capture_primary() -> Result<ScreenShot, String> {
+    use image::{ImageBuffer, Rgba};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+    };
+    let w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+    if w <= 0 || h <= 0 {
+        return Err("could not query screen size".into());
+    }
+    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(0, 0, w, h)
+        .ok_or_else(|| "screen capture failed (BitBlt)".to_string())?;
+    // BGRA (GDI) -> RGBA (image crate); BitBlt leaves alpha empty.
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for px in bgra.chunks_exact(4) {
+        rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+    }
+    let buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(w as u32, h as u32, rgba).ok_or("bad capture buffer")?;
+    Ok(ScreenShot::from_dynamic(DynamicImage::ImageRgba8(buf)))
+}
+
+#[cfg(target_os = "linux")]
+pub async fn capture_primary() -> Result<ScreenShot, String> {
+    let png = portal_screenshot_png().await?;
+    let img =
+        image::load_from_memory(&png).map_err(|e| format!("decode screenshot: {e}"))?;
+    Ok(ScreenShot::from_dynamic(img))
+}
+
+/// Screenshot via org.freedesktop.portal.Desktop (works on X11 and
+/// Wayland wherever xdg-desktop-portal runs — GNOME, KDE, COSMIC).
+/// Returns raw PNG bytes; the portal-owned file is removed afterwards.
+#[cfg(target_os = "linux")]
+async fn portal_screenshot_png() -> Result<Vec<u8>, String> {
+    use std::collections::HashMap;
+    use std::time::Duration;
+    use futures_util::StreamExt;
+    use zbus::fdo::DBusProxy;
+    use zbus::message::Type as MessageType;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+    use zbus::{Connection, MatchRule, MessageStream};
+
+    let conn = Connection::session()
+        .await
+        .map_err(|e| format!("D-Bus session: {e}"))?;
+    let token = format!("nexus{}", std::process::id());
+    let mut opts: HashMap<&str, Value> = HashMap::new();
+    opts.insert("handle_token", Value::from(token.as_str()));
+    let reply = conn
+        .call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some("org.freedesktop.portal.Screenshot"),
+            "Screenshot",
+            &("", opts),
+        )
+        .await
+        .map_err(|e| format!("portal Screenshot call: {e}"))?;
+    let req_path: OwnedObjectPath = reply
+        .body()
+        .deserialize()
+        .map_err(|e| format!("portal reply: {e}"))?;
+    let rule = MatchRule::builder()
+        .msg_type(MessageType::Signal)
+        .interface("org.freedesktop.portal.Request")
+        .map_err(|e| format!("match rule: {e}"))?
+        .path(req_path.into_inner())
+        .map_err(|e| format!("match rule: {e}"))?
+        .member("Response")
+        .map_err(|e| format!("match rule: {e}"))?
+        .build();
+    // Server-side match registration is internal-only in zbus 5, so
+    // register via the standard org.freedesktop.DBus AddMatch call
+    // (same DBusProxy pattern as mpris.rs). Without this the portal's
+    // Response signal is never delivered to our connection.
+    let dbus = DBusProxy::new(&conn)
+        .await
+        .map_err(|e| format!("D-Bus proxy: {e}"))?;
+    dbus.add_match_rule(rule)
+        .await
+        .map_err(|e| format!("match register: {e}"))?;
+    let mut stream = MessageStream::from(&conn);
+    let msg = tokio::time::timeout(Duration::from_secs(25), stream.next())
+        .await
+        .map_err(|_| "screenshot timed out (portal gave no response)".to_string())?
+        .ok_or("portal signal stream ended")?
+        .map_err(|e| format!("portal signal: {e}"))?;
+    let (code, results): (u32, HashMap<String, OwnedValue>) = msg
+        .body()
+        .deserialize()
+        .map_err(|e| format!("portal response: {e}"))?;
+    if code != 0 {
+        return Err(format!("screenshot cancelled/failed (response {code})"));
+    }
+    let uri_v = results.get("uri").ok_or("portal gave no file uri")?;
+    let uri =
+        String::try_from(uri_v.clone()).map_err(|e| format!("bad uri: {e}"))?;
+    let raw = uri
+        .strip_prefix("file://")
+        .ok_or("portal uri is not a file")?;
+    let path = percent_decode(raw);
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("read screenshot file: {e}"))?;
+    let _ = std::fs::remove_file(&path); // best-effort cleanup
+    if bytes.is_empty() {
+        return Err("screenshot file was empty".into());
+    }
+    Ok(bytes)
+}
+
+/// Minimal %XX decoder for file:// URIs (avoids a new crate).
+#[cfg(target_os = "linux")]
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(target_os = "linux")]
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub async fn capture_primary() -> Result<ScreenShot, String> {
+    let tmp = std::env::temp_dir().join(format!("nexus_screen_{}.jpg", std::process::id()));
+    let status = std::process::Command::new("/usr/sbin/screencapture")
+        .args(["-x", "-tjpg"])
+        .arg(&tmp)
+        .status()
+        .map_err(|e| format!("screencapture: {e}"))?;
+    if !status.success() {
+        return Err("screencapture failed (check Screen Recording permission)".into());
+    }
+    let bytes = std::fs::read(&tmp).map_err(|e| format!("read screenshot: {e}"))?;
+    let _ = std::fs::remove_file(&tmp);
+    let img =
+        image::load_from_memory(&bytes).map_err(|e| format!("decode: {e}"))?;
+    Ok(ScreenShot::from_dynamic(img))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+pub async fn capture_primary() -> Result<ScreenShot, String> {
+    Err("screen capture is not supported on this OS".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{ImageBuffer, Rgba};
 
     fn el(name: &str, x: i32, y: i32) -> UiElement {
         UiElement {
@@ -225,5 +470,57 @@ mod tests {
         assert_eq!(parse_ordinal("4"), Some(4));
         assert_eq!(parse_ordinal("option"), None);
         assert_eq!(parse_ordinal("3x"), None);
+    }
+
+    #[test]
+    fn target_dims_downscales_wide_screens() {
+        assert_eq!(target_dims(1920, 1080, 1280), (1280, 720));
+        assert_eq!(target_dims(3840, 2160, 1280), (1280, 720));
+    }
+
+    #[test]
+    fn target_dims_never_upscales() {
+        assert_eq!(target_dims(800, 600, 1280), (800, 600));
+        assert_eq!(target_dims(1280, 800, 1280), (1280, 800));
+        assert_eq!(target_dims(0, 0, 1280), (1, 1));
+    }
+
+    #[test]
+    fn screenshot_from_dynamic_encodes_valid_jpeg() {
+        let buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(2000, 1000, |x, y| Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255]));
+        let shot = ScreenShot::from_dynamic(DynamicImage::ImageRgba8(buf));
+        assert_eq!((shot.orig_w, shot.orig_h), (2000, 1000));
+        assert_eq!((shot.scaled_w, shot.scaled_h), (1280, 640));
+        let jpeg = shot.jpeg();
+        assert!(jpeg.len() > 100, "jpeg should not be empty");
+        assert_eq!(&jpeg[0..2], &[0xFF, 0xD8], "must start with JPEG magic");
+        let decoded = image::load_from_memory(&jpeg).expect("jpeg must decode");
+        assert_eq!((decoded.width(), decoded.height()), (1280, 640));
+    }
+
+    /// Manual smoke test: real OS capture end-to-end. Ignored by default
+    /// (needs a live desktop session + portal/permission); run on demand:
+    /// `cargo test manual_capture_smoke -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn manual_capture_smoke() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let shot = rt
+            .block_on(capture_primary())
+            .expect("OS capture failed");
+        let jpeg = shot.jpeg();
+        assert!(!jpeg.is_empty(), "jpeg must not be empty");
+        println!(
+            "captured {}x{} -> {}x{} ({} byte jpeg)",
+            shot.orig_w,
+            shot.orig_h,
+            shot.scaled_w,
+            shot.scaled_h,
+            jpeg.len()
+        );
     }
 }

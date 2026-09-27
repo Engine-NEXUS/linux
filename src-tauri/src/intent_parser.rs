@@ -132,6 +132,15 @@ pub enum ParsedIntent {
     /// Switch browser tab ("move to the 4th tab" → Ctrl+4).
     #[serde(rename = "browser_tab")]
     BrowserTab { index: u32 },
+    /// Describe what's visible on screen ("what's on my screen").
+    #[serde(rename = "screen_describe")]
+    ScreenDescribe,
+    /// Point at a named UI target ("where is the save button").
+    #[serde(rename = "screen_locate")]
+    ScreenLocate { target: String },
+    /// Read visible screen text aloud ("read this dialog").
+    #[serde(rename = "screen_read_text")]
+    ScreenReadText,
     #[serde(rename = "unknown")]
     Unknown { raw: String },
 }
@@ -184,6 +193,9 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::ScreenClick { .. } => "screen_click",
         ParsedIntent::ScreenRead { .. } => "screen_read",
         ParsedIntent::BrowserTab { .. } => "browser_tab",
+        ParsedIntent::ScreenDescribe => "screen_describe",
+        ParsedIntent::ScreenLocate { .. } => "screen_locate",
+        ParsedIntent::ScreenReadText => "screen_read_text",
         ParsedIntent::GitHubCommand { command } => match command {
             GitHubCommand::MergePr { .. } => "merge_pr",
             GitHubCommand::ApprovePr { .. } => "approve_pr",
@@ -293,6 +305,13 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     // Must precede live/open: "press the 3rd button" is grounding, not a
     // hotkey; "open 4th tab" is a tab switch, not an app.
     if let Some(result) = parse_screen_command(&text) {
+        return Some(result);
+    }
+
+    // --- Screen vision (describe / locate / read what's on screen) ---
+    // Must precede greetings ("what do you see" is vision, not chat) and
+    // search ("find the save button" is grounding, not web search).
+    if let Some(result) = parse_screen_vision(&text) {
         return Some(result);
     }
 
@@ -2507,6 +2526,128 @@ fn parse_screen_command(text: &str) -> Option<ParseResult> {
                         });
                     }
                 }
+            }
+        }
+    }
+    None
+}
+
+// ─── Screen vision (describe / locate / read the screen) ─────────────
+
+/// UI nouns that mark a phrase as pointing at on-screen chrome rather
+/// than a web search or an app ("find the save button" vs "find pizza").
+const SCREEN_UI_NOUNS: &[&str] = &[
+    "button", "link", "menu", "dialog", "tab", "icon", "window", "field", "box",
+    "bar", "panel", "option", "slider", "checkbox", "input", "popup", "toolbar",
+    "sidebar", "cursor", "pointer", "textbox", "dropdown", "dialogue", "clock",
+    "tray", "desktop", "taskbar", "dock", "status", "title", "header", "footer",
+    // NOTE: "list" deliberately excluded — "show me the pr list" is a PR
+    // command, not pointing ("list" alone is content, not chrome).
+    "table", "row", "column", "card", "banner", "notification", "alert",
+];
+
+fn has_ui_noun(s: &str) -> bool {
+    SCREEN_UI_NOUNS.iter().any(|n| s.contains(n))
+}
+
+/// Strip trailing screen-scope tails ("on my screen", "on screen", "for me").
+fn strip_screen_tail(s: &str) -> &str {
+    for tail in [" on my screen", " on the screen", " on screen", " for me"] {
+        if let Some(rest) = s.strip_suffix(tail) {
+            return rest.trim();
+        }
+    }
+    s
+}
+
+fn screen_vision_hit(intent: ParsedIntent) -> Option<ParseResult> {
+    Some(ParseResult {
+        intent,
+        confidence: 0.9,
+        source: "deterministic".to_string(),
+    })
+}
+
+/// "what's on my screen" → ScreenDescribe; "where is X" / "point at X" →
+/// ScreenLocate; "read this dialog" → ScreenReadText.
+fn parse_screen_vision(text: &str) -> Option<ParseResult> {
+    // Describe: whole-screen questions.
+    for phrase in [
+        "what's on my screen",
+        "what is on my screen",
+        "what's on the screen",
+        "what is on the screen",
+        "describe my screen",
+        "describe the screen",
+        "describe what you see",
+        "what do you see",
+        "what am i looking at",
+        "tell me what's on my screen",
+        "tell me what is on my screen",
+    ] {
+        if text == phrase {
+            return screen_vision_hit(ParsedIntent::ScreenDescribe);
+        }
+    }
+
+    // Read: visible text read-back.
+    for phrase in [
+        "read the screen",
+        "read my screen",
+        "read this dialog",
+        "read this dialogue",
+        "read this window",
+        "read this error",
+        "read this popup",
+        "read what's on the screen",
+        "read what is on the screen",
+        "read what's on my screen",
+        "what does this say",
+        "what does the dialog say",
+        "what does this dialog say",
+        "what does this error say",
+    ] {
+        if text == phrase {
+            return screen_vision_hit(ParsedIntent::ScreenReadText);
+        }
+    }
+
+    // Locate: explicit pointing verbs always ground.
+    for prefix in ["point at ", "point to ", "locate "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let target = strip_screen_tail(rest).trim();
+            if !target.is_empty() {
+                return screen_vision_hit(ParsedIntent::ScreenLocate {
+                    target: target.to_string(),
+                });
+            }
+        }
+    }
+    // "where is X": only when scoped to the screen or naming UI
+    // chrome — "where is the eiffel tower" stays a general question.
+    for prefix in ["where is ", "where's ", "where are "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let target = strip_screen_tail(rest).trim();
+            let scoped = target.len() != rest.trim().len();
+            if !target.is_empty() && (scoped || has_ui_noun(target)) {
+                return screen_vision_hit(ParsedIntent::ScreenLocate {
+                    target: target.to_string(),
+                });
+            }
+        }
+    }
+
+    // "find X" / "show me X": only when scoped to the screen or when the
+    // tail names UI chrome — otherwise it's a web search or an app open
+    // ("find restaurants", "show me chrome" must fall through).
+    for prefix in ["find ", "show me "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let target = strip_screen_tail(rest).trim();
+            let scoped = target.len() != rest.trim().len();
+            if !target.is_empty() && (scoped || has_ui_noun(target)) {
+                return screen_vision_hit(ParsedIntent::ScreenLocate {
+                    target: target.to_string(),
+                });
             }
         }
     }
@@ -5871,5 +6012,103 @@ mod tests {
             }),
             "send_whatsapp_message"
         );
+        assert_eq!(intent_to_label(&ParsedIntent::ScreenDescribe), "screen_describe");
+        assert_eq!(
+            intent_to_label(&ParsedIntent::ScreenLocate {
+                target: "save button".to_string()
+            }),
+            "screen_locate"
+        );
+        assert_eq!(
+            intent_to_label(&ParsedIntent::ScreenReadText),
+            "screen_read_text"
+        );
+    }
+
+    #[test]
+    fn test_screen_describe_forms() {
+        for phrase in [
+            "what's on my screen",
+            "what is on my screen",
+            "describe my screen",
+            "what do you see",
+            "what am i looking at",
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should parse");
+            assert!(
+                matches!(result.unwrap().intent, ParsedIntent::ScreenDescribe),
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_screen_locate_forms() {
+        for (phrase, want) in [
+            ("where is the save button", "the save button"),
+            ("where's the search bar", "the search bar"),
+            ("point at the close icon", "the close icon"),
+            ("point to the settings menu on my screen", "the settings menu"),
+            ("find the save button", "the save button"),
+            ("find the address bar on screen", "the address bar"),
+            ("show me the submit button", "the submit button"),
+            ("locate the downloads folder", "the downloads folder"),
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should parse");
+            if let ParsedIntent::ScreenLocate { target } = result.unwrap().intent {
+                assert_eq!(target, want, "{phrase}");
+            } else {
+                panic!("expected ScreenLocate for {phrase}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_screen_vision_does_not_eat_search_or_apps() {
+        // No UI noun and no screen scope → must fall through to
+        // search/app handling, never ScreenLocate.
+        for phrase in ["find restaurants", "show me chrome", "find biryani near me", "where is the eiffel tower", "where's the nearest hospital"] {
+            let result = parse_deterministic(phrase);
+            if let Some(r) = result {
+                assert!(
+                    !matches!(r.intent, ParsedIntent::ScreenLocate { .. }),
+                    "{phrase} must not locate"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_screen_read_text_forms() {
+        for phrase in [
+            "read the screen",
+            "read this dialog",
+            "what does this say",
+            "what does the dialog say",
+        ] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should parse");
+            assert!(
+                matches!(result.unwrap().intent, ParsedIntent::ScreenReadText),
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_screen_ordinal_forms_still_win() {
+        // Ordinal grounding keeps priority over vision phrasings.
+        let result = parse_deterministic("what's the 2nd button");
+        assert!(matches!(
+            result.unwrap().intent,
+            ParsedIntent::ScreenRead { ordinal: 2 }
+        ));
+        let result = parse_deterministic("click the 3rd option");
+        assert!(matches!(
+            result.unwrap().intent,
+            ParsedIntent::ScreenClick { ordinal: 3 }
+        ));
     }
 }

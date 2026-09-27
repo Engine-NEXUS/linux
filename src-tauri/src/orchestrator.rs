@@ -416,11 +416,14 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // asked for the missing slot rather than getting a guess/refusal.
         ParsedIntent::NeedMoreInfo { .. } => Subsystem::LocalCommand,
 
-        // Screen control intents are handled explicitly in
-        // process_transcript (run_screen_click/read/tab); tracked as local.
+        // Screen control + vision intents are handled explicitly in
+        // process_transcript (run_screen_click/read/tab/vision); tracked as local.
         ParsedIntent::ScreenClick { .. }
         | ParsedIntent::ScreenRead { .. }
-        | ParsedIntent::BrowserTab { .. } => Subsystem::LocalCommand,
+        | ParsedIntent::BrowserTab { .. }
+        | ParsedIntent::ScreenDescribe
+        | ParsedIntent::ScreenLocate { .. }
+        | ParsedIntent::ScreenReadText => Subsystem::LocalCommand,
 
         // Ghostwriter room entry — handled explicitly in process_transcript
         // (session start + sidebar card), tracked as a local request.
@@ -533,9 +536,10 @@ pub async fn process_transcript<R: Runtime>(
         return run_ghostwriter_enter(app, contact.clone()).await;
     }
 
-    // ─── Screen control (ordinal click / read-back / tab switch) ────
-    // Executes inline (UIA grounding is local, ~50-500ms) with spoken
-    // results. Nothing here touches the network.
+    // ─── Screen control + vision (ordinal click / read-back / tab switch /
+    // describe-locate-read via screenshot + vision model) ────
+    // Executes inline with spoken results. Ordinal grounding is local;
+    // vision Q&A touches the free vision chain (Gemini → Groq).
     match &intent {
         ParsedIntent::ScreenClick { ordinal } => {
             return run_screen_click(app, *ordinal).await;
@@ -545,6 +549,19 @@ pub async fn process_transcript<R: Runtime>(
         }
         ParsedIntent::BrowserTab { index } => {
             return run_browser_tab(app, *index).await;
+        }
+        ParsedIntent::ScreenDescribe => {
+            return run_screen_vision(app, crate::vision::ScreenVisionKind::Describe).await;
+        }
+        ParsedIntent::ScreenLocate { target } => {
+            return run_screen_vision(
+                app,
+                crate::vision::ScreenVisionKind::Locate(target.clone()),
+            )
+            .await;
+        }
+        ParsedIntent::ScreenReadText => {
+            return run_screen_vision(app, crate::vision::ScreenVisionKind::ReadText).await;
         }
         _ => {}
     }
@@ -2124,6 +2141,55 @@ async fn run_screen_read<R: Runtime>(
     {
         let _ = ordinal;
         speak_line(&app, "Screen reading needs Windows, sir.".to_string(), &request_id);
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Answer a screen-vision question: capture the screen, ask the free
+/// vision chain (Gemini → Groq), speak the answer. Locate targets are
+/// parsed + logged now; the Phase-2 overlay window will render them.
+async fn run_screen_vision<R: Runtime>(
+    app: AppHandle<R>,
+    kind: crate::vision::ScreenVisionKind,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let t0 = std::time::Instant::now();
+    let keys = crate::router::read_provider_keys(&app);
+    let outcome: Result<String, String> = async {
+        let shot = crate::screen::capture_primary().await?;
+        let jpeg = shot.jpeg();
+        if jpeg.is_empty() {
+            return Err("screenshot encoding failed".into());
+        }
+        let answer = crate::vision::ask_about_screen(&jpeg, &kind, &keys).await?;
+        let is_locate = matches!(kind, crate::vision::ScreenVisionKind::Locate(_));
+        // Phase 2: show the pointer marker when Table-B conditions pass.
+        // Coordinates are normalized 0-1000 of the scaled image; the
+        // pointer module maps them to physical pixels for the overlay.
+        crate::pointer::maybe_show(
+            &app,
+            is_locate,
+            answer.point.as_ref(),
+            shot.orig_w,
+            shot.orig_h,
+        );
+        Ok(answer.speak)
+    }
+    .await;
+    match outcome {
+        Ok(text) => {
+            tracing::info!(
+                "screen vision: answered in {}ms",
+                t0.elapsed().as_millis()
+            );
+            speak_line(&app, text, &request_id);
+        }
+        Err(e) => speak_line(&app, format!("I couldn't see the screen, sir: {e}"), &request_id),
     }
     clear_active_request(&request_id);
     Ok(ProcessResult {

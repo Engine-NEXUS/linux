@@ -1,9 +1,11 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Avatar } from "./avatar/Avatar";
 import { LoadingAnimation } from "./LoadingAnimation";
 import { useAssistant } from "./store/assistant";
 import { useRoam } from "./avatar/useRoam";
 import { initOrchestratorListener } from "./net/orchestrator";
+import { PointerOverlay } from "./overlay/PointerOverlay";
+import { watchPointer, type PointerShowPayload } from "./net/pointer";
 
 function isTauri(): boolean {
   return typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
@@ -37,6 +39,57 @@ export default function App() {
   // Fullscreen stage: the orb roams when idle, parks when woken.
   const roaming = !visible;
   const { x, y, held, onPointerDown } = useRoam(roaming);
+
+  // Screen pointer (Phase 2): marker shown only for locate responses.
+  // Rust owns visibility conditions; the frontend owns dwell timing,
+  // fade, and instant-hide on new turns / Escape / pointer:hide.
+  const [pointer, setPointer] = useState<PointerShowPayload | null>(null);
+  const [pointerFading, setPointerFading] = useState(false);
+  const dwellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearPointerTimers = () => {
+    if (dwellTimer.current) clearTimeout(dwellTimer.current);
+    if (fadeTimer.current) clearTimeout(fadeTimer.current);
+    dwellTimer.current = null;
+    fadeTimer.current = null;
+  };
+  const hidePointerNow = useCallback(() => {
+    clearPointerTimers();
+    setPointerFading(false);
+    setPointer(null);
+  }, []);
+  const showPointer = useCallback((p: PointerShowPayload) => {
+    clearPointerTimers();
+    setPointerFading(false);
+    setPointer({ x: p.x, y: p.y, label: p.label, dwell_ms: p.dwell_ms });
+    dwellTimer.current = setTimeout(() => {
+      setPointerFading(true);
+      fadeTimer.current = setTimeout(() => {
+        setPointer(null);
+        setPointerFading(false);
+      }, 450);
+    }, Math.max(1000, p.dwell_ms || 6000));
+  }, []);
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    void watchPointer(showPointer, hidePointerNow).then((d) => {
+      dispose = d;
+    });
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") hidePointerNow();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      dispose?.();
+      window.removeEventListener("keydown", onKey);
+      clearPointerTimers();
+    };
+  }, [showPointer, hidePointerNow]);
+  // A new turn (barge-in, wake, hotkey) hides the marker instantly —
+  // but Done→idle must NOT (the dwell outlives the turn by design).
+  useEffect(() => {
+    if (state === "listening") hidePointerNow();
+  }, [state, hidePointerNow]);
 
   // 8-second auto-hide: if user doesn't respond while listening, park off.
   // Also cleans up VAD + recording + mic stream to avoid orphaned AudioContexts.
@@ -130,6 +183,7 @@ export default function App() {
           {state === "thinking" ? <LoadingAnimation /> : <Avatar />}
         </div>
       </div>
+      {pointer && <PointerOverlay target={pointer} fading={pointerFading} />}
     </div>
   );
 }

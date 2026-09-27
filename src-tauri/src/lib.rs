@@ -64,6 +64,8 @@ pub mod mcp_client;
 pub mod auth_vault;
 pub mod ghostwriter;
 pub mod screen;
+pub mod vision;
+pub mod pointer;
 pub mod telegram;
 pub mod command_center;
 pub mod nlu_update;
@@ -934,6 +936,7 @@ pub fn run() {
             window_manager::show_overlay,
             window_manager::hide_overlay,
             window_manager::set_orb_position,
+            pointer::hide_pointer,
             network::open_session,
             network::send_transcript,
             network::cancel_session,

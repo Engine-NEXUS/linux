@@ -1593,6 +1593,33 @@ pub struct NexusSettings {
     /// vault ("telegram" service), never here. Set from the Connections tab.
     #[serde(default)]
     pub telegram_chat_id: String,
+    /// Screen pointer master toggle (Phase-2 screen agent). When false,
+    /// locate answers are spoken but no marker is ever shown.
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub pointer_enabled: bool,
+    /// Screen pointer dwell time in seconds before auto-hide + fade.
+    /// Clamped to 3-15 at read time. Default: 6.
+    #[serde(default = "default_pointer_dwell_seconds")]
+    pub pointer_dwell_seconds: u32,
+    /// Comma-separated foreground app titles the pointer never appears
+    /// over (privacy: banking, password managers, ...). Empty = no
+    /// exclusions. Matching is case-insensitive substring on Windows;
+    /// other OSes have no foreground-title API yet (see pointer.rs).
+    #[serde(default)]
+    pub pointer_excluded_apps: String,
+    /// Suppress the pointer while a fullscreen app (game/video) is in
+    /// the foreground. Default: true. Detection is Windows-only for now.
+    #[serde(default = "default_true")]
+    pub pointer_suppress_fullscreen: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_pointer_dwell_seconds() -> u32 {
+    6
 }
 
 fn default_tts_provider() -> String {
@@ -1664,6 +1691,10 @@ impl Default for NexusSettings {
             verify_wake: true,
             mic_keep_alive: true,
             telegram_chat_id: String::new(),
+            pointer_enabled: true,
+            pointer_dwell_seconds: 6,
+            pointer_excluded_apps: String::new(),
+            pointer_suppress_fullscreen: true,
         }
     }
 }
