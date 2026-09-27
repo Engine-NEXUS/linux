@@ -191,6 +191,27 @@ html, body, #root {
   }
 }
 
+/* Linux (Wayland compositor-centered, no native blur, no backdrop
+   capture): always render the card as a solid floating panel, even
+   where backdrop-filter claims support. body[data-platform] is set
+   in main.tsx. */
+body[data-platform="linux"] #sidebar-app {
+  align-items: flex-end;
+  justify-content: flex-start;
+  padding: 0;
+}
+body[data-platform="linux"] .sidebar-card {
+  background: #1e1e20;
+  background-image: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7);
+}
+body[data-platform="linux"] .sidebar-card::before,
+body[data-platform="linux"] .sidebar-card::after {
+  display: none;
+}
+
 /* ── Sizing Scales ─────────────────────────────────────────────── */
 .sidebar-card.font-size--sm {
   --sidebar-base-font: 12px;

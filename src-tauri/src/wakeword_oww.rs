@@ -1003,7 +1003,7 @@ mod engine {
             // producing any signal at all. This is critical for debugging
             // "nexus is not waking up" issues.
             if probability > 0.1 {
-                tracing::info!(
+                tracing::debug!(
                     "wake: model probability={:.3} (threshold={:.3}, buffer_avg will be computed)",
                     probability, self.threshold
                 );
@@ -1021,10 +1021,11 @@ mod engine {
 
             let since_last = self.last_detection_time.elapsed().as_millis();
 
-            // Log which trigger path is being taken (for debugging)
-            if avg >= SINGLE_FRAME_HIGH_CONFIDENCE {
+            // Log real trigger candidates at debug — INFO here floods at
+            // 12.5 lines/sec on any noisy room.
+            if avg > 0.0 {
                 tracing::info!(
-                    "wake: high-confidence single-frame trigger (avg={:.3}, prob={:.3})",
+                    "wake: sustained trigger candidate (avg={:.3}, prob={:.3})",
                     avg, probability
                 );
             }

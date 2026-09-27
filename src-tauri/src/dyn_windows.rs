@@ -70,7 +70,9 @@ impl WindowConfig {
     pub fn sidebar() -> Self {
         Self {
             label: "sidebar", title: "NEXUS Response", url: "sidebar.html",
-            width: 600., height: 1000., min_width: Some(600.), min_height: Some(1000.),
+            // Match the taskbar-adjacent height so no gap/overlap shows:
+            // keep the card inside the 1000px-tall window, never bigger.
+            width: 600., height: 960., min_width: Some(600.), min_height: Some(960.),
             resizable: false, decorations: false, transparent: true,
             always_on_top: true, skip_taskbar: true, shadow: false,
             focus: false, center: false, hidden_title: true,

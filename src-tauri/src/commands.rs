@@ -1591,7 +1591,7 @@ pub struct NexusSettings {
 }
 
 fn default_tts_provider() -> String {
-    "kokoro".to_string()
+    "piper".to_string()
 }
 
 fn default_tts_volume() -> u8 {
@@ -1630,7 +1630,7 @@ impl Default for NexusSettings {
     fn default() -> Self {
         Self {
             autostart: true,
-            hotkey: "Ctrl+Space".to_string(),
+            hotkey: "Ctrl+Super+Space".to_string(),
             auto_hide_delay: 8,
             wake_word_enabled: true,
             wake_phrase: "NEXUS".to_string(),
@@ -1644,9 +1644,9 @@ impl Default for NexusSettings {
                 .to_string(),
             user_id: String::new(),
             device_id: String::new(),
-            tts_voice: "af_sky".to_string(),
+            tts_voice: "en_US-amy-medium".to_string(),
             speech_rate: 1.15,
-            tts_provider: "kokoro".to_string(),
+            tts_provider: "piper".to_string(),
             tts_volume: 75,
             groq_api_key: String::new(),
             edge_tts_voice: "en-US-AvaNeural".to_string(),

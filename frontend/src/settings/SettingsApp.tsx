@@ -43,7 +43,7 @@ interface Settings {
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: true,
-  hotkey: "Ctrl+Space",
+  hotkey: "Ctrl+Super+Space",
   autoHideDelay: 8,
   wakeWordEnabled: true,
   wakePhrase: "NEXUS",
@@ -55,7 +55,7 @@ const DEFAULT_SETTINGS: Settings = {
   serverUrl: "",
   userId: "local-user",
   deviceId: "local-device",
-  ttsVoice: "af_sky",
+  ttsVoice: "en_US-amy-medium",
   speechRate: 1.15,
   ttsVolume: 75,
   ttsProvider: "kokoro",
@@ -213,7 +213,7 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Global hotkey</span>
-            <span className="nx-row-hint">Press this key combo to wake NEXUS</span>
+            <span className="nx-row-hint">Ctrl+Super+Space — DE keybind to nexus --wake (fixed)</span>
           </div>
           <input className="nx-input" value={settings.hotkey} onChange={(e) => update("hotkey", e.target.value)} />
         </div>

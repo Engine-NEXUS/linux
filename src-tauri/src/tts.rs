@@ -218,8 +218,9 @@ pub async fn speak_text(
         crate::volume::restore_volume();
     }
 
-    // Grace period
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Grace period — wake stays suppressed until the room clears:
+    // 500ms buffer settle + 2500ms speaker reverb decay (Linux).
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
     meeting.set_tts_playing(false);
 
     play_result
@@ -336,8 +337,9 @@ pub async fn speak_cached(
         crate::volume::restore_volume();
     }
 
-    // Grace period
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Grace period — wake stays suppressed until the room clears:
+    // 500ms buffer settle + 2500ms speaker reverb decay (Linux).
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
     meeting.set_tts_playing(false);
 
     play_result

@@ -2,7 +2,7 @@
 //!
 //! Services checked:
 //!   1. STT (faster-whisper tiny.en on port 39217 — lazy-started)
-//!   2. TTS (in-process Kokoro engine readiness)
+//!   2. TTS (Piper amy-medium, lazy-loaded)
 //!   3. Cloudflare Worker (HTTP GET to /health)
 //!   4. GitHub OAuth (via Worker /oauth/status)
 //!   5. Google OAuth (via Worker /oauth/status)

@@ -829,6 +829,72 @@ pub fn run() {
                         let _ = main_win.hide();
                     }
                 }
+                // Linux DE keybind target (`nexus --wake`,
+                // Ctrl+Super+Space): cold start must show AND wake, else orb
+                // sits idle. Second-instance --wake already wakes via
+                // single-instance callback above.
+                // ponytail: ceiling = show+wake. Upgrade = portal
+                // GlobalShortcuts (ashpd) when COSMIC/GNOME support settles.
+                //
+                // First-run hotkey: best-effort gsettings bind of
+                // Ctrl+Super+Space (Super+Space owned by launcher /
+                // switch-input-source; Ctrl+Space owned by IME).
+                // Never fails startup; COSMIC without gsettings schema falls
+                // back to the manual Settings > Keyboard path.
+                #[cfg(target_os = "linux")]
+                {
+                    let exe = std::env::current_exe()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| "nexus".to_string());
+                    std::process::Command::new("gsettings")
+                        .args([
+                            "get",
+                            "org.gnome.settings-daemon.plugins.media-keys",
+                            "custom-keybindings",
+                        ])
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        .filter(|s| !s.contains("nexus-wake"))
+                        .and_then(|existing| {
+                            let slot = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/nexus-wake/";
+                            let updated = if existing.trim() == "@as []" || existing.trim() == "[]" {
+                                format!("['{slot}']")
+                            } else {
+                                format!("{}, '{slot}']", existing.trim_end_matches(['\n', ']']))
+                            };
+                            std::process::Command::new("gsettings")
+                                .args([
+                                    "set",
+                                    "org.gnome.settings-daemon.plugins.media-keys",
+                                    "custom-keybindings",
+                                    &updated,
+                                ])
+                                .status()
+                                .ok()
+                                .filter(|s| s.success())
+                        })
+                        .map(|_| {
+                            let slot = "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/nexus-wake/";
+                            let _ = std::process::Command::new("gsettings")
+                                .args(["set", slot, "name", "NEXUS Wake"]).status();
+                            let _ = std::process::Command::new("gsettings")
+                                .args(["set", slot, "command", &format!("{exe} --wake")]).status();
+                            // Ctrl+Super+Space: Super+Space is owned by the
+                            // launcher / switch-input-source on COSMIC+GNOME.
+                            let _ = std::process::Command::new("gsettings")
+                                .args(["set", slot, "binding", "<Primary><Super>space"]).status();
+                        });
+                }
+                if std::env::args().any(|arg| arg == "--wake") {
+                    tracing::info!("startup: --wake flag — waking orb");
+                    if let Some(main_win) = app.get_webview_window("main") {
+                        let _ = main_win.show();
+                        let _ = crate::window_manager::configure_non_activating_overlay(&main_win);
+                        let _ = main_win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
+                    }
+                }
             }
 
             // Run connection diagnostics on startup.

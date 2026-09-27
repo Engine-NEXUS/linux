@@ -17,11 +17,11 @@ export function SetupApp() {
   const [step, setStep] = useState<Step>(0);
   const [serverUrl, setServerUrl] = useState("");
   const [userId, setUserId] = useState("");
-  const [selectedVoice, setSelectedVoice] = useState<string>("af_sky");
+  const [selectedVoice, setSelectedVoice] = useState<string>("en_US-amy-medium");
   const [playingVoice, setPlayingVoice] = useState<string | null>(null);
 
   // Settings
-  const [hotkey] = useState("Super+Space");
+  const [hotkey] = useState("Ctrl+Super+Space");
   const [wakeWordEnabled, setWakeWordEnabled] = useState(true);
   const [autostart, setAutostart] = useState(true);
   const [ttsVolume, setTtsVolume] = useState(75);
@@ -550,10 +550,10 @@ export function SetupApp() {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px", border: "1px solid var(--nx-border)", borderRadius: "8px" }}>
                     <div>
                       <div style={{ fontWeight: 600, fontSize: "var(--nx-text-sm)" }}>Global Hotkey</div>
-                      <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)" }}>Super+Space — instantly wake/toggle assistant</div>
+                      <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)" }}>Ctrl+Super+Space — instantly wake/toggle assistant</div>
                     </div>
                     <div style={{ padding: "6px 10px", fontSize: "var(--nx-text-xs)", border: "1px solid var(--nx-border)", borderRadius: "6px", width: "140px", textAlign: "center", color: "var(--nx-text-secondary)", background: "var(--nx-surface-2)" }}>
-                      Super+Space
+                      Ctrl+Super+Space
                     </div>
                   </div>
 

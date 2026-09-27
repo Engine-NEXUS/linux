@@ -92,7 +92,7 @@ async function getSavedSettings(): Promise<any> {
   }
 }
 
-export async function playKokoro(
+export async function playPiper(
   text: string,
   voiceId: string,
   speed: number,
@@ -115,7 +115,7 @@ export async function playKokoro(
   } catch (err) {
     // Only fall back to Web Speech if we haven't been barged in
     if (ttsGeneration === myGen) {
-      console.error("[TTS] Kokoro failed, falling back to Web Speech:", err);
+      console.error("[TTS] Piper failed, falling back to Web Speech:", err);
       await speakWebSpeech(text, speed);
     }
   } finally {
@@ -161,7 +161,6 @@ export async function previewVoice(
   stopTts();
   // All voices now go through the Rust speak_text command which tries
   // Edge TTS (cloud) first, then Piper (local) fallback.
-  // The voice.id should be a valid Edge TTS voice (e.g. "en-US-AvaNeural").
   return playKokoro(voice.sampleText, voice.id, speed ?? 1.15, ttsGeneration, onEnd);
 }
 
