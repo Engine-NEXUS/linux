@@ -82,15 +82,10 @@ jobs:
         working-directory: server/nlu
         run: python -c "import ast; ast.parse(open('train.py').read()); print('train.py parses OK')"
 
-      - name: Check sidecar modules parse
-        working-directory: server/sidecar
-        run: |
-          python -c "import ast; [ast.parse(open(f).read()) for f in ['sidecar.py','tts.py','oauth.py','db.py','n8n_client.py']]; print('All sidecar modules parse OK')"
-
-      - name: Validate n8n blueprints
-        working-directory: server/n8n
-        run: |
-          python -c "import json; [json.load(open(f)) for f in ['master_supervisor.blueprint.json','email_summarize.blueprint.json','github_pr_check.blueprint.json','calendar_peek.blueprint.json','general_chat.blueprint.json']]; print('All blueprints are valid JSON')"
+      # NOTE (2026-09-27): the legacy sidecar (server/sidecar/) and n8n
+      # blueprints (server/n8n/) were removed with the serverless migration
+      # (Worker + lazy Python sidecars). Their parse/validate steps are
+      # intentionally gone — do not re-add without restoring the dirs.
 
       - name: Validate NLU Data Foundation
         run: python server/nlu/data_foundation.py validate
