@@ -93,6 +93,7 @@ fn is_nlu_responsive() -> bool {
 /// Find a working Python interpreter.
 ///
 /// Search order:
+///
 /// 1. `python`, `python3`, `py` on PATH (fast, works if PATH is updated)
 /// 2. Windows registry: HKCU/HKLM PythonCore\3.12\InstallPath, 3.11, 3.10
 /// 3. Common per-user install: %LOCALAPPDATA%\Programs\Python\Python3XX\python.exe
@@ -100,7 +101,8 @@ fn is_nlu_responsive() -> bool {
 /// This is needed because the NSIS installer installs Python with
 /// PrependPath=1, but the PATH update doesn't reach processes spawned
 /// from the installer process (the app is launched immediately after).
-fn find_python() -> Option<String> {
+/// Shared with lazy_ocr (same probe).
+pub(crate) fn find_python() -> Option<String> {
     // 1. Try PATH-based commands — verify each actually works
     for cmd in &["python", "python3", "py"] {
         if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {

@@ -20,7 +20,7 @@ import {
  * Overwrites on each save (std::fs::write).
  */
 
-type Tab = "display" | "audio" | "auth" | "connections";
+type Tab = "display" | "audio" | "auth" | "connections" | "screen";
 
 interface Settings {
   autostart: boolean;
@@ -54,6 +54,11 @@ interface Settings {
   moonshineModel?: string;
   // Telegram owner chat id (remote bridge; token lives in vault)
   telegramChatId?: string;
+  // Screen pointer (Phase 2 — locate marker overlay)
+  pointerEnabled?: boolean;
+  pointerDwellSeconds?: number;
+  pointerExcludedApps?: string;
+  pointerSuppressFullscreen?: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -83,6 +88,10 @@ const DEFAULT_SETTINGS: Settings = {
   cerebrasApiKey: "",
   moonshineModel: "medium_streaming",
   telegramChatId: "",
+  pointerEnabled: true,
+  pointerDwellSeconds: 6,
+  pointerExcludedApps: "",
+  pointerSuppressFullscreen: true,
 };
 
 const TABS: { id: Tab; label: string }[] = [
@@ -90,6 +99,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "audio", label: "Audio" },
   { id: "auth", label: "Accounts" },
   { id: "connections", label: "Connections" },
+  { id: "screen", label: "Screen" },
 ];
 
 export function SettingsSidebarApp() {
@@ -204,6 +214,7 @@ export function SettingsSidebarApp() {
         {tab === "audio" && <AudioTab settings={settings} update={update} />}
         {tab === "auth" && <AuthTab settings={settings} update={update} />}
         {tab === "connections" && <ConnectionsTab settings={settings} update={update} />}
+        {tab === "screen" && <ScreenTab settings={settings} update={update} />}
       </div>
 
       {/* Footer */}
@@ -344,6 +355,79 @@ function DisplayTab({ settings, update }: {
             </button>
           </div>
         </div>
+      </div>
+    </>
+  );
+}
+
+// ─── Screen Tab (Phase 2 — locate marker overlay) ────────────────────
+function ScreenTab({ settings, update }: {
+  settings: Settings;
+  update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
+}) {
+  const dwell = Math.min(15, Math.max(3, settings.pointerDwellSeconds ?? 6));
+  return (
+    <>
+      <div className="settings-section">
+        <div className="settings-section-title">Locate Marker</div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Show pointer</div>
+            <div className="setting-desc">Marker appears only for locate answers</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${(settings.pointerEnabled ?? true) ? "settings-toggle--on" : ""}`}
+              onClick={() => update("pointerEnabled", !(settings.pointerEnabled ?? true))}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Dwell time</div>
+            <div className="setting-desc">Auto-hide after 3–15 seconds</div>
+          </div>
+          <div className="setting-control">
+            <input
+              type="range"
+              className="settings-slider"
+              min={3}
+              max={15}
+              value={dwell}
+              onChange={(e) => update("pointerDwellSeconds", parseInt(e.target.value))}
+            />
+            <span className="slider-value">{dwell}s</span>
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Suppress in fullscreen</div>
+            <div className="setting-desc">Hide marker over games and video</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${(settings.pointerSuppressFullscreen ?? true) ? "settings-toggle--on" : ""}`}
+              onClick={() => update("pointerSuppressFullscreen", !(settings.pointerSuppressFullscreen ?? true))}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Privacy</div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Excluded apps</div>
+            <div className="setting-desc">Comma-separated window titles NEXUS never looks at</div>
+          </div>
+        </div>
+        <input
+          type="text"
+          className="settings-input"
+          placeholder="bank, 1password, …"
+          value={settings.pointerExcludedApps ?? ""}
+          onChange={(e) => update("pointerExcludedApps", e.target.value)}
+        />
       </div>
     </>
   );

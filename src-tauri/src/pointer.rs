@@ -59,6 +59,14 @@ pub struct PointerContext {
     pub fullscreen_active: bool,
 }
 
+/// Pure: which exclusion entry (if any) matches a foreground title.
+/// Case-insensitive substring. Shared by the overlay decision and the
+/// pre-screenshot privacy gate (single rule, two enforcement points).
+pub fn exclusion_hit<'a>(title: &str, excluded: &'a [String]) -> Option<&'a String> {
+    let lower = title.to_lowercase();
+    excluded.iter().find(|app| lower.contains(app.as_str()))
+}
+
 /// Table-B visibility decision.
 pub enum PointerDecision {
     Show { dwell_ms: u64 },
@@ -74,8 +82,7 @@ pub fn decide(ctx: &PointerContext, settings: &PointerSettings) -> PointerDecisi
         return PointerDecision::Hide { reason: "not a locate response" };
     }
     if let Some(title) = ctx.foreground_title.as_deref() {
-        let lower = title.to_lowercase();
-        if settings.excluded_apps.iter().any(|app| lower.contains(app)) {
+        if exclusion_hit(title, &settings.excluded_apps).is_some() {
             return PointerDecision::Hide { reason: "foreground app is excluded" };
         }
     }
@@ -142,6 +149,19 @@ pub fn fullscreen_active() -> bool {
     false
 }
 
+/// Pre-screenshot privacy gate: returns the matched exclusion entry when
+/// the current foreground app is on the privacy list. Callers must refuse
+/// capture AND UIA enumeration on `Some` — no pixels, no element names.
+/// Windows-only enforcement (no foreground-title API elsewhere yet).
+pub fn exclusion_gate<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let settings = read_settings(app);
+    if settings.excluded_apps.is_empty() {
+        return None;
+    }
+    let title = foreground_title()?;
+    exclusion_hit(&title, &settings.excluded_apps).cloned()
+}
+
 /// Evaluate conditions and emit `pointer:show` when they pass. `norm`
 /// is the 0-1000 model point; `shot_w/h` the ORIGINAL capture dims.
 /// Returns true when the marker was shown.
@@ -166,32 +186,65 @@ pub fn maybe_show<R: Runtime>(
         }
         PointerDecision::Show { dwell_ms } => {
             let pt = point.expect("decide Show implies has_point");
-            let show = PointerShow {
-                x: pt.x as f64 / 1000.0 * shot_w as f64,
-                y: pt.y as f64 / 1000.0 * shot_h as f64,
-                label: pt.label.clone(),
-                dwell_ms,
-            };
-            tracing::info!(
-                "pointer: show '{}' at ({:.0}, {:.0}) for {}ms",
-                show.label,
-                show.x,
-                show.y,
-                dwell_ms
-            );
-            if let Err(e) = app.emit("pointer:show", &show) {
-                tracing::warn!("pointer: emit failed: {e}");
-                return false;
-            }
-            true
+            let x = pt.x as f64 / 1000.0 * shot_w as f64;
+            let y = pt.y as f64 / 1000.0 * shot_h as f64;
+            emit_physical(app, dwell_ms, x, y, pt.label.clone())
         }
     }
+}
+
+/// Show the marker at exact physical pixels (Phase-3a UIA locate-first:
+/// no VLM call, no quota). Same Table-B conditions as the vision path.
+pub fn show_direct<R: Runtime>(app: &AppHandle<R>, x: f64, y: f64, label: String) -> bool {
+    let settings = read_settings(app);
+    let ctx = PointerContext {
+        response_is_locate: true,
+        has_point: true,
+        foreground_title: foreground_title(),
+        fullscreen_active: fullscreen_active(),
+    };
+    match decide(&ctx, &settings) {
+        PointerDecision::Hide { reason } => {
+            tracing::info!("pointer: hidden ({reason})");
+            false
+        }
+        PointerDecision::Show { dwell_ms } => emit_physical(app, dwell_ms, x, y, label),
+    }
+}
+
+/// Emit `pointer:show` for physical-pixel coordinates. Shared by the
+/// vision path (normalized coords) and the UIA direct path.
+fn emit_physical<R: Runtime>(
+    app: &AppHandle<R>,
+    dwell_ms: u64,
+    x: f64,
+    y: f64,
+    label: String,
+) -> bool {
+    let show = PointerShow { x, y, label, dwell_ms };
+    tracing::info!(
+        "pointer: show '{}' at ({:.0}, {:.0}) for {}ms",
+        show.label,
+        show.x,
+        show.y,
+        dwell_ms
+    );
+    if let Err(e) = app.emit("pointer:show", &show) {
+        tracing::warn!("pointer: emit failed: {e}");
+        return false;
+    }
+    true
 }
 
 /// Emit `pointer:hide` (tray/menu path; the frontend also hides on new
 /// turns and dwell expiry by itself).
 #[tauri::command]
 pub fn hide_pointer<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    emit_hide(&app)
+}
+
+/// Non-command hide for in-process callers (stop-speech, repeat flows).
+pub fn emit_hide<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     app.emit("pointer:hide", ()).map_err(|e| e.to_string())
 }
 
@@ -267,5 +320,16 @@ mod tests {
     fn no_foreground_title_never_excludes() {
         let c = PointerContext { foreground_title: None, ..ctx() };
         assert!(matches!(decide(&c, &settings()), PointerDecision::Show { .. }));
+    }
+
+    #[test]
+    fn exclusion_hit_matches_substrings() {
+        let excluded = vec!["bank".to_string(), "1password".to_string()];
+        assert_eq!(
+            exclusion_hit("My BANK - Chrome", &excluded).map(|s| s.as_str()),
+            Some("bank")
+        );
+        assert!(exclusion_hit("VS Code", &excluded).is_none());
+        assert!(exclusion_hit("anything", &[]).is_none());
     }
 }

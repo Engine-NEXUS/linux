@@ -66,6 +66,8 @@ pub mod ghostwriter;
 pub mod screen;
 pub mod vision;
 pub mod pointer;
+pub mod ocr;
+mod lazy_ocr;
 pub mod telegram;
 pub mod command_center;
 pub mod nlu_update;

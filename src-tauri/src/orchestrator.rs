@@ -156,6 +156,27 @@ const ACK_PHRASES: &[&str] = &[
     "One moment sir.",
 ];
 
+/// Screen-agent voice flow state (Phase-4a, all LLM-free):
+/// last spoken screen answer, last shown point (x, y, label, when),
+/// last screenshot (when, jpeg, orig_w/h, scaled_w/h) for the 10s cache.
+static LAST_SCREEN_SPEAK: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+static LAST_POINT: std::sync::Mutex<Option<(f64, f64, String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+static LAST_SHOT: std::sync::Mutex<
+    Option<(std::time::Instant, Vec<u8>, u32, u32, u32, u32)>,
+> = std::sync::Mutex::new(None);
+
+/// Screenshot cache TTL: rapid describe→locate sequences reuse the frame.
+const SHOT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+/// Point re-show TTL: "point again" re-emits stored coords within 120s.
+const POINT_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Pure: is a cached screenshot timestamp still fresh?
+fn cache_fresh(at: std::time::Instant, now: std::time::Instant) -> bool {
+    now.duration_since(at) < SHOT_CACHE_TTL
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────
 
 /// Generate a short request ID (first 12 hex chars of a UUID, enough for uniqueness).
@@ -423,7 +444,10 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::BrowserTab { .. }
         | ParsedIntent::ScreenDescribe
         | ParsedIntent::ScreenLocate { .. }
-        | ParsedIntent::ScreenReadText => Subsystem::LocalCommand,
+        | ParsedIntent::ScreenReadText
+        | ParsedIntent::StopSpeech
+        | ParsedIntent::RepeatScreen
+        | ParsedIntent::PointAgain => Subsystem::LocalCommand,
 
         // Ghostwriter room entry — handled explicitly in process_transcript
         // (session start + sidebar card), tracked as a local request.
@@ -562,6 +586,15 @@ pub async fn process_transcript<R: Runtime>(
         }
         ParsedIntent::ScreenReadText => {
             return run_screen_vision(app, crate::vision::ScreenVisionKind::ReadText).await;
+        }
+        ParsedIntent::StopSpeech => {
+            return run_stop_speech(app).await;
+        }
+        ParsedIntent::RepeatScreen => {
+            return run_repeat_screen(app).await;
+        }
+        ParsedIntent::PointAgain => {
+            return run_point_again(app).await;
         }
         _ => {}
     }
@@ -2160,36 +2193,205 @@ async fn run_screen_vision<R: Runtime>(
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
     let t0 = std::time::Instant::now();
     let keys = crate::router::read_provider_keys(&app);
-    let outcome: Result<String, String> = async {
-        let shot = crate::screen::capture_primary().await?;
-        let jpeg = shot.jpeg();
-        if jpeg.is_empty() {
-            return Err("screenshot encoding failed".into());
+    let outcome: Result<Option<String>, String> = async {
+        // Phase-4b privacy gate FIRST: an excluded foreground app refuses
+        // capture AND UIA enumeration — no pixels, no element names.
+        if crate::pointer::exclusion_gate(&app).is_some() {
+            return Ok(Some(
+                "That's on your privacy list, sir — I won't look at it.".to_string(),
+            ));
         }
+        // Phase-3a locate-first: an exact UIA name match skips the
+        // screenshot + VLM call entirely (free, ~5ms, pixel-perfect).
+        // Off-Windows find_by_name always misses → vision path below.
+        if let crate::vision::ScreenVisionKind::Locate(target) = &kind {
+            if let Some(el) = crate::screen::find_by_name(target) {
+                let cx = (el.x + el.w / 2) as f64;
+                let cy = (el.y + el.h / 2) as f64;
+                let name = el.name.clone();
+                crate::pointer::show_direct(&app, cx, cy, name.clone());
+                let speak = format!("The {name} is on your screen, sir.");
+                *LAST_SCREEN_SPEAK.lock().unwrap() = Some(speak.clone());
+                *LAST_POINT.lock().unwrap() =
+                    Some((cx, cy, name, std::time::Instant::now()));
+                return Ok(Some(speak));
+            }
+        }
+        // 10s screenshot cache: rapid describe→locate sequences reuse the
+        // frame instead of re-capturing (portal round-trip + encoding).
+        // (Clone out of the Mutex first — holding a std guard across
+        // .await would make this future !Send.)
+        let now = std::time::Instant::now();
+        let cached = LAST_SHOT.lock().unwrap().clone();
+        let (jpeg, ow, oh, sw, sh) = match cached {
+            Some((at, jpg, ow, oh, sw, sh)) if cache_fresh(at, now) => {
+                tracing::info!("screen vision: reusing cached screenshot");
+                (jpg, ow, oh, sw, sh)
+            }
+            _ => {
+                let shot = crate::screen::capture_primary().await?;
+                tracing::info!(
+                    "screen vision: stage=capture {}ms",
+                    now.elapsed().as_millis()
+                );
+                let jpeg = shot.jpeg();
+                if jpeg.is_empty() {
+                    return Err("screenshot encoding failed".into());
+                }
+                let dims = (shot.orig_w, shot.orig_h, shot.scaled_w, shot.scaled_h);
+                *LAST_SHOT.lock().unwrap() =
+                    Some((now, jpeg.clone(), dims.0, dims.1, dims.2, dims.3));
+                (jpeg, dims.0, dims.1, dims.2, dims.3)
+            }
+        };
+        let t_vlm = std::time::Instant::now();
         let answer = crate::vision::ask_about_screen(&jpeg, &kind, &keys).await?;
-        let is_locate = matches!(kind, crate::vision::ScreenVisionKind::Locate(_));
-        // Phase 2: show the pointer marker when Table-B conditions pass.
-        // Coordinates are normalized 0-1000 of the scaled image; the
-        // pointer module maps them to physical pixels for the overlay.
-        crate::pointer::maybe_show(
-            &app,
-            is_locate,
-            answer.point.as_ref(),
-            shot.orig_w,
-            shot.orig_h,
+        tracing::info!(
+            "screen vision: stage=vlm {}ms",
+            t_vlm.elapsed().as_millis()
         );
-        Ok(answer.speak)
+        // Phase-3c: on locate, speak immediately, then snap the VLM point
+        // to OCR text (same scaled image) before showing the marker.
+        // OCR failure falls back to raw VLM coords — never blocks speech.
+        if let crate::vision::ScreenVisionKind::Locate(target) = &kind {
+            speak_line(&app, answer.speak.clone(), &request_id);
+            *LAST_SCREEN_SPEAK.lock().unwrap() = Some(answer.speak.clone());
+            if let Some(pt) = &answer.point {
+                let sx = pt.x as f64 / 1000.0 * sw as f64;
+                let sy = pt.y as f64 / 1000.0 * sh as f64;
+                let to_orig = |bx: f64, by: f64| {
+                    (bx * ow as f64 / sw as f64, by * oh as f64 / sh as f64)
+                };
+                let t_ocr = std::time::Instant::now();
+                let (ox, oy, snapped) = match crate::ocr::ocr_image(&jpeg).await {
+                    Ok(boxes) => match crate::ocr::snap_to_text(
+                        &crate::ocr::merge_lines(boxes),
+                        target,
+                        sx,
+                        sy,
+                        120.0,
+                    ) {
+                        Some((bx, by)) => {
+                            tracing::info!("pointer: OCR snapped to ({bx:.0}, {by:.0})");
+                            let (ox, oy) = to_orig(bx, by);
+                            (ox, oy, true)
+                        }
+                        None => {
+                            let (ox, oy) = to_orig(sx, sy);
+                            (ox, oy, false)
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("pointer: OCR tier failed ({e}), using raw VLM coords");
+                        let (ox, oy) = to_orig(sx, sy);
+                        (ox, oy, false)
+                    }
+                };
+                if snapped {
+                    crate::pointer::show_direct(&app, ox, oy, pt.label.clone());
+                } else {
+                    crate::pointer::maybe_show(&app, true, Some(pt), ow, oh);
+                }
+                tracing::info!(
+                    "screen vision: stage=ocr+snap {}ms (snapped={snapped})",
+                    t_ocr.elapsed().as_millis()
+                );
+                *LAST_POINT.lock().unwrap() =
+                    Some((ox, oy, pt.label.clone(), std::time::Instant::now()));
+            }
+            return Ok(None);
+        }
+        *LAST_SCREEN_SPEAK.lock().unwrap() = Some(answer.speak.clone());
+        // A describe/read answer supersedes any old marker — repeating it
+        // must not resurrect a stale pointer from an earlier locate.
+        *LAST_POINT.lock().unwrap() = None;
+        Ok(Some(answer.speak))
     }
     .await;
     match outcome {
-        Ok(text) => {
+        Ok(Some(text)) => {
             tracing::info!(
                 "screen vision: answered in {}ms",
                 t0.elapsed().as_millis()
             );
             speak_line(&app, text, &request_id);
         }
+        Ok(None) => {
+            tracing::info!(
+                "screen vision: answered in {}ms (spoken inline)",
+                t0.elapsed().as_millis()
+            );
+        }
         Err(e) => speak_line(&app, format!("I couldn't see the screen, sir: {e}"), &request_id),
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Stop speaking immediately: kill Rust TTS + hide the pointer marker.
+/// No farewell line — the user asked for silence.
+async fn run_stop_speech<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let _ = crate::tts::stop_tts();
+    let _ = crate::pointer::emit_hide(&app);
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Replay the last screen answer (speech + fresh marker when the point
+/// is still valid). Fully LLM-free — no screenshot, no VLM call.
+async fn run_repeat_screen<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    match LAST_SCREEN_SPEAK.lock().unwrap().clone() {
+        None => speak_line(
+            &app,
+            "I haven't described the screen yet, sir.".to_string(),
+            &request_id,
+        ),
+        Some(text) => {
+            speak_line(&app, text, &request_id);
+            if let Some((x, y, label, at)) = LAST_POINT.lock().unwrap().clone() {
+                if at.elapsed() < POINT_TTL {
+                    crate::pointer::show_direct(&app, x, y, label);
+                }
+            }
+        }
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Re-show the last pointer without a new screenshot (0 quota).
+/// Stale (>120s) or missing points get a guidance line instead.
+async fn run_point_again<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    match LAST_POINT.lock().unwrap().clone() {
+        Some((x, y, label, at)) if at.elapsed() < POINT_TTL => {
+            crate::pointer::show_direct(&app, x, y, label);
+        }
+        _ => speak_line(
+            &app,
+            "Point at what, sir? Ask me where something is first.".to_string(),
+            &request_id,
+        ),
     }
     clear_active_request(&request_id);
     Ok(ProcessResult {
@@ -2913,6 +3115,27 @@ pub async fn orchestrator_hide_loading<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cache_fresh_within_ttl() {
+        let now = std::time::Instant::now();
+        assert!(cache_fresh(now, now));
+        assert!(cache_fresh(now, now + std::time::Duration::from_secs(9)));
+        assert!(!cache_fresh(now, now + std::time::Duration::from_secs(11)));
+    }
+
+    #[test]
+    fn test_route_screen_vision_local() {
+        assert_eq!(route_intent(&ParsedIntent::ScreenDescribe), Subsystem::LocalCommand);
+        assert_eq!(
+            route_intent(&ParsedIntent::ScreenLocate { target: "x".into() }),
+            Subsystem::LocalCommand
+        );
+        assert_eq!(route_intent(&ParsedIntent::ScreenReadText), Subsystem::LocalCommand);
+        assert_eq!(route_intent(&ParsedIntent::StopSpeech), Subsystem::LocalCommand);
+        assert_eq!(route_intent(&ParsedIntent::RepeatScreen), Subsystem::LocalCommand);
+        assert_eq!(route_intent(&ParsedIntent::PointAgain), Subsystem::LocalCommand);
+    }
 
     #[test]
     fn test_route_local_command() {

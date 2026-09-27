@@ -141,6 +141,16 @@ pub enum ParsedIntent {
     /// Read visible screen text aloud ("read this dialog").
     #[serde(rename = "screen_read_text")]
     ScreenReadText,
+    /// Stop speaking immediately ("stop speaking" → TTS stop + hide pointer).
+    /// Bare "stop" stays MediaStop/live-cancel — do not touch those.
+    #[serde(rename = "stop_speech")]
+    StopSpeech,
+    /// Replay the last screen answer ("repeat that" → re-speak + re-show).
+    #[serde(rename = "repeat_screen")]
+    RepeatScreen,
+    /// Re-show the last pointer without a new screenshot ("point again").
+    #[serde(rename = "point_again")]
+    PointAgain,
     #[serde(rename = "unknown")]
     Unknown { raw: String },
 }
@@ -196,6 +206,9 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::ScreenDescribe => "screen_describe",
         ParsedIntent::ScreenLocate { .. } => "screen_locate",
         ParsedIntent::ScreenReadText => "screen_read_text",
+        ParsedIntent::StopSpeech => "stop_speech",
+        ParsedIntent::RepeatScreen => "repeat_screen",
+        ParsedIntent::PointAgain => "point_again",
         ParsedIntent::GitHubCommand { command } => match command {
             GitHubCommand::MergePr { .. } => "merge_pr",
             GitHubCommand::ApprovePr { .. } => "approve_pr",
@@ -312,6 +325,12 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     // Must precede greetings ("what do you see" is vision, not chat) and
     // search ("find the save button" is grounding, not web search).
     if let Some(result) = parse_screen_vision(&text) {
+        return Some(result);
+    }
+
+    // --- Screen voice flow (stop / repeat / point-again short-circuits) ---
+    // LLM-free by design (clicky parity): replay or silence, never re-query.
+    if let Some(result) = parse_screen_voice(&text) {
         return Some(result);
     }
 
@@ -2649,6 +2668,42 @@ fn parse_screen_vision(text: &str) -> Option<ParseResult> {
                     target: target.to_string(),
                 });
             }
+        }
+    }
+    None
+}
+
+/// Voice-flow short-circuits for the screen agent. Everything here is
+/// LLM-free: stop silence, repeat replays, point-again re-shows.
+/// NOTE: bare "stop" is MediaStop / live-cancel — never match it here.
+fn parse_screen_voice(text: &str) -> Option<ParseResult> {
+    for phrase in ["stop speaking", "stop talking", "be quiet", "shut up"] {
+        if text == phrase {
+            return screen_vision_hit(ParsedIntent::StopSpeech);
+        }
+    }
+    for phrase in [
+        "repeat",
+        "repeat that",
+        "say it again",
+        "say that again",
+        "what did you say",
+        "come again",
+        "pardon",
+    ] {
+        if text == phrase {
+            return screen_vision_hit(ParsedIntent::RepeatScreen);
+        }
+    }
+    for phrase in [
+        "point again",
+        "show it again",
+        "show me again",
+        "where was it",
+        "where was that",
+    ] {
+        if text == phrase {
+            return screen_vision_hit(ParsedIntent::PointAgain);
         }
     }
     None
@@ -6110,5 +6165,44 @@ mod tests {
             result.unwrap().intent,
             ParsedIntent::ScreenClick { ordinal: 3 }
         ));
+    }
+
+    #[test]
+    fn test_screen_voice_flow_forms() {
+        for phrase in ["stop speaking", "stop talking", "be quiet", "shut up"] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should parse");
+            assert!(
+                matches!(result.unwrap().intent, ParsedIntent::StopSpeech),
+                "{phrase}"
+            );
+        }
+        for phrase in ["repeat", "repeat that", "say it again", "what did you say"] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should parse");
+            assert!(
+                matches!(result.unwrap().intent, ParsedIntent::RepeatScreen),
+                "{phrase}"
+            );
+        }
+        for phrase in ["point again", "show it again", "where was that"] {
+            let result = parse_deterministic(phrase);
+            assert!(result.is_some(), "{phrase} should parse");
+            assert!(
+                matches!(result.unwrap().intent, ParsedIntent::PointAgain),
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bare_stop_stays_media_stop() {
+        // Bare "stop" belongs to MediaStop — the voice flow must not steal it.
+        let result = parse_deterministic("stop");
+        assert!(result.is_some());
+        assert!(
+            matches!(result.unwrap().intent, ParsedIntent::MediaStop),
+            "bare stop must stay MediaStop"
+        );
     }
 }

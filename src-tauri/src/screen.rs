@@ -58,6 +58,46 @@ pub fn parse_ordinal(text: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Pure: fuzzy match score 0.0-1.0 of a locate query against a UI name.
+/// Exact > substring > all-words > any-word. Locate hits need >= 0.5.
+pub fn score_match(query: &str, name: &str) -> f32 {
+    let norm = |s: &str| {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let q = norm(query);
+    let n = norm(name);
+    if q.is_empty() || n.is_empty() {
+        return 0.0;
+    }
+    if q == n {
+        return 1.0;
+    }
+    if n.contains(&q) || q.contains(&n) {
+        return 0.8;
+    }
+    // Space-insensitive containment: OCR routinely drops inter-word
+    // spaces ("Closewindow", "Signin"). Scores just below substring.
+    let nospace = |s: &str| s.split_whitespace().collect::<String>();
+    let (nq, nn) = (nospace(&q), nospace(&n));
+    if nn.contains(&nq) || nq.contains(&nn) {
+        return 0.75;
+    }
+    let qw: Vec<&str> = q.split(' ').collect();
+    let nw: Vec<&str> = n.split(' ').collect();
+    let hits = qw.iter().filter(|w| nw.contains(w)).count();
+    if hits == qw.len() {
+        return 0.7;
+    }
+    if hits > 0 {
+        return 0.4;
+    }
+    0.0
+}
+
 #[cfg(target_os = "windows")]
 mod win {
     use super::UiElement;
@@ -148,10 +188,74 @@ mod win {
             .map_err(|e| format!("mouse click: {e}"))?;
         Ok(())
     }
+
+    /// Find the best element matching a locate query ("save button") by
+    /// name across the focused window. Returns the highest scorer >= 0.5,
+    /// or None. Powers Phase-3a locate-first: exact boxes, ~5ms, no VLM.
+    /// Password/secure fields never match (same rule as ordinals).
+    pub fn find_by_name(query: &str) -> Option<UiElement> {
+        let automation = UIAutomation::new().ok()?;
+        let focused = automation.get_focused_element().ok()?;
+        let mut best: Option<(f32, UiElement)> = None;
+        for ct in CLICKABLE {
+            let found = automation
+                .create_matcher()
+                .from(focused.clone())
+                .timeout(500)
+                .control_type(*ct)
+                .find_all();
+            let elements = match found {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for el in elements.iter() {
+                if !el.is_enabled().unwrap_or(false) {
+                    continue;
+                }
+                let name = el.get_name().unwrap_or_default();
+                if name.trim().is_empty() {
+                    continue;
+                }
+                let lower = name.to_lowercase();
+                if lower.contains("password") {
+                    continue;
+                }
+                let (x, y, w, h) = match el.get_bounding_rectangle() {
+                    Ok(r) => (r.get_left(), r.get_top(), r.get_width(), r.get_height()),
+                    Err(_) => continue,
+                };
+                if w <= 0 || h <= 0 {
+                    continue;
+                }
+                let score = super::score_match(query, &name);
+                if score >= 0.5 && best.as_ref().map_or(true, |(s, _)| score > *s) {
+                    best = Some((
+                        score,
+                        UiElement {
+                            name,
+                            kind: format!("{:?}", ct),
+                            x,
+                            y,
+                            w,
+                            h,
+                        },
+                    ));
+                }
+            }
+        }
+        best.map(|(_, el)| el)
+    }
 }
 
 #[cfg(target_os = "windows")]
-pub use win::{click_element, list_actionables};
+pub use win::{click_element, find_by_name, list_actionables};
+
+/// Non-Windows locate scaffolding: no a11y tree wired yet (Phase 3b/4
+/// covers Linux/macOS via OCR+VLM). Always misses so callers fall through.
+#[cfg(not(target_os = "windows"))]
+pub fn find_by_name(_query: &str) -> Option<UiElement> {
+    None
+}
 
 /// Switch browser tab by index (1-based): Ctrl+1..8, Ctrl+9 = last.
 /// Hotkeys beat grounding for tabs — 100% reliable, instant.
@@ -310,6 +414,21 @@ async fn portal_screenshot_png() -> Result<Vec<u8>, String> {
     let conn = Connection::session()
         .await
         .map_err(|e| format!("D-Bus session: {e}"))?;
+    // Fast-fail when no portal exists (plain X11 without xdg-desktop-portal)
+    // instead of burning the 25s Response timeout below.
+    {
+        use zbus::fdo::DBusProxy;
+        let dbus = DBusProxy::new(&conn)
+            .await
+            .map_err(|e| format!("D-Bus proxy: {e}"))?;
+        let names = dbus
+            .list_names()
+            .await
+            .map_err(|e| format!("D-Bus list: {e}"))?;
+        if !names.iter().any(|n| n.as_str() == "org.freedesktop.portal.Desktop") {
+            return Err("no screenshot portal found — install xdg-desktop-portal (and a backend for your desktop) to enable screen vision".into());
+        }
+    }
     let token = format!("nexus{}", std::process::id());
     let mut opts: HashMap<&str, Value> = HashMap::new();
     opts.insert("handle_token", Value::from(token.as_str()));
@@ -408,13 +527,19 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(target_os = "macos")]
 pub async fn capture_primary() -> Result<ScreenShot, String> {
     let tmp = std::env::temp_dir().join(format!("nexus_screen_{}.jpg", std::process::id()));
-    let status = std::process::Command::new("/usr/sbin/screencapture")
+    let out = std::process::Command::new("/usr/sbin/screencapture")
         .args(["-x", "-tjpg"])
         .arg(&tmp)
-        .status()
+        .output()
         .map_err(|e| format!("screencapture: {e}"))?;
-    if !status.success() {
-        return Err("screencapture failed (check Screen Recording permission)".into());
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // TCC denial surfaces on stderr — point at the exact Settings pane.
+        if stderr.contains("not authorized") || stderr.contains("denied") {
+            return Err("screen recording is blocked: allow NEXUS in System Settings → Privacy & Security → Screen Recording, then ask again".into());
+        }
+        let detail: String = stderr.chars().take(150).collect();
+        return Err(format!("screencapture failed ({detail})"));
     }
     let bytes = std::fs::read(&tmp).map_err(|e| format!("read screenshot: {e}"))?;
     let _ = std::fs::remove_file(&tmp);
@@ -522,5 +647,36 @@ mod tests {
             shot.scaled_h,
             jpeg.len()
         );
+    }
+
+    #[test]
+    fn score_match_exact_beats_substring() {
+        assert_eq!(score_match("save", "Save"), 1.0);
+        assert_eq!(score_match("save button", "Save Button"), 1.0);
+    }
+
+    #[test]
+    fn score_match_substring_hits() {
+        assert!(((score_match("save", "Save As")) - 0.8).abs() < 1e-6);
+        // Not contiguous ("address and search bar") → all-words score 0.7.
+        assert!(((score_match("address bar", "Address and search bar")) - 0.7).abs() < 1e-6);
+        assert!(((score_match("search bar", "Address and search bar")) - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_match_ignores_dropped_ocr_spaces() {
+        // RapidOCR emits "Closewindow" for "Close window" — must still hit.
+        assert!(((score_match("close window", "Closewindow")) - 0.75).abs() < 1e-6);
+        assert!(((score_match("sign in", "Signin")) - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_match_word_overlap_ranks() {
+        // All query words present, different order → 0.7 (above threshold).
+        assert!(((score_match("button save", "Save Button")) - 0.7).abs() < 1e-6);
+        // One word only → 0.4 (below threshold, correctly rejected).
+        assert!(((score_match("save file", "Save Button")) - 0.4).abs() < 1e-6);
+        assert_eq!(score_match("eiffel tower", "Save Button"), 0.0);
+        assert_eq!(score_match("", "Save"), 0.0);
     }
 }

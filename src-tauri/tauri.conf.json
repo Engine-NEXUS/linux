@@ -33,6 +33,7 @@
       "resources/espeak-ng-data/**/*",
       "resources/server/stt_server.py",
       "resources/server/nlu_server.py",
+      "resources/server/ocr_server.py",
       "resources/server/nlu/requirements.txt",
       "resources/server/nlu/model/nexus_nlu.onnx",
       "resources/server/nlu/model/nexus_nlu.onnx.data",
