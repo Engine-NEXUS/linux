@@ -749,7 +749,9 @@ function cmdTrain() {
     info("Installing training dependencies...");
     const reqPath = join(ROOT, "server", "nlu", "requirements-train.txt");
     if (existsSync(reqPath)) {
-      run(py, ["-m", "pip", "install", "-r", reqPath], {
+      const trainPipArgs = ["-m", "pip", "install", "-r", reqPath];
+      if (IS_LINUX) trainPipArgs.push("--break-system-packages");
+      run(py, trainPipArgs, {
         allowFail: true,
         hint: "If pip fails, create a venv: python -m venv .venv && activate it",
       });
@@ -817,7 +819,9 @@ function cmdCollect() {
   });
   if (depCheck.stdout?.trim() !== "ok") {
     info("Installing audio recording dependencies...");
-    run(py, ["-m", "pip", "install", "sounddevice", "numpy", "scipy"], {
+    const audioPipArgs = ["-m", "pip", "install", "sounddevice", "numpy", "scipy"];
+    if (IS_LINUX) audioPipArgs.push("--break-system-packages");
+    run(py, audioPipArgs, {
       allowFail: true,
       hint: "If pip fails, create a venv: python -m venv .venv && activate it",
     });
@@ -893,7 +897,9 @@ function cmdWake() {
   });
   if (depCheck.stdout?.trim() !== "ok") {
     info("Installing audio recording dependencies...");
-    run(py, ["-m", "pip", "install", "sounddevice", "numpy", "scipy"], {
+    const audioPipArgs = ["-m", "pip", "install", "sounddevice", "numpy", "scipy"];
+    if (IS_LINUX) audioPipArgs.push("--break-system-packages");
+    run(py, audioPipArgs, {
       allowFail: true,
       hint: "If pip fails, create a venv: python -m venv .venv && activate it",
     });
