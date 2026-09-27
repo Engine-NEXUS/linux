@@ -100,6 +100,36 @@ impl WindowConfig {
             focus: false, center: false, hidden_title: true,
         }
     }
+    pub fn loading_indicator() -> Self {
+        Self {
+            label: "loading-indicator", title: "NEXUS Loading", url: "loading.html",
+            width: 80., height: 80., min_width: None, min_height: None,
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+    /// PR List sidebar — 500px wide, transparent, undecorated, always-on-top.
+    /// Shows a vertical list of PRs with Merge and Analyse buttons.
+    pub fn pr_list_sidebar() -> Self {
+        Self {
+            label: "pr-list-sidebar", title: "NEXUS PR List", url: "pr-list.html",
+            width: 500., height: 1000., min_width: Some(500.), min_height: Some(1000.),
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
+    /// Settings sidebar — 520px wide, transparent, undecorated, always-on-top.
+    pub fn settings_sidebar() -> Self {
+        Self {
+            label: "settings-sidebar", title: "NEXUS Settings", url: "settings-sidebar.html",
+            width: 520., height: 1000., min_width: Some(520.), min_height: Some(1000.),
+            resizable: false, decorations: false, transparent: true,
+            always_on_top: true, skip_taskbar: true, shadow: false,
+            focus: false, center: false, hidden_title: true,
+        }
+    }
 }
 
 /// Get an existing window, or create it on-demand if it doesn't exist.

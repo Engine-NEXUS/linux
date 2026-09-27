@@ -14,6 +14,11 @@ use tauri_plugin_autostart::ManagerExt;
 use crate::voice_profile;
 use crate::app_registry;
 
+/// Hardcoded fallback Worker URL for Linux/Ubuntu builds.
+/// Origin uses `option_env!("NEXUS_SERVER_URL")` (baked at build time);
+/// diagnostics falls back to this const when no session/config exists yet.
+pub const WORKER_URL: &str = "https://nexus-worker.chitkullakshya.workers.dev";
+
 // ─── Pending sidebar content ───────────────────────────────────────
 //
 // When the sidebar window is created on-demand, the WebView2 needs time
