@@ -161,7 +161,7 @@ export async function previewVoice(
   stopTts();
   // All voices now go through the Rust speak_text command which tries
   // Edge TTS (cloud) first, then Piper (local) fallback.
-  return playKokoro(voice.sampleText, voice.id, speed ?? 1.15, ttsGeneration, onEnd);
+  return playPiper(voice.sampleText, voice.id, speed ?? 1.15, ttsGeneration, onEnd);
 }
 
 export async function speak(text: string, onEnd?: () => void): Promise<void> {
@@ -198,12 +198,12 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
   // Sentence-streamed speech for long results: synthesize + play the first
   // sentence while later ones still generate (first audio in ~300ms instead
   // of after full synthesis). Short texts go direct — identical behavior.
-  // Barge-in safe: playKokoro checks the generation per chunk, so a stop
+  // Barge-in safe: playPiper checks the generation per chunk, so a stop
   // mid-queue silences the rest. Periods only split on whitespace so
   // decimals ("3.14") and versions stay whole.
   const chunks = splitForSpeech(text);
   if (chunks.length <= 1) {
-    return playKokoro(text, voiceId, speed, myGen, onEnd);
+    return playPiper(text, voiceId, speed, myGen, onEnd);
   }
   for (let i = 0; i < chunks.length; i++) {
     if (ttsGeneration !== myGen) {
@@ -211,7 +211,7 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
       return;
     }
     const last = i === chunks.length - 1;
-    await playKokoro(chunks[i], voiceId, speed, myGen, last ? onEnd : undefined);
+    await playPiper(chunks[i], voiceId, speed, myGen, last ? onEnd : undefined);
   }
 }
 

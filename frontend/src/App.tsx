@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { Avatar } from "./avatar/Avatar";
 import { LoadingAnimation } from "./LoadingAnimation";
 import { useAssistant } from "./store/assistant";
