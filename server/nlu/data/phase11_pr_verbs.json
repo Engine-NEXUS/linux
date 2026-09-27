@@ -1,0 +1,317 @@
+{
+  "schema_version": 1,
+  "source": "nexus_synthetic_phase11",
+  "review_status": "approved_for_candidate_training",
+  "policy": "list_prs pull-requests noun + trailing-tolerance top-up. No new labels.",
+  "total_examples": 45,
+  "unique_families": 39,
+  "intent_counts": {
+    "list_prs": 39,
+    "unknown": 6
+  },
+  "examples": [
+    {
+      "text": "show me the pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show the pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "give me the pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "pull up the pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "display the pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "fetch me the pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "get me the pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "bring me the pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the pull requests and all",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the prs and all",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the pull requests and all of them",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the prs and all of them",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the pull requests all of them",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the prs all of them",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the pull requests everything",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the prs everything",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "list the pull requests and all",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "give me the pull requests and all",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "list the pull requests everything",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "give me the pull requests everything",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the pull request list",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "pull up the pull request list",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "open the pull request list",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "display the pull request list",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the pull requests in zync",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "list all the pull requests in zync",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "show me the pull requests in servx",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "list all the pull requests in servx",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "show me the pull requests in nexus",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "list all the pull requests in nexus",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "show me the pull requests in shopkart",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "list all the pull requests in shopkart",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "shopkart"
+      }
+    },
+    {
+      "text": "show me the pull requests in zync and all",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "zync"
+      }
+    },
+    {
+      "text": "show the prs in servx and all of them",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "servx"
+      }
+    },
+    {
+      "text": "show me the open pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the closed pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me all the pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "show me the merged pull requests",
+      "intent": "list_prs",
+      "slots": {
+        "repo": ""
+      }
+    },
+    {
+      "text": "list the open pull requests in nexus",
+      "intent": "list_prs",
+      "slots": {
+        "repo": "nexus"
+      }
+    },
+    {
+      "text": "pull the door open",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "request a refund for my order",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "pull up a chair",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "request time off tomorrow",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "the printer is pulling the paper crooked",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "can you pull over here",
+      "intent": "unknown",
+      "slots": {}
+    }
+  ]
+}

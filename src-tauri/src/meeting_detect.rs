@@ -43,8 +43,9 @@
 //!   - The hotkey still works (explicit user action)
 //!   - TTS is suppressed in meeting mode (frontend checks the state)
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Shared state for meeting/privacy mode.
 ///
@@ -66,6 +67,19 @@ pub struct MeetingState {
 
     /// Meeting detection is enabled (can be disabled in settings).
     pub detection_enabled: AtomicBool,
+
+    /// Monotonic epoch for computing elapsed time in the audio callback.
+    /// Set at construction; never changes.
+    epoch: Instant,
+
+    /// Monotonic millisecond timestamp (relative to `epoch`) when TTS
+    /// playback ended. Used by the post-TTS mute gate in the audio callback
+    /// to suppress wake detection for a grace period after TTS finishes,
+    /// preventing TTS echo from re-triggering the wake word.
+    ///
+    /// 0 means TTS has never ended (or hasn't started yet), so the gate
+    /// is not active.
+    last_tts_end_ms: AtomicU64,
 }
 
 impl MeetingState {
@@ -75,6 +89,8 @@ impl MeetingState {
             meeting_active: AtomicBool::new(false),
             tts_playing: AtomicBool::new(false),
             detection_enabled: AtomicBool::new(true),
+            epoch: Instant::now(),
+            last_tts_end_ms: AtomicU64::new(0),
         }
     }
 
@@ -133,9 +149,36 @@ impl MeetingState {
         self.manual_pause.store(paused, Ordering::Relaxed);
     }
 
-    /// Set TTS playing state (called from frontend event handler).
+    /// Set TTS playing state (called from frontend event handler or tts.rs).
+    ///
+    /// When transitioning from `true` → `false`, records the end time so the
+    /// post-TTS mute gate in the audio callback can suppress wake detection
+    /// for a grace period. This prevents TTS echo from re-triggering the wake
+    /// word after `tts_playing` goes false.
     pub fn set_tts_playing(&self, playing: bool) {
-        self.tts_playing.store(playing, Ordering::Relaxed);
+        let was_playing = self.tts_playing.swap(playing, Ordering::Relaxed);
+        if was_playing && !playing {
+            let now_ms = Instant::now()
+                .duration_since(self.epoch)
+                .as_millis() as u64;
+            self.last_tts_end_ms.store(now_ms, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns the number of milliseconds since TTS playback ended.
+    ///
+    /// Returns `u64::MAX` if TTS has never ended (so the gate is inactive).
+    /// Called from the audio callback on every chunk — must be fast.
+    #[inline]
+    pub fn ms_since_tts_ended(&self) -> u64 {
+        let end_ms = self.last_tts_end_ms.load(Ordering::Relaxed);
+        if end_ms == 0 {
+            return u64::MAX;
+        }
+        let now_ms = Instant::now()
+            .duration_since(self.epoch)
+            .as_millis() as u64;
+        now_ms.saturating_sub(end_ms)
     }
 
     /// Set meeting active state (called from detection polling loop).

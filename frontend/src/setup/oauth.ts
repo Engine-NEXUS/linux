@@ -78,8 +78,9 @@ let unlistenDeepLink: UnlistenFn | null = null;
  * Returns a promise that resolves when the OAuth flow completes (or rejects on error/timeout).
  */
 export async function connectOAuth(
-  provider: "google" | "github",
+  provider: "google" | "github" | "swiggy",
   userId: string,
+  onBrowserOpened?: () => void,
 ): Promise<boolean> {
   if (!workerBaseUrl) {
     throw new Error("Server URL not configured. Enter your server URL first.");
@@ -90,17 +91,41 @@ export async function connectOAuth(
   const codeChallenge = await generateCodeChallenge(codeVerifier);
 
   // 1. Ask Worker for the authorization URL.
+  console.log(`[OAuth] Fetching auth URL from ${workerBaseUrl}/oauth/auth-url?provider=${provider}&user_id=${encodeURIComponent(userId)}&code_challenge=${codeChallenge}`);
   const authUrlResp = await fetch(
     `${workerBaseUrl}/oauth/auth-url?provider=${provider}&user_id=${encodeURIComponent(userId)}&code_challenge=${codeChallenge}`,
   );
   if (!authUrlResp.ok) {
     const err = await authUrlResp.json().catch(() => ({}));
-    throw new Error(err.error || `Failed to get OAuth URL (${authUrlResp.status})`);
+    const msg = err.error || `Failed to get OAuth URL (${authUrlResp.status})`;
+    console.error(`[OAuth] auth-url failed: ${msg}`);
+    throw new Error(msg);
   }
   const { url } = await authUrlResp.json();
+  console.log(`[OAuth] Got auth URL: ${url.substring(0, 80)}...`);
 
   // 2. Open the system browser for the user to log in.
-  await open(url);
+  //    Use Tauri shell.open first, with a fallback to window.open
+  //    in case the shell plugin scope isn't configured.
+  try {
+    await open(url);
+    console.log("[OAuth] opened via tauri shell.open");
+  } catch (shellErr) {
+    console.warn("[OAuth] shell.open failed, falling back to window.open:", shellErr);
+    // Fallback: open in a new browser tab. This works in dev mode and
+    // when the shell plugin scope isn't configured.
+    const win = window.open(url, "_blank", "noopener,noreferrer");
+    if (!win) {
+      // Popup blocked — try location redirect as last resort
+      console.warn("[OAuth] window.open blocked, trying location.href redirect");
+      window.location.href = url;
+    }
+  }
+
+  // Notify caller that the browser has been opened — they can update
+  // the UI to show "Waiting for authorization..." while the user
+  // logs in / authorizes on GitHub.
+  if (onBrowserOpened) onBrowserOpened();
 
   // 3. Set up dual-channel completion: deep-link listener + active status polling
   const result = await new Promise<boolean>((resolve, reject) => {

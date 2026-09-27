@@ -1,0 +1,293 @@
+{
+  "benchmark": "server/nlu/data/evaluation/clinc150_oos_test.jsonl",
+  "examples": 999,
+  "status": "provisional_until_nexus_mapping_review",
+  "confidence_gate": 0.85,
+  "raw_unknown_recall": 0.3223,
+  "gated_unknown_recall": 0.951,
+  "unsafe_or_unsupported_routing_count": 49,
+  "predicted_intents": {
+    "unknown": 322,
+    "browser_search": 251,
+    "type_text": 155,
+    "focus_app": 53,
+    "search": 50,
+    "whatsapp_search": 26,
+    "browser_new_tab": 22,
+    "check_branch": 20,
+    "list_workflows": 19,
+    "browser_navigate": 12,
+    "open_app": 9,
+    "media_previous": 7,
+    "media_next": 6,
+    "greeting": 5,
+    "close_app": 4,
+    "open_architect": 4,
+    "cancel_action": 3,
+    "media_play_pause": 3,
+    "rerun_workflow": 3,
+    "list_org_members": 3,
+    "press_key": 2,
+    "open_settings": 2,
+    "add_org_member": 2,
+    "list_prs": 2,
+    "create_pr": 2,
+    "list_branches": 2,
+    "list_workflow_runs": 2,
+    "approve_pr": 1,
+    "remove_collaborator": 1,
+    "add_collaborator": 1,
+    "list_releases": 1,
+    "close_pr": 1,
+    "create_release": 1,
+    "whatsapp_chat": 1,
+    "confirm_send": 1
+  },
+  "highest_confidence_failures": [
+    {
+      "text": "put into words what you want",
+      "predicted": "type_text",
+      "confidence": 0.9926
+    },
+    {
+      "text": "what do i put on my feet",
+      "predicted": "type_text",
+      "confidence": 0.9879
+    },
+    {
+      "text": "search the web for monthly parking near my house",
+      "predicted": "browser_search",
+      "confidence": 0.9867
+    },
+    {
+      "text": "can my grace period be extended any possible way",
+      "predicted": "type_text",
+      "confidence": 0.9805
+    },
+    {
+      "text": "fill up my water bottle for the gym",
+      "predicted": "type_text",
+      "confidence": 0.9797
+    },
+    {
+      "text": "report outage to my electric provider",
+      "predicted": "type_text",
+      "confidence": 0.9787
+    },
+    {
+      "text": "how do i write c++",
+      "predicted": "type_text",
+      "confidence": 0.9779
+    },
+    {
+      "text": "put words on the paper about what you want",
+      "predicted": "type_text",
+      "confidence": 0.9696
+    },
+    {
+      "text": "how do i write an iep for a high schooler",
+      "predicted": "type_text",
+      "confidence": 0.9684
+    },
+    {
+      "text": "find a credit counseling service for me on the web",
+      "predicted": "browser_search",
+      "confidence": 0.968
+    },
+    {
+      "text": "where is the closest architecture college",
+      "predicted": "open_architect",
+      "confidence": 0.9672
+    },
+    {
+      "text": "can you fill in my credit card number on the screen",
+      "predicted": "type_text",
+      "confidence": 0.967
+    },
+    {
+      "text": "please go to wikipedia and search for articles related to nsa",
+      "predicted": "browser_search",
+      "confidence": 0.9647
+    },
+    {
+      "text": "who is the best architecture",
+      "predicted": "open_architect",
+      "confidence": 0.9577
+    },
+    {
+      "text": "write the next chapter of my biography and let me know when you have finished it",
+      "predicted": "type_text",
+      "confidence": 0.9562
+    },
+    {
+      "text": "i want to buy some nintendo switch game",
+      "predicted": "focus_app",
+      "confidence": 0.9536
+    },
+    {
+      "text": "what time did i put in my first load of laundry",
+      "predicted": "type_text",
+      "confidence": 0.9441
+    },
+    {
+      "text": "can i use direct deposit for my tax refund",
+      "predicted": "type_text",
+      "confidence": 0.9437
+    },
+    {
+      "text": "tiger",
+      "predicted": "greeting",
+      "confidence": 0.9413
+    },
+    {
+      "text": "search my contacts for the auto repair place",
+      "predicted": "browser_search",
+      "confidence": 0.9382
+    },
+    {
+      "text": "show me a cool nintendo switch game",
+      "predicted": "focus_app",
+      "confidence": 0.9333
+    },
+    {
+      "text": "tell me who gives the best motivational speeches on the web",
+      "predicted": "browser_search",
+      "confidence": 0.9288
+    },
+    {
+      "text": "where will the next olympics be hosted",
+      "predicted": "type_text",
+      "confidence": 0.925
+    },
+    {
+      "text": "do a job search on monstercom for jobs in the tech field in arlington, va",
+      "predicted": "browser_search",
+      "confidence": 0.921
+    },
+    {
+      "text": "make me a map of all earthquake hotspots in the continental us",
+      "predicted": "open_architect",
+      "confidence": 0.9203
+    },
+    {
+      "text": "how to be millionare",
+      "predicted": "type_text",
+      "confidence": 0.9123
+    },
+    {
+      "text": "fill out the paperwork for tonys new daycare center",
+      "predicted": "type_text",
+      "confidence": 0.9117
+    },
+    {
+      "text": "what's the best type of plan to upgrade to",
+      "predicted": "type_text",
+      "confidence": 0.9104
+    },
+    {
+      "text": "search information on how to apply foundation",
+      "predicted": "browser_search",
+      "confidence": 0.9092
+    },
+    {
+      "text": "find articles that can help me advance my position in my work field",
+      "predicted": "browser_search",
+      "confidence": 0.9022
+    },
+    {
+      "text": "open up internet browser",
+      "predicted": "open_app",
+      "confidence": 0.8925
+    },
+    {
+      "text": "look up some christmas songs for me",
+      "predicted": "search",
+      "confidence": 0.8895
+    },
+    {
+      "text": "when is the next full moon",
+      "predicted": "media_next",
+      "confidence": 0.8873
+    },
+    {
+      "text": "start a portfolio on venture capital funding for me to look over",
+      "predicted": "browser_search",
+      "confidence": 0.8849
+    },
+    {
+      "text": "what's the best career search website",
+      "predicted": "browser_search",
+      "confidence": 0.8835
+    },
+    {
+      "text": "could you create a new avatar for me",
+      "predicted": "browser_new_tab",
+      "confidence": 0.8796
+    },
+    {
+      "text": "please activate a wireless hotspot so i can use the internet",
+      "predicted": "focus_app",
+      "confidence": 0.879
+    },
+    {
+      "text": "look up ways for me to advance my job placement",
+      "predicted": "browser_search",
+      "confidence": 0.8789
+    },
+    {
+      "text": "what type of industries do innovation managers work in",
+      "predicted": "type_text",
+      "confidence": 0.8787
+    },
+    {
+      "text": "how much does it cost to get two jackets dry cleaned",
+      "predicted": "type_text",
+      "confidence": 0.8779
+    },
+    {
+      "text": "review my resume for spelling errors",
+      "predicted": "type_text",
+      "confidence": 0.8677
+    },
+    {
+      "text": "switch over to low power mode to preserve battery life",
+      "predicted": "focus_app",
+      "confidence": 0.8587
+    },
+    {
+      "text": "give me the number of a traffic attorney near here",
+      "predicted": "browser_search",
+      "confidence": 0.8567
+    },
+    {
+      "text": "google the price of skydiving in florida",
+      "predicted": "browser_search",
+      "confidence": 0.8567
+    },
+    {
+      "text": "tell me about the amusement park",
+      "predicted": "search",
+      "confidence": 0.8564
+    },
+    {
+      "text": "how many people live in vermillion",
+      "predicted": "whatsapp_search",
+      "confidence": 0.856
+    },
+    {
+      "text": "what's the best reviewed local roof repair place",
+      "predicted": "browser_search",
+      "confidence": 0.8547
+    },
+    {
+      "text": "find a couple's therapist who can help me and my wife",
+      "predicted": "whatsapp_search",
+      "confidence": 0.8533
+    },
+    {
+      "text": "what size pipes are used for sinks",
+      "predicted": "type_text",
+      "confidence": 0.853
+    }
+  ]
+}

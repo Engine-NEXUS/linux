@@ -8,7 +8,7 @@ export function LoadingAnimation() {
   useEffect(() => {
     let destroyed = false;
 
-    fetch("/loading.json")
+    fetch(`${import.meta.env.BASE_URL}loading.json`)
       .then((res) => res.json())
       .then((data) => {
         if (destroyed || !containerRef.current) return;

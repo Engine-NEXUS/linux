@@ -464,6 +464,11 @@ html, body, #root {
   50% { opacity: 0.6; }
 }
 
+@keyframes nx-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
 /* ── Voice Persona Selection Cards ────────────────────────────── */
 .setup-voice-grid {
   display: grid;
@@ -542,4 +547,166 @@ html, body, #root {
 
 .setup-voice-play-btn:hover {
   background: rgba(0, 102, 204, 0.08);
+}
+/* ── Installer Design (Step 3) ── */
+.installer-card {
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08);
+  padding: 32px;
+  max-width: 440px;
+  margin: 0 auto;
+  position: relative;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #111827;
+}
+
+.installer-close {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  font-size: 20px;
+  color: #6B7280;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.installer-header-icons {
+  display: flex;
+  gap: -8px; /* overlap slightly? The reference doesn't overlap, just gap */
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.installer-icon-circle {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid #E5E7EB;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  background: #ffffff;
+}
+
+.installer-icon-checkmark {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 14px;
+  height: 14px;
+  background: #10B981;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #ffffff;
+}
+
+.installer-title {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: #111827;
+  letter-spacing: -0.01em;
+}
+
+.installer-subtitle {
+  font-size: 13px;
+  color: #6B7280;
+  margin-bottom: 24px;
+}
+
+.installer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.installer-list-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  border: 1px solid #E5E7EB;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  background: #ffffff;
+}
+
+.installer-list-item:hover {
+  border-color: #D1D5DB;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+}
+
+.installer-list-item .installer-icon-circle {
+  margin-right: 16px;
+  flex-shrink: 0;
+}
+
+.installer-list-item-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.installer-list-item-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.installer-list-item-subtitle {
+  font-size: 13px;
+  color: #6B7280;
+  margin-top: 2px;
+}
+
+.installer-badge {
+  font-size: 11px;
+  font-weight: 600;
+  background: #ECFDF5;
+  color: #059669;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.installer-list-item-chevron {
+  color: #9CA3AF;
+  display: flex;
+  align-items: center;
+}
+
+.installer-btn-proceed {
+  width: 100%;
+  background: #000000;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 14px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 24px;
+  transition: opacity 0.2s ease;
+}
+
+.installer-btn-proceed:hover {
+  opacity: 0.85;
+}
+
+.installer-footer {
+  text-align: center;
+  font-size: 12px;
+  color: #9CA3AF;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }

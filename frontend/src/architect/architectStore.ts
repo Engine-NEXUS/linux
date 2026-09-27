@@ -69,24 +69,17 @@ export interface Phase2Data {
   summary: string;
 }
 
-export interface ImpactResult {
-  target_file: string;
-  affected_files: string[];
-  dependency_paths: string[][];
-  max_depth: number;
-  direct_count: number;
-  transitive_count: number;
-  test_files_affected: string[];
-  explanation: string;
-}
-
-export interface ChatMessage {
-  id: string;
-  role: "user" | "assistant" | "system";
-  text: string;
-  timestamp: number;
-  highlightedNodes?: string[];
-}
+/** Progressive analysis status messages received via Tauri Channel.
+ *  Matches the Rust `ArchitectProgress` enum (serde tag = "type", PascalCase). */
+export type ArchitectProgress =
+  | { type: "Detecting"; owner: string; repo: string; message: string }
+  | { type: "Indexing"; total_files: number; message: string }
+  | { type: "GraphReady"; node_count: number; edge_count: number }
+  | { type: "HotspotsReady"; hotspots: HotspotItem[] }
+  | { type: "CyclesReady"; circular_deps: CircularDependency[] }
+  | { type: "AiExplanation"; summary: string }
+  | { type: "Complete"; stage: string }
+  | { type: "Failed"; stage: string; error: string };
 
 export type ViewMode = "layers" | "files" | "hotspots" | "cycles";
 
@@ -101,14 +94,10 @@ interface ArchitectState {
   phase1Data: Phase1Data | null;
   phase2Data: Phase2Data | null;
   selectedNodeId: string | null;
-  impactResult: ImpactResult | null;
   highlightedPaths: string[][];
   viewMode: ViewMode;
-  chatMessages: ChatMessage[];
-  searchQuery: string;
 
   setRepo: (owner: string, repo: string) => void;
-  setPhase: (phase: 0 | 1 | 2 | 3) => void;
   setLoading: (loading: boolean) => void;
   setDeepScanning: (deepScanning: boolean) => void;
   setProgress: (stage: string, message: string) => void;
@@ -116,11 +105,7 @@ interface ArchitectState {
   enrichPhase1: (enrichment: { summary: string; layers: { id: string; label: string; tech_stack: string }[] }) => void;
   setPhase2Data: (data: Phase2Data) => void;
   setSelectedNodeId: (nodeId: string | null) => void;
-  setImpactResult: (result: ImpactResult | null) => void;
-  setHighlightedPaths: (paths: string[][]) => void;
   setViewMode: (mode: ViewMode) => void;
-  addChatMessage: (msg: Omit<ChatMessage, "id" | "timestamp">) => void;
-  setSearchQuery: (query: string) => void;
   reset: () => void;
 }
 
@@ -135,21 +120,10 @@ export const useArchitect = create<ArchitectState>((set) => ({
   phase1Data: null,
   phase2Data: null,
   selectedNodeId: null,
-  impactResult: null,
   highlightedPaths: [],
   viewMode: "layers",
-  chatMessages: [
-    {
-      id: "welcome",
-      role: "assistant",
-      text: "👋 Welcome to **NEXUS Architecture Mapper**. Select or enter a repository to generate an interactive visual map of its architecture.",
-      timestamp: Date.now(),
-    },
-  ],
-  searchQuery: "",
 
   setRepo: (owner, repo) => set({ owner, repo }),
-  setPhase: (phase) => set({ phase }),
   setLoading: (loading) => set({ loading }),
   setDeepScanning: (deepScanning) => set({ deepScanning }),
   setProgress: (stage, message) => set({ progressStage: stage, progressMessage: message }),
@@ -192,21 +166,7 @@ export const useArchitect = create<ArchitectState>((set) => ({
       progressMessage: "Phase 2 deep scan complete",
     }),
   setSelectedNodeId: (selectedNodeId) => set({ selectedNodeId }),
-  setImpactResult: (impactResult) => set({ impactResult }),
-  setHighlightedPaths: (highlightedPaths) => set({ highlightedPaths }),
   setViewMode: (viewMode) => set({ viewMode }),
-  addChatMessage: (msg) =>
-    set((state) => ({
-      chatMessages: [
-        ...state.chatMessages,
-        {
-          ...msg,
-          id: Math.random().toString(36).substring(2, 9),
-          timestamp: Date.now(),
-        },
-      ],
-    })),
-  setSearchQuery: (searchQuery) => set({ searchQuery }),
   reset: () =>
     set({
       owner: "",
@@ -219,7 +179,6 @@ export const useArchitect = create<ArchitectState>((set) => ({
       phase1Data: null,
       phase2Data: null,
       selectedNodeId: null,
-      impactResult: null,
       highlightedPaths: [],
       viewMode: "layers",
     }),

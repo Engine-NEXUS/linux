@@ -3,17 +3,16 @@
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+#[cfg(feature = "wakeword-sherpa")]
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, Runtime};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_autostart::ManagerExt;
 
+// Phase D: voice_profile is now available for both wakeword-oww and wakeword-sherpa
+use crate::voice_profile;
 use crate::app_registry;
-
-/// Cloudflare Worker URL. Hardcoded — no env, no settings override surface.
-/// Single backend for all installs; change here + rebuild to repoint.
-pub const WORKER_URL: &str = "https://nexus-worker.chitkullakshya.workers.dev";
 
 // ─── Pending sidebar content ───────────────────────────────────────
 //
@@ -34,9 +33,37 @@ struct PendingSidebar {
     text: String,
     backdrop: Option<String>, // data:image/png;base64,... URI
     analysis: Option<serde_json::Value>, // structured repo analysis data
+    confirmation: Option<serde_json::Value>, // action confirmation payload
 }
 
 static PENDING_SIDEBAR: Mutex<Option<PendingSidebar>> = Mutex::new(None);
+
+// ─── Pending PR list (race-free sidebar creation) ──────────────────────
+// Same pattern as PENDING_SIDEBAR: the orchestrator stores the PR list
+// result here before creating the sidebar window. The frontend calls
+// `get_pending_pr_list` on mount to fetch (and clear) the pending data.
+// This is race-free regardless of how long the WebView takes to load.
+static PENDING_PR_LIST: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+
+/// Store a pending PR list result (called from the orchestrator before
+/// creating the sidebar window). The frontend fetches this on mount.
+pub fn set_pending_pr_list(pr_list_json: serde_json::Value) {
+    let mut pending = PENDING_PR_LIST.lock().unwrap();
+    *pending = Some(pr_list_json);
+}
+
+/// IPC: Fetch pending PR list data (called by the PR list sidebar on mount).
+/// Returns the PR list JSON that was stored by the orchestrator, or null
+/// if no data is pending. Clears the pending data after returning.
+#[tauri::command]
+pub fn get_pending_pr_list() -> Result<Option<serde_json::Value>, String> {
+    let mut pending = PENDING_PR_LIST.lock().unwrap();
+    let data = pending.take();
+    if data.is_some() {
+        tracing::info!("pr-list: pending data fetched by frontend");
+    }
+    Ok(data)
+}
 
 /// IPC: open the setup window (called from tray menu "Settings…" or first launch).
 /// Creates the window on-demand if it doesn't exist (saves ~250 MB RAM at idle).
@@ -108,7 +135,9 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            server_url: WORKER_URL.to_string(),
+            server_url: option_env!("NEXUS_SERVER_URL")
+                .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
+                .to_string(),
             user_id: String::new(),
             device_id: String::new(),
         }
@@ -129,7 +158,8 @@ pub fn get_server_config<R: Runtime>(
     }
     let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    let default_url = WORKER_URL;
+    let default_url = option_env!("NEXUS_SERVER_URL")
+        .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
     // Use saved URL, but fall back to default if the saved URL is empty
     // (a previous save_settings call may have written an empty string).
     let saved_url = json["serverUrl"].as_str().unwrap_or(default_url);
@@ -141,10 +171,406 @@ pub fn get_server_config<R: Runtime>(
     })
 }
 
-// ─── Voice profile commands — only available when wakeword-sherpa is enabled ─
-// Speaker enrollment uses sherpa-onnx for embedding extraction. When using the
-// default wakeword-oww engine, verification is not yet wired (see AGENTS.md),
-// so these commands are compiled out to avoid pulling in sherpa-onnx C++ deps.
+// ─── Voice profile commands ──────────────────────────────────────
+// Phase D: Speaker verification is now available for both engines.
+// - wakeword-sherpa: uses sherpa-onnx for embedding extraction (C++ deps)
+// - wakeword-oww: uses the existing embedding_model.onnx (pure Rust)
+//
+// The OWW commands use the voice_profile module's SpeakerVerifier which
+// extracts embeddings from the OWW embedding model via tract-onnx.
+#[cfg(feature = "wakeword-sherpa")]
+pub use voice_profile_commands::*;
+#[cfg(feature = "wakeword-sherpa")]
+mod voice_profile_commands {
+    use super::*;
+
+    /// IPC: Get the current voice profile status (enrolled or not, number of clips, threshold).
+    #[tauri::command]
+    pub fn get_voice_profile_status<R: Runtime>(
+        app: tauri::AppHandle<R>,
+    ) -> Result<voice_profile::VoiceProfileStatus, String> {
+        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let profile_path = voice_profile::resolve_profile_path(&dir);
+
+        let sound_alikes: Vec<String> = voice_profile::SOUND_ALIKES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        if !profile_path.exists() {
+            return Ok(voice_profile::VoiceProfileStatus {
+                enrolled: false,
+                num_clips: 0,
+                threshold: voice_profile::DEFAULT_THRESHOLD,
+                created_at: 0,
+                updated_at: 0,
+                wake_variants: vec!["nexus".to_string()],
+                sound_alikes,
+            });
+        }
+
+        let profile = voice_profile::VoiceProfile::load(&profile_path)
+            .map_err(|e| e.to_string())?;
+        Ok(voice_profile::VoiceProfileStatus {
+            enrolled: true,
+            num_clips: profile.num_clips,
+            threshold: profile.threshold,
+            created_at: profile.created_at,
+            updated_at: profile.updated_at,
+            wake_variants: profile.wake_variants,
+            sound_alikes,
+        })
+    }
+
+    /// Resolve the sherpa resource directory (handles dev + production paths).
+    pub fn resolve_sherpa_dir(resource_dir: &Path) -> Option<PathBuf> {
+        // Production: resource_dir/resources/sherpa (Tauri v2 on Windows: resource_dir() = exe_dir)
+        let sherpa = resource_dir.join("resources").join("sherpa");
+        if sherpa.exists() {
+            return Some(sherpa);
+        }
+        // Fallback: resource_dir/sherpa (some Tauri versions may return resources/ directly)
+        let sherpa_alt = resource_dir.join("sherpa");
+        if sherpa_alt.exists() {
+            return Some(sherpa_alt);
+        }
+        if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+            let dev = PathBuf::from(manifest).join("resources").join("sherpa");
+            if dev.exists() {
+                return Some(dev);
+            }
+        }
+        // Fallback: exe_dir/../resources/sherpa
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let p = parent.join("../resources/sherpa");
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    /// Run ASR on enrollment clips to capture wake-word variants.
+    /// Returns the list of ASR transcripts (one per clip, may be empty/garbage).
+    pub fn transcribe_enrollment_clips(
+        sherpa_dir: &Path,
+        clips: &[Vec<f32>],
+    ) -> Result<Vec<String>, String> {
+        use sherpa_onnx::{
+            OnlineModelConfig, OnlineRecognizer, OnlineRecognizerConfig, OnlineTransducerModelConfig,
+        };
+
+        let kws_dir = sherpa_dir.join("kws");
+
+        // Prefer int8 (quantized) models, fall back to fp32
+        let encoder = kws_dir.join("encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx");
+        let encoder = if encoder.exists() { encoder } else { kws_dir.join("encoder-epoch-12-avg-2-chunk-16-left-64.onnx") };
+        let decoder = kws_dir.join("decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx");
+        let decoder = if decoder.exists() { decoder } else { kws_dir.join("decoder-epoch-12-avg-2-chunk-16-left-64.onnx") };
+        let joiner = kws_dir.join("joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx");
+        let joiner = if joiner.exists() { joiner } else { kws_dir.join("joiner-epoch-12-avg-2-chunk-16-left-64.onnx") };
+        let tokens = kws_dir.join("tokens.txt");
+
+        for (name, path) in [
+            ("encoder", &encoder),
+            ("decoder", &decoder),
+            ("joiner", &joiner),
+            ("tokens", &tokens),
+        ] {
+            if !path.exists() {
+                return Err(format!("ASR model file '{}' not found at: {}", name, path.display()));
+            }
+        }
+
+        let config = OnlineRecognizerConfig {
+            model_config: OnlineModelConfig {
+                transducer: OnlineTransducerModelConfig {
+                    encoder: Some(encoder.to_string_lossy().to_string()),
+                    decoder: Some(decoder.to_string_lossy().to_string()),
+                    joiner: Some(joiner.to_string_lossy().to_string()),
+                },
+                tokens: Some(tokens.to_string_lossy().to_string()),
+                num_threads: 1,
+                provider: Some("cpu".to_string()),
+                ..Default::default()
+            },
+            decoding_method: Some("greedy_search".to_string()),
+            enable_endpoint: false,
+            ..Default::default()
+        };
+
+        let recognizer = OnlineRecognizer::create(&config)
+            .ok_or_else(|| "Failed to create OnlineRecognizer for enrollment".to_string())?;
+
+        let mut variants = Vec::with_capacity(clips.len());
+
+        for (i, clip) in clips.iter().enumerate() {
+            if clip.is_empty() {
+                variants.push(String::new());
+                continue;
+            }
+
+            let stream = recognizer.create_stream();
+
+            // Feed the clip + 0.5s tail padding
+            stream.accept_waveform(16000, clip);
+            let tail = vec![0.0f32; 8000];
+            stream.accept_waveform(16000, &tail);
+            stream.input_finished();
+
+            while recognizer.is_ready(&stream) {
+                recognizer.decode(&stream);
+            }
+
+            let text = if let Some(result) = recognizer.get_result(&stream) {
+                result.text.trim().to_lowercase()
+            } else {
+                String::new()
+            };
+
+            tracing::info!("Enrollment clip {} ASR transcript: \"{}\"", i + 1, text);
+            variants.push(text);
+
+            recognizer.reset(&stream);
+        }
+
+        Ok(variants)
+    }
+
+    /// IPC: Enroll a voice profile from multiple audio clips.
+    /// Each clip is a Vec<f32> of 16kHz mono audio samples.
+    /// Also runs ASR on each clip to capture wake-word variants.
+    /// Re-enrollment APPENDS new variants to existing ones (does not wipe).
+    #[tauri::command]
+    pub fn enroll_voice<R: Runtime>(
+        app: tauri::AppHandle<R>,
+        clips: Vec<Vec<f32>>,
+        threshold: Option<f32>,
+    ) -> Result<Vec<String>, String> {
+        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+        let profile_path = voice_profile::resolve_profile_path(&dir);
+
+        let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+        let sherpa_dir = resolve_sherpa_dir(&resource_dir)
+            .ok_or_else(|| "Sherpa resource directory not found".to_string())?;
+
+        let speaker_model = sherpa_dir.join("speaker_model.onnx");
+
+        let mut verifier = voice_profile::SpeakerVerifier::new(speaker_model, profile_path)
+            .map_err(|e| e.to_string())?;
+
+        // Run ASR on each clip to capture wake-word variants
+        let asr_variants = transcribe_enrollment_clips(&sherpa_dir, &clips)
+            .map_err(|e| {
+                tracing::warn!("Enrollment ASR failed (continuing without variants): {e}");
+                // Don't fail enrollment if ASR fails — just use empty variants
+                vec![String::new(); clips.len()]
+            })
+            .unwrap_or_else(|_| vec![String::new(); clips.len()]);
+
+        let threshold = threshold.unwrap_or(voice_profile::DEFAULT_THRESHOLD);
+        verifier
+            .enroll(&clips, threshold, asr_variants.clone())
+            .map_err(|e| e.to_string())?;
+
+        // Return the captured variants so the UI can show them
+        let captured: Vec<String> = verifier
+            .profile()
+            .map(|p| p.wake_variants.clone())
+            .unwrap_or_default();
+
+        Ok(captured)
+    }
+
+    /// IPC: Delete the voice profile (disables speaker verification).
+    #[tauri::command]
+    pub fn delete_voice_profile<R: Runtime>(
+        app: tauri::AppHandle<R>,
+    ) -> Result<(), String> {
+        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let profile_path = voice_profile::resolve_profile_path(&dir);
+
+        if profile_path.exists() {
+            std::fs::remove_file(&profile_path).map_err(|e| e.to_string())?;
+            tracing::info!("Voice profile deleted");
+        }
+        Ok(())
+    }
+}
+
+// ─── OWW Voice Profile Commands (Phase D) ──────────────────────────
+// These commands work with the default wakeword-oww engine using the
+// voice_profile module's SpeakerVerifier (pure Rust, no C++ deps).
+// Enrollment extracts embeddings from the OWW embedding_model.onnx.
+#[cfg(feature = "wakeword-oww")]
+pub use oww_voice_profile_commands::*;
+#[cfg(feature = "wakeword-oww")]
+mod oww_voice_profile_commands {
+    use super::*;
+
+    /// IPC: Get the current voice profile status (enrolled or not, number of clips, threshold).
+    #[tauri::command]
+    pub fn get_voice_profile_status<R: Runtime>(
+        app: tauri::AppHandle<R>,
+    ) -> Result<voice_profile::VoiceProfileStatus, String> {
+        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let profile_path = voice_profile::resolve_profile_path(&dir);
+
+        let sound_alikes: Vec<String> = voice_profile::SOUND_ALIKES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        if !profile_path.exists() {
+            return Ok(voice_profile::VoiceProfileStatus {
+                enrolled: false,
+                num_clips: 0,
+                threshold: voice_profile::DEFAULT_THRESHOLD,
+                created_at: 0,
+                updated_at: 0,
+                wake_variants: vec!["nexus".to_string()],
+                sound_alikes,
+            });
+        }
+
+        let profile = voice_profile::VoiceProfile::load(&profile_path)
+            .map_err(|e| e.to_string())?;
+        Ok(voice_profile::VoiceProfileStatus {
+            enrolled: true,
+            num_clips: profile.num_clips,
+            threshold: profile.threshold,
+            created_at: profile.created_at,
+            updated_at: profile.updated_at,
+            wake_variants: profile.wake_variants,
+            sound_alikes,
+        })
+    }
+
+    /// IPC: Enroll the user's voice for speaker verification.
+    /// Accepts 3+ audio clips (16kHz mono f32) and extracts embeddings
+    /// using the OWW embedding model.
+    #[tauri::command]
+    pub fn enroll_voice<R: Runtime>(
+        app: tauri::AppHandle<R>,
+        clips: Vec<Vec<f32>>,
+        threshold: Option<f32>,
+    ) -> Result<Vec<String>, String> {
+        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let profile_path = voice_profile::resolve_profile_path(&dir);
+
+        let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+        let oww_dir = resource_dir.join("oww");
+        let embedding_model_path = oww_dir.join("embedding_model.onnx");
+        let mel_model_path = oww_dir.join("melspectrogram.onnx");
+
+        if !embedding_model_path.exists() {
+            return Err("OWW embedding model not found".to_string());
+        }
+
+        // Load the OWW models for embedding extraction
+        use tract_onnx::prelude::*;
+        let mel_model = tract_onnx::onnx()
+            .model_for_path(&mel_model_path)
+            .map_err(|e| format!("Failed to load mel model: {e}"))?
+            .into_optimized()
+            .map_err(|e| format!("Failed to optimize mel model: {e}"))?
+            .into_runnable()
+            .map_err(|e| format!("Failed to make mel model runnable: {e}"))?;
+
+        let embedding_model = tract_onnx::onnx()
+            .model_for_path(&embedding_model_path)
+            .map_err(|e| format!("Failed to load embedding model: {e}"))?
+            .into_optimized()
+            .map_err(|e| format!("Failed to optimize embedding model: {e}"))?
+            .into_runnable()
+            .map_err(|e| format!("Failed to make embedding model runnable: {e}"))?;
+
+        // Extract embeddings from each clip
+        let mut embeddings: Vec<Vec<f32>> = Vec::new();
+        for (i, clip) in clips.iter().enumerate() {
+            // Ensure 16kHz mono f32
+            if clip.is_empty() {
+                continue;
+            }
+
+            // Scale to int16 magnitude (OWW mel expects this)
+            let scaled: Vec<f32> = clip.iter().map(|s| s * 32768.0).collect();
+
+            // Run mel spectrogram
+            let mel_input = Tensor::from_shape(&[1, scaled.len()], &scaled)
+                .map_err(|e| format!("Mel input shape error: {e}"))?;
+            let mel_output = mel_model.run(tvec!(mel_input.into()))
+                .map_err(|e| format!("Mel model run error: {e}"))?;
+            let mel_features = mel_output[0].clone().into_tensor();
+
+            // Run embedding model
+            let emb_output = embedding_model.run(tvec!(mel_features.into()))
+                .map_err(|e| format!("Embedding model run error: {e}"))?;
+            let emb_tensor = emb_output[0].clone().into_tensor();
+
+            // Convert to plain array and average to get 96-dim embedding
+            let emb_arr = emb_tensor.into_plain_array::<f32>()
+                .map_err(|e| format!("Embedding array conversion error: {e}"))?;
+            let emb_slice = emb_arr.as_slice().unwrap_or(&[]);
+
+            // The embedding model outputs [1, 16, 96] — average over 16 frames
+            let embedding: Vec<f32> = (0..96)
+                .map(|j| {
+                    (0..16)
+                        .map(|i| {
+                            let idx = i * 96 + j;
+                            if idx < emb_slice.len() { emb_slice[idx] } else { 0.0 }
+                        })
+                        .sum::<f32>() / 16.0
+                })
+                .collect();
+
+            embeddings.push(embedding.clone());
+            tracing::debug!("Enrollment clip {} → embedding ({} dims)", i, embedding.len());
+        }
+
+        if embeddings.is_empty() {
+            return Err("No valid embeddings extracted from clips".to_string());
+        }
+
+        // Create verifier and enroll
+        let mut verifier = voice_profile::SpeakerVerifier::new(profile_path)
+            .map_err(|e| e.to_string())?;
+        let threshold = threshold.unwrap_or(voice_profile::DEFAULT_THRESHOLD);
+        verifier
+            .enroll(embeddings, threshold, vec!["nexus".to_string(), "hey nexus".to_string()])
+            .map_err(|e| e.to_string())?;
+
+        let captured: Vec<String> = verifier
+            .profile()
+            .map(|p| p.wake_variants.clone())
+            .unwrap_or_default();
+
+        tracing::info!("Voice profile enrolled ({} clips, threshold {:.2})", clips.len(), threshold);
+        Ok(captured)
+    }
+
+    /// IPC: Delete the voice profile (disables speaker verification).
+    #[tauri::command]
+    pub fn delete_voice_profile<R: Runtime>(
+        app: tauri::AppHandle<R>,
+    ) -> Result<(), String> {
+        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let profile_path = voice_profile::resolve_profile_path(&dir);
+
+        if profile_path.exists() {
+            std::fs::remove_file(&profile_path).map_err(|e| e.to_string())?;
+            tracing::info!("Voice profile deleted");
+        }
+        Ok(())
+    }
+}
+
 // ─── Meeting / privacy mode commands ─────────────────────────────────
 
 /// IPC: Check whether TTS should be suppressed right now.
@@ -219,6 +645,13 @@ pub struct MeetingStatus {
 
 // ─── Response Sidebar window ─────────────────────────────────────────
 
+/// Pending backdrop for the settings sidebar — stored when the window is
+/// first shown, fetched by the frontend on mount (same pattern as
+/// PENDING_SIDEBAR for the response sidebar). This handles the race
+/// condition where the backdrop event is emitted before the React app
+/// has mounted and registered its event listener.
+static PENDING_SETTINGS_BACKDROP: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// IPC: Show the response sidebar window (positioned at bottom-right).
 /// Called when a server response is incoming (n8n/Ollama/Hermes).
 /// Creates the sidebar window on-demand if it doesn't exist (saves ~250 MB RAM at idle).
@@ -270,7 +703,7 @@ pub async fn show_sidebar_with_content<R: Runtime>(
     }) {
         let scale = monitor.scale_factor();
         let screen = monitor.size();
-        let sidebar_w = 600i32;
+        let sidebar_w = 400i32;
         let sidebar_h = 1000i32;
         let phys_w = (sidebar_w as f64 * scale) as i32;
         let phys_h = (sidebar_h as f64 * scale) as i32;
@@ -301,6 +734,7 @@ pub async fn show_sidebar_with_content<R: Runtime>(
             text: text.clone(),
             backdrop: backdrop.clone(),
             analysis: None,
+            confirmation: None,
         });
     }
 
@@ -356,6 +790,7 @@ pub async fn show_sidebar_with_analysis<R: Runtime>(
             text: text.clone(),
             backdrop: backdrop.clone(),
             analysis: Some(analysis.clone()),
+            confirmation: None,
         });
     }
 
@@ -381,22 +816,79 @@ pub async fn show_sidebar_with_analysis<R: Runtime>(
     Ok(())
 }
 
+/// IPC: Show the sidebar with an action confirmation dialog.
+/// Stores the confirmation JSON so the frontend can render the ConfirmationPanel
+/// with Confirm and Cancel buttons.
+#[tauri::command]
+pub async fn show_sidebar_with_confirmation<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    query: String,
+    prompt: String,
+    confirmation: serde_json::Value,
+) -> Result<(), String> {
+    let window_existed = app.get_webview_window("sidebar").is_some();
+    let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::sidebar())?;
+
+    if !window_existed {
+        let _ = win.set_position(tauri::LogicalPosition::new(0.0, 0.0));
+    }
+
+    let backdrop = if window_existed && win.is_visible().unwrap_or(false) {
+        None
+    } else {
+        capture_backdrop(&app, &win)
+    };
+
+    {
+        let mut pending = PENDING_SIDEBAR.lock().unwrap();
+        *pending = Some(PendingSidebar {
+            query: query.clone(),
+            text: prompt.clone(),
+            backdrop: backdrop.clone(),
+            analysis: None,
+            confirmation: Some(confirmation.clone()),
+        });
+    }
+
+    show_sidebar_inner(&app, &win, backdrop.is_some())?;
+
+    if window_existed {
+        let _ = app.emit("sidebar:show", serde_json::json!({
+            "query": query,
+            "text": prompt,
+        }));
+        let _ = app.emit("sidebar:confirmation", serde_json::json!({
+            "query": query,
+            "prompt": prompt,
+            "confirmation": confirmation,
+        }));
+        if let Some(uri) = backdrop {
+            let _ = app.emit("sidebar:backdrop", uri);
+        }
+    }
+
+    tracing::info!("sidebar: shown with confirmation (query={}, prompt={}, window_existed={})", query, prompt, window_existed);
+    Ok(())
+}
+
 /// IPC: Fetch pending sidebar content (called by the frontend on mount).
-/// Returns the content + backdrop + analysis that was stored by
-/// `show_sidebar_with_content` or `show_sidebar_with_analysis`, or null
-/// if no content is pending. Clears the pending data after returning.
+/// Returns the content + backdrop + analysis + confirmation that was stored by
+/// `show_sidebar_with_content`, `show_sidebar_with_analysis`, or
+/// `show_sidebar_with_confirmation`, or null if no content is pending.
+/// Clears the pending data after returning.
 #[tauri::command]
 pub fn get_pending_sidebar_content() -> Result<Option<serde_json::Value>, String> {
     let mut pending = PENDING_SIDEBAR.lock().unwrap();
     let data = pending.take();
     match data {
         Some(p) => {
-            tracing::info!("sidebar: pending content fetched (query={} chars, text={} chars, has_backdrop={}, has_analysis={})", p.query.len(), p.text.len(), p.backdrop.is_some(), p.analysis.is_some());
+            tracing::info!("sidebar: pending content fetched (query={} chars, text={} chars, has_backdrop={}, has_analysis={}, has_confirmation={})", p.query.len(), p.text.len(), p.backdrop.is_some(), p.analysis.is_some(), p.confirmation.is_some());
             Ok(Some(serde_json::json!({
                 "query": p.query,
                 "text": p.text,
                 "backdrop": p.backdrop,
                 "analysis": p.analysis,
+                "confirmation": p.confirmation,
             })))
         }
         None => Ok(None),
@@ -417,7 +909,7 @@ fn capture_backdrop<R: Runtime>(
         let screen = monitor.size();
         // Read the ACTUAL window size — the wide sidebar is 900px, not 600px.
         let logical = win.inner_size().map(|s| s.to_logical::<f64>(scale)).unwrap_or(
-            tauri::LogicalSize::new(600.0, 1000.0)
+            tauri::LogicalSize::new(400.0, 1000.0)
         );
         let sidebar_w = logical.width;
         let sidebar_h = logical.height;
@@ -455,8 +947,17 @@ fn show_sidebar_inner<R: Runtime>(
     backdrop_already_captured: bool,
 ) -> Result<(), String> {
 
+    // Force the sidebar to the correct size in case the window was
+    // created with a different size from a previous build.
+    if let Ok(scale) = win.scale_factor() {
+        let _ = win.set_size(tauri::PhysicalSize::new(
+            (400.0 * scale) as i32,
+            (1000.0 * scale) as i32,
+        ));
+    }
+
     // Position at bottom-right of the screen, above the taskbar.
-    // Read the ACTUAL window size (logical) instead of hardcoding 600x1000 —
+    // Read the ACTUAL window size (logical) instead of hardcoding —
     // the wide sidebar is 900px and would otherwise be pushed off-screen.
     use tauri::PhysicalPosition;
     if let Ok(Some(monitor)) = win.current_monitor() {
@@ -464,7 +965,7 @@ fn show_sidebar_inner<R: Runtime>(
         let screen = monitor.size();
         // Get the window's actual logical size; fall back to 600x1000 if unavailable
         let logical = win.inner_size().map(|s| s.to_logical::<f64>(scale)).unwrap_or(
-            tauri::LogicalSize::new(600.0, 1000.0)
+            tauri::LogicalSize::new(400.0, 1000.0)
         );
         let sidebar_w = logical.width;
         let sidebar_h = logical.height;
@@ -503,7 +1004,7 @@ fn show_sidebar_inner<R: Runtime>(
         if let Ok(Some(monitor)) = win.current_monitor() {
             let scale = monitor.scale_factor();
             let screen = monitor.size();
-            let sidebar_w = 600i32;
+            let sidebar_w = 400i32;
             let sidebar_h = 1000i32;
             let phys_w = (sidebar_w as f64 * scale) as i32;
             let phys_h = (sidebar_h as f64 * scale) as i32;
@@ -551,8 +1052,11 @@ fn show_sidebar_inner<R: Runtime>(
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
                 while win_clone.is_visible().unwrap_or(false) {
-                    // 1 FPS — 1000ms between captures
-                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    // 4 FPS live blur — shared interval, see sidebar_backdrop.
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        crate::sidebar_backdrop::LIVE_BLUR_INTERVAL_MS,
+                    ))
+                    .await;
 
                     if !win_clone.is_visible().unwrap_or(false) {
                         break;
@@ -561,7 +1065,7 @@ fn show_sidebar_inner<R: Runtime>(
                     if let Ok(Some(monitor)) = win_clone.current_monitor() {
                         let scale = monitor.scale_factor();
                         let screen = monitor.size();
-                        let sidebar_w = 600i32;
+                        let sidebar_w = 400i32;
                         let sidebar_h = 1000i32;
                         let phys_w = (sidebar_w as f64 * scale) as i32;
                         let phys_h = (sidebar_h as f64 * scale) as i32;
@@ -586,11 +1090,12 @@ fn show_sidebar_inner<R: Runtime>(
                         *prev_hash_guard = Some(current_hash);
                         drop(prev_hash_guard);
 
-                        // Step 3: only run the expensive pipeline if changed
+                        // Step 3: only run the pipeline if changed —
+                        // half-res fast blur keeps 4 FPS affordable.
                         if should_emit {
                             // We already have the raw BGRA — blur + encode it
                             // without re-capturing (reuse the bytes we have).
-                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg(&raw_bgra, phys_w, phys_h, 32.0) {
+                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg_fast(&raw_bgra, phys_w, phys_h, 32.0) {
                                 let _ = app_clone.emit("sidebar:backdrop", data_uri);
                             }
                         }
@@ -633,25 +1138,353 @@ pub fn hide_sidebar<R: Runtime>(
     Ok(())
 }
 
-// ─── Loading indicator (now inside Orb — no-ops for backwards compat) ──
+// ─── PR List sidebar window ───────────────────────────────────────────
 
-/// IPC: Show loading indicator — now rendered inside the Orb window.
-/// Kept as a no-op for backwards compatibility with older frontend code.
+/// IPC: Show the PR list sidebar window.
+/// Creates a 500x1000 transparent, always-on-top, non-activating window
+/// on the right edge of the screen. Shows the PR list with Merge and
+/// Analyse buttons. The window is created on-demand and destroyed when
+/// closed (frees ~250 MB of WebView2 processes).
+///
+/// Carbon copy of the response sidebar: captures the desktop backdrop,
+/// blurs it, emits `sidebar:backdrop`, and runs a 1 FPS live blur loop
+/// so the PR list has the same liquid-glass appearance.
+#[tauri::command]
+pub async fn show_pr_list_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let win = crate::dyn_windows::get_or_create_window(
+        &app,
+        crate::dyn_windows::WindowConfig::pr_list_sidebar(),
+    )?;
+
+    // Position at the right edge of the screen, vertically centered
+    use tauri::PhysicalPosition;
+    let mut capture_x = 0i32;
+    let mut capture_y = 0i32;
+    let mut capture_w = 500i32;
+    let mut capture_h = 1000i32;
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let scale = monitor.scale_factor();
+        let screen = monitor.size();
+        let win_w = 500i32;
+        let win_h = 1000i32;
+        let phys_w = (win_w as f64 * scale) as i32;
+        let phys_h = (win_h as f64 * scale) as i32;
+        let gap = (12.0 * scale) as i32;
+        let x = screen.width as i32 - phys_w - gap;
+        let y = (screen.height as i32 - phys_h) / 2; // vertically centered
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+        capture_x = x;
+        capture_y = y;
+        capture_w = phys_w;
+        capture_h = phys_h;
+    }
+
+    // ─── "Fake blur" backdrop capture (Windows only) ───────────────
+    // Capture the desktop behind the window BEFORE showing it, so we
+    // don't capture the sidebar itself. This matches the response sidebar.
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(data_uri) = crate::sidebar_backdrop::capture_and_blur(
+            capture_x, capture_y, capture_w, capture_h, 32.0,
+        ) {
+            tracing::info!("pr-list: backdrop captured ({} bytes)", data_uri.len());
+            let _ = app.emit("sidebar:backdrop", data_uri);
+        } else {
+            tracing::warn!("pr-list: backdrop capture failed");
+        }
+    }
+
+    win.show().map_err(|e| e.to_string())?;
+
+    // ─── Live blur loop (Windows only) ──────────────────────────────
+    // 1 FPS capture + change detection, matching the response sidebar.
+    #[cfg(target_os = "windows")]
+    {
+        static PR_LIVE_BLUR_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static PR_LAST_FRAME_HASH: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+        if !PR_LIVE_BLUR_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+            PR_LIVE_BLUR_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+            *PR_LAST_FRAME_HASH.lock().unwrap() = None;
+
+            let win_clone = win.clone();
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                while win_clone.is_visible().unwrap_or(false) {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        crate::sidebar_backdrop::LIVE_BLUR_INTERVAL_MS,
+                    ))
+                    .await;
+                    if !win_clone.is_visible().unwrap_or(false) {
+                        break;
+                    }
+
+                    if let Ok(Some(monitor)) = win_clone.current_monitor() {
+                        let scale = monitor.scale_factor();
+                        let screen = monitor.size();
+                        let win_w = 500i32;
+                        let win_h = 1000i32;
+                        let phys_w = (win_w as f64 * scale) as i32;
+                        let phys_h = (win_h as f64 * scale) as i32;
+                        let gap = (12.0 * scale) as i32;
+                        let x = screen.width as i32 - phys_w - gap;
+                        let y = (screen.height as i32 - phys_h) / 2;
+
+                        let raw_bgra = match crate::sidebar_backdrop::capture_region_bgra_public(x, y, phys_w, phys_h) {
+                            Some(bgra) => bgra,
+                            None => continue,
+                        };
+
+                        let current_hash = crate::sidebar_backdrop::frame_hash(&raw_bgra);
+                        let mut prev_hash_guard = PR_LAST_FRAME_HASH.lock().unwrap();
+                        let should_emit = match *prev_hash_guard {
+                            Some(prev) => prev != current_hash,
+                            None => true,
+                        };
+                        *prev_hash_guard = Some(current_hash);
+                        drop(prev_hash_guard);
+
+                        if should_emit {
+                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg_fast(&raw_bgra, phys_w, phys_h, 32.0) {
+                                let _ = app_clone.emit("sidebar:backdrop", data_uri);
+                            }
+                        }
+                    }
+                }
+
+                *PR_LAST_FRAME_HASH.lock().unwrap() = None;
+                PR_LIVE_BLUR_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// IPC: Hide (destroy) the PR list sidebar window.
+#[tauri::command]
+pub fn hide_pr_list_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let _ = crate::dyn_windows::destroy_window(&app, "pr-list-sidebar");
+    Ok(())
+}
+
+/// IPC: Show the settings sidebar (liquid-glass, 520x1000, always-on-top).
+/// Creates the window on-demand, positions it at the LEFT edge of the
+/// screen (vertically centered) so the orb is visible on the right while
+/// adjusting position. Captures the desktop backdrop for the blur effect
+/// and starts the live-blur loop. Same pattern as the other sidebars.
+#[tauri::command]
+pub async fn show_settings_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let win = crate::dyn_windows::get_or_create_window(
+        &app,
+        crate::dyn_windows::WindowConfig::settings_sidebar(),
+    )?;
+
+    // Update size in case the window already existed with a different size
+    let _ = win.set_size(tauri::PhysicalSize::new(
+        (520.0 * win.scale_factor().unwrap_or(1.0)) as i32,
+        (1000.0 * win.scale_factor().unwrap_or(1.0)) as i32,
+    ));
+
+    // Show the main orb window so the user can see it move while dragging
+    // the position sliders in the Display tab.
+    if let Some(orb) = app.get_webview_window("main") {
+        let _ = orb.show();
+    }
+
+    // Position at the LEFT edge of the screen, vertically centered.
+    // This keeps the right side of the screen free so the orb is visible
+    // while the user adjusts its position via the sliders.
+    use tauri::PhysicalPosition;
+    let mut capture_x = 0i32;
+    let mut capture_y = 0i32;
+    let mut capture_w = 520i32;
+    let mut capture_h = 1000i32;
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let scale = monitor.scale_factor();
+        let screen = monitor.size();
+        let win_w = 520i32;
+        let win_h = 1000i32;
+        let phys_w = (win_w as f64 * scale) as i32;
+        let phys_h = (win_h as f64 * scale) as i32;
+        let gap = (12.0 * scale) as i32;
+        let x = gap; // LEFT edge
+        let y = (screen.height as i32 - phys_h) / 2;
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+        capture_x = x;
+        capture_y = y;
+        capture_w = phys_w;
+        capture_h = phys_h;
+    }
+
+    // "Fake blur" backdrop capture (Windows only) — same as other sidebars.
+    // Store in PENDING_SETTINGS_BACKDROP so the frontend can fetch it on
+    // mount (the event would be lost if emitted before React loads).
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(data_uri) = crate::sidebar_backdrop::capture_and_blur(
+            capture_x, capture_y, capture_w, capture_h, 32.0,
+        ) {
+            tracing::info!("settings-sidebar: backdrop captured ({} bytes)", data_uri.len());
+            // Store for frontend to fetch on mount
+            *PENDING_SETTINGS_BACKDROP.lock().unwrap() = Some(data_uri.clone());
+            // Also emit (works if window already existed and React is loaded)
+            let _ = app.emit("sidebar:backdrop", data_uri);
+        } else {
+            tracing::warn!("settings-sidebar: backdrop capture failed");
+        }
+    }
+
+    win.show().map_err(|e| e.to_string())?;
+
+    // Live blur loop (Windows only) — 1 FPS capture + change detection.
+    #[cfg(target_os = "windows")]
+    {
+        static SETTINGS_LIVE_BLUR_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static SETTINGS_LAST_FRAME_HASH: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+        if !SETTINGS_LIVE_BLUR_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+            SETTINGS_LIVE_BLUR_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+            *SETTINGS_LAST_FRAME_HASH.lock().unwrap() = None;
+
+            let win_clone = win.clone();
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                while win_clone.is_visible().unwrap_or(false) {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        crate::sidebar_backdrop::LIVE_BLUR_INTERVAL_MS,
+                    ))
+                    .await;
+                    if !win_clone.is_visible().unwrap_or(false) {
+                        break;
+                    }
+
+                    if let Ok(Some(monitor)) = win_clone.current_monitor() {
+                        let scale = monitor.scale_factor();
+                        let screen = monitor.size();
+                        let win_w = 520i32;
+                        let win_h = 1000i32;
+                        let phys_w = (win_w as f64 * scale) as i32;
+                        let phys_h = (win_h as f64 * scale) as i32;
+                        let gap = (12.0 * scale) as i32;
+                        let x = gap; // LEFT edge
+                        let y = (screen.height as i32 - phys_h) / 2;
+
+                        let raw_bgra = match crate::sidebar_backdrop::capture_region_bgra_public(x, y, phys_w, phys_h) {
+                            Some(bgra) => bgra,
+                            None => continue,
+                        };
+
+                        let current_hash = crate::sidebar_backdrop::frame_hash(&raw_bgra);
+                        let mut prev_hash_guard = SETTINGS_LAST_FRAME_HASH.lock().unwrap();
+                        let should_emit = match *prev_hash_guard {
+                            Some(prev) => prev != current_hash,
+                            None => true,
+                        };
+                        *prev_hash_guard = Some(current_hash);
+                        drop(prev_hash_guard);
+
+                        if should_emit {
+                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg_fast(&raw_bgra, phys_w, phys_h, 32.0) {
+                                let _ = app_clone.emit("sidebar:backdrop", data_uri);
+                            }
+                        }
+                    }
+                }
+
+                *SETTINGS_LAST_FRAME_HASH.lock().unwrap() = None;
+                SETTINGS_LIVE_BLUR_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// IPC: Hide (destroy) the settings sidebar window.
+#[tauri::command]
+pub fn hide_settings_sidebar<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let _ = crate::dyn_windows::destroy_window(&app, "settings-sidebar");
+    Ok(())
+}
+
+/// IPC: Fetch the pending settings backdrop (called by the frontend on mount).
+/// Returns the blurred desktop image as a data URI, or null if none pending.
+/// Clears the pending data after returning. This handles the race condition
+/// where the backdrop is captured before the React app has mounted.
+#[tauri::command]
+pub fn get_pending_settings_backdrop() -> Result<Option<String>, String> {
+    let mut pending = PENDING_SETTINGS_BACKDROP.lock().unwrap();
+    Ok(pending.take())
+}
+
+// ─── Loading indicator window ────────────────────────────────────────
+
+/// IPC: Show the loading indicator window.
+/// Creates a small 80x80 transparent click-through window at the
+/// top-right corner of the screen. Shows the loading.json Lottie
+/// animation while NEXUS is processing a request (after "On it sir").
+/// The window is permanently click-through — mouse events pass through
+/// to whatever is behind it.
+///
+/// IMPORTANT: This command is async so it runs on a thread pool, NOT the
+/// main thread. A synchronous command would block the main thread during
+/// WebView2 window creation, which prevents Tauri events (like the Worker
+/// "result" event) from being delivered to the frontend — causing the
+/// response to never appear.
 #[tauri::command]
 pub async fn show_loading_indicator<R: Runtime>(
-    _app: tauri::AppHandle<R>,
+    app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
+    // Create the window — WebviewWindowBuilder::build() dispatches to the
+    // main thread internally, so this is safe to call from a thread pool.
+    let win = crate::dyn_windows::get_or_create_window(
+        &app,
+        crate::dyn_windows::WindowConfig::loading_indicator(),
+    )?;
+
+    // Position at the top-right corner — 7px from right, 9px from top.
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let scale = monitor.scale_factor();
+        let screen = monitor.size();
+        let win_size = 80i32;
+        let phys_win = (win_size as f64 * scale) as i32;
+        let inset_x = (7.0 * scale) as i32;
+        let inset_y = (9.0 * scale) as i32;
+        let x = screen.width as i32 - phys_win - inset_x;
+        let y = inset_y;
+        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+        tracing::debug!("loading-indicator positioned at ({x}, {y}) [scale={scale}]");
+    }
+
+    // Permanently click-through — mouse events pass through to windows behind.
+    win.set_ignore_cursor_events(true).map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+    tracing::info!("loading-indicator window shown");
     Ok(())
 }
 
-/// IPC: Hide loading indicator — now rendered inside the Orb window.
-/// Kept as a no-op for backwards compatibility with older frontend code.
+/// IPC: Hide/destroy the loading indicator window.
+/// Called when the Worker response arrives. Destroys the window to
+/// free ~250 MB of WebView2 processes.
 #[tauri::command]
 pub async fn hide_loading_indicator<R: Runtime>(
-    _app: tauri::AppHandle<R>,
+    app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
+    let _ = crate::dyn_windows::destroy_window(&app, "loading-indicator");
     Ok(())
 }
+
 // ─── Settings window + persistence ───────────────────────────────────
 
 /// IPC: Open the settings window.
@@ -697,17 +1530,107 @@ pub struct NexusSettings {
     pub speech_rate: f64,
     #[serde(default = "default_tts_provider")]
     pub tts_provider: String,
+    /// TTS auto-volume: NEXUS sets system volume to this level (0-100)
+    /// before speaking, then restores the original volume after.
+    /// Default 75. Set to 0 to disable auto-volume.
+    #[serde(default = "default_tts_volume")]
+    pub tts_volume: u8,
+    /// Groq API key for cloud STT (Whisper Large v3 Turbo).
+    /// Free at console.groq.com — 2,000 requests/day per user.
+    /// When empty, NEXUS uses local faster-whisper STT.
+    #[serde(default)]
+    pub groq_api_key: String,
+    /// edge-tts voice name (Microsoft Neural, free, no API key).
+    /// Default: en-US-AvaNeural. See full list at Microsoft Speech docs.
+    #[serde(default = "default_edge_tts_voice")]
+    pub edge_tts_voice: String,
+    /// Orb horizontal position as percentage (0.0 = left, 0.5 = center, 1.0 = right).
+    /// Default 0.5 (center). Saved to settings.json, persists across restarts.
+    #[serde(default = "default_orb_horizontal_pct")]
+    pub orb_horizontal_pct: f64,
+    /// Orb vertical position as percentage (0.0 = top, 1.0 = bottom).
+    /// Default 1.0 (bottom). Saved to settings.json, persists across restarts.
+    #[serde(default = "default_orb_vertical_pct")]
+    pub orb_vertical_pct: f64,
+    /// Orb window size in pixels (100-300).
+    /// Default 200. Saved to settings.json, persists across restarts.
+    #[serde(default = "default_orb_size")]
+    pub orb_size: u32,
+    /// Gemini API key for Google Gemini models.
+    /// When empty, Gemini features are unavailable.
+    #[serde(default)]
+    pub gemini_api_key: String,
+    /// Cerebras API key for Cerebras-hosted Llama models.
+    /// Free at cloud.cerebras.ai — 1M tokens/day. Fastest inference (~80ms).
+    /// When empty, Cerebras is skipped in the 9Router cascade.
+    #[serde(default)]
+    pub cerebras_api_key: String,
+    /// Moonshine STT model architecture.
+    /// Options: "small_streaming" (123M, 7.84% WER, default for family),
+    ///          "medium_streaming" (245M, 6.65% WER, recommended for admin),
+    ///          "tiny_streaming" (34M, 12% WER, ultra-low RAM).
+    /// Default: "medium_streaming" (better accuracy, admin has RAM).
+    #[serde(default = "default_moonshine_model")]
+    pub moonshine_model: String,
+    /// Stage-2 wake-word verifier: on a stage-1 (acoustic) candidate, run the
+    /// buffered audio through STT and wake only if the transcript contains
+    /// "nexus". Kills TV/conversation false wakes at +~250ms latency.
+    /// Default: true. Set false in settings.json to restore fire-on-detect.
+    #[serde(default = "default_verify_wake")]
+    pub verify_wake: bool,
+    /// Mic keep-alive render (Meet parity): inaudible output stream beside
+    /// capture holds the Intel DSP awake so it never power-gates the mic
+    /// path mid-session. Default: true. Silent zeros, ~0 CPU.
+    #[serde(default = "default_mic_keep_alive")]
+    pub mic_keep_alive: bool,
+    /// Telegram owner chat id for the owner-only remote bridge (see
+    /// telegram.rs). Empty = bridge off. The bot token itself lives in the
+    /// vault ("telegram" service), never here. Set from the Connections tab.
+    #[serde(default)]
+    pub telegram_chat_id: String,
 }
 
 fn default_tts_provider() -> String {
     "kokoro".to_string()
 }
 
+fn default_tts_volume() -> u8 {
+    75
+}
+
+fn default_edge_tts_voice() -> String {
+    "en-US-AvaNeural".to_string()
+}
+
+fn default_orb_horizontal_pct() -> f64 {
+    0.5
+}
+
+fn default_orb_vertical_pct() -> f64 {
+    1.0
+}
+
+fn default_orb_size() -> u32 {
+    200
+}
+
+fn default_moonshine_model() -> String {
+    "medium_streaming".to_string()
+}
+
+fn default_verify_wake() -> bool {
+    true
+}
+
+fn default_mic_keep_alive() -> bool {
+    true
+}
+
 impl Default for NexusSettings {
     fn default() -> Self {
         Self {
             autostart: true,
-            hotkey: "Super+Space".to_string(),
+            hotkey: "Ctrl+Space".to_string(),
             auto_hide_delay: 8,
             wake_word_enabled: true,
             wake_phrase: "NEXUS".to_string(),
@@ -716,14 +1639,95 @@ impl Default for NexusSettings {
             meeting_mode_auto: true,
             suppress_tts_in_meetings: true,
             local_stt_only: true,
-            server_url: WORKER_URL.to_string(),
+            server_url: option_env!("NEXUS_SERVER_URL")
+                .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev")
+                .to_string(),
             user_id: String::new(),
             device_id: String::new(),
             tts_voice: "af_sky".to_string(),
             speech_rate: 1.15,
             tts_provider: "kokoro".to_string(),
+            tts_volume: 75,
+            groq_api_key: String::new(),
+            edge_tts_voice: "en-US-AvaNeural".to_string(),
+            orb_horizontal_pct: 0.5,
+            orb_vertical_pct: 1.0,
+            orb_size: 200,
+            gemini_api_key: String::new(),
+            cerebras_api_key: String::new(),
+            moonshine_model: "medium_streaming".to_string(),
+            verify_wake: true,
+            mic_keep_alive: true,
+            telegram_chat_id: String::new(),
         }
     }
+}
+
+/// TTS voice metadata returned by `list_tts_voices`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtsVoiceInfo {
+    pub id: String,
+    pub name: String,
+    pub gender: String,
+    pub provider: String,
+    pub language: String,
+}
+
+/// IPC: List all available TTS voices (Edge TTS cloud + Piper local).
+/// Returns a curated list of en-US voices. The full Edge TTS catalog has
+/// 400+ voices across 140+ locales — we surface the most useful en-US ones
+/// to keep the settings UI manageable.
+#[tauri::command]
+pub fn list_tts_voices() -> Result<Vec<TtsVoiceInfo>, String> {
+    let edge_voices = [
+        ("en-US-AvaNeural",        "Ava",       "Female"),
+        ("en-US-AndrewNeural",     "Andrew",    "Male"),
+        ("en-US-AndrewMultilingualNeural", "Andrew ML", "Male"),
+        ("en-US-EmmaNeural",       "Emma",      "Female"),
+        ("en-US-BrianNeural",      "Brian",     "Male"),
+        ("en-US-ChristopherNeural","Christopher","Male"),
+        ("en-US-EricNeural",       "Eric",      "Male"),
+        ("en-US-GuyNeural",        "Guy",       "Male"),
+        ("en-US-JennyNeural",      "Jenny",     "Female"),
+        ("en-US-MichelleNeural",   "Michelle",  "Female"),
+        ("en-US-RogerNeural",      "Roger",     "Male"),
+        ("en-US-SteffanNeural",    "Steffan",   "Male"),
+        ("en-US-AriaNeural",       "Aria",      "Female"),
+        ("en-US-DavisNeural",      "Davis",     "Male"),
+        ("en-US-NancyNeural",      "Nancy",     "Female"),
+        ("en-US-SaraNeural",       "Sara",      "Female"),
+        ("en-US-NoraNeural",       "Nora",      "Female"),
+        ("en-US-AmberNeural",      "Amber",     "Female"),
+        ("en-US-AshleyNeural",     "Ashley",    "Female"),
+        ("en-US-BrandonNeural",    "Brandon",   "Male"),
+        ("enUS-CoraNeural",        "Cora",      "Female"),
+        ("en-US-ElizabethNeural",  "Elizabeth", "Female"),
+        ("en-US-MonicaNeural",     "Monica",    "Female"),
+        ("en-US-SoniaNeural",      "Sonia",     "Female"),
+    ];
+
+    let mut voices: Vec<TtsVoiceInfo> = edge_voices
+        .iter()
+        .map(|(id, name, gender)| TtsVoiceInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            gender: gender.to_string(),
+            provider: "edge-tts".to_string(),
+            language: "en-US".to_string(),
+        })
+        .collect();
+
+    // Add local Piper voice (always available offline)
+    voices.push(TtsVoiceInfo {
+        id: "piper-amy".to_string(),
+        name: "Amy (Offline)".to_string(),
+        gender: "Female".to_string(),
+        provider: "piper".to_string(),
+        language: "en-US".to_string(),
+    });
+
+    Ok(voices)
 }
 
 /// IPC: Get the current settings (merged with defaults for missing fields).
@@ -744,7 +1748,8 @@ pub fn get_settings<R: Runtime>(
     if config_path.exists() {
         if let Ok(config) = std::fs::read_to_string(&config_path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&config) {
-                let default_url = WORKER_URL;
+                let default_url = option_env!("NEXUS_SERVER_URL")
+                    .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
                 if let Some(url) = json.get("serverUrl").and_then(|v| v.as_str()) {
                     // Don't overwrite with empty string — keep default
                     settings.server_url = if url.is_empty() { default_url.to_string() } else { url.to_string() };
@@ -778,7 +1783,8 @@ pub fn save_settings<R: Runtime>(
     // identity loss if settings.json is stale or nexus-config.json was
     // temporarily missing.
     let config_path = dir.join("nexus-config.json");
-    let default_url = WORKER_URL;
+    let default_url = option_env!("NEXUS_SERVER_URL")
+        .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
 
     // Read existing config to preserve identity if needed
     let existing = std::fs::read_to_string(&config_path)
@@ -816,6 +1822,84 @@ pub fn save_settings<R: Runtime>(
     std::fs::write(&config_path, config.to_string()).map_err(|e| e.to_string())?;
     tracing::info!("settings saved to {:?}", path);
     Ok(())
+}
+
+/// Read the Groq API key from settings.json (non-IPC helper for stt.rs).
+/// Returns empty string if no key is set or settings file doesn't exist.
+pub fn read_groq_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return String::new(); };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return String::new(); };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return String::new(); };
+    // Read groqApiKey (frontend camelCase) with fallback to groq_api_key
+    // (snake_case, used by manual settings.json edits or older versions).
+    json.get("groqApiKey")
+        .or_else(|| json.get("groq_api_key"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Read the localSttOnly flag from settings.json (non-IPC helper for stt.rs).
+/// Returns true if the user has enabled "Local STT only" (privacy mode —
+/// audio never leaves the device). Returns false if not set or file missing.
+pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return false; };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return false; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
+    json.get("localSttOnly")
+        .or_else(|| json.get("local_stt_only"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Read the verifyWake flag from settings.json (non-IPC helper for wakeword_oww.rs).
+/// Stage-2 verifier: cross-check stage-1 acoustic candidates with STT before
+/// firing the wake. Defaults to TRUE (fail-open default: verification on).
+/// Set `"verifyWake": false` in settings.json to restore fire-on-detect.
+pub fn read_verify_wake<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return true; };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return true; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return true; };
+    json.get("verifyWake")
+        .or_else(|| json.get("verify_wake"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// Read the micKeepAlive flag from settings.json (non-IPC helper for wakeword_oww.rs).
+/// Keep-alive render: inaudible output stream holds the Intel DSP awake.
+/// Defaults to TRUE. Set `"micKeepAlive": false` to disable.
+pub fn read_mic_keep_alive<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return true; };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return true; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return true; };
+    json.get("micKeepAlive")
+        .or_else(|| json.get("mic_keep_alive"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// Read the edge-tts voice from settings.json (non-IPC helper for tts.rs).
+/// Returns default voice if not set.
+pub fn read_edge_tts_voice(app: &tauri::AppHandle) -> String {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return "en-US-AvaNeural".to_string(); };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return "en-US-AvaNeural".to_string(); };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return "en-US-AvaNeural".to_string(); };
+    json.get("edgeTtsVoice")
+        .or_else(|| json.get("edge_tts_voice"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("en-US-AvaNeural")
+        .to_string()
 }
 
 // ─── Autostart management ───────────────────────────────────────────
@@ -1035,18 +2119,8 @@ pub fn open_mic_settings() -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        // Best-effort: pavucontrol if installed, else GNOME sound settings.
-        // Never fails — frontend falls back to its own guidance text.
-        let opened = std::process::Command::new("pavucontrol")
-            .spawn()
-            .map(|_| true)
-            .unwrap_or(false);
-        if !opened {
-            let _ = std::process::Command::new("xdg-open")
-                .arg("gnome-control-center://sound")
-                .spawn();
-        }
-        tracing::info!("open_mic_settings: launched pavucontrol/sound settings");
+        // No standard mic privacy settings on most Linux distros
+        tracing::info!("open_mic_settings: no-op on Linux");
     }
 
     Ok(())
@@ -1066,7 +2140,7 @@ pub fn clear_transcript() -> Result<(), String> {
 #[tauri::command]
 pub fn refresh_app_registry() -> Result<String, String> {
     tracing::info!("manual app registry refresh requested");
-    crate::app_registry::force_refresh();
+    app_registry::force_refresh();
     Ok("App registry refreshed".to_string())
 }
 
@@ -1085,5 +2159,25 @@ pub fn pause_wakeword() -> Result<(), String> {
 #[tauri::command]
 pub fn resume_wakeword() -> Result<(), String> {
     crate::wakeword_oww::resume_stream();
+    Ok(())
+}
+
+/// IPC: Mic self-test — is the mic healthy, quiet, or dead?
+/// Analyzes the live 2.5s verify ring (no new stream opened, SST-safe).
+/// Returns peak level, exact-zero ratio, and a verdict string:
+/// "healthy" | "quiet-room" | "dead-silence".
+#[tauri::command]
+pub fn mic_self_test() -> Result<crate::wakeword_oww::MicSelfTestReport, String> {
+    Ok(crate::wakeword_oww::mic_self_test_data())
+}
+
+/// Start Rust-side STT capture from the cpal stream.
+/// Called by the frontend when the user wakes NEXUS or when retrying
+/// after an empty transcript. The cpal stream captures audio directly —
+/// no getUserMedia, no baton pass. This fixes the Intel SST driver issue
+/// where getUserMedia returns silence but cpal is still working.
+#[tauri::command]
+pub fn start_stt_capture() -> Result<(), String> {
+    crate::wakeword_oww::start_stt_capture();
     Ok(())
 }

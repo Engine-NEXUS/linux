@@ -1,0 +1,19 @@
+{
+  "source": "CLINC150",
+  "source_url": "https://archive.ics.uci.edu/static/public/570/clinc150.zip",
+  "doi": "10.24432/C5MP58",
+  "license": "CC-BY-4.0",
+  "citation": "CLINC150 [Dataset]. (2020). UCI Machine Learning Repository. https://doi.org/10.24432/C5MP58.",
+  "source_zip_sha256": "0d8ecc3e1edd7b25cabde0177544ce536ddf773844bc80ef1a75f36e7f030ea2",
+  "source_dataset_member": "clinc150_uci/data_full.json",
+  "source_dataset_sha256": "36923c3705a59e08fe9c3883d8bc2dd966ef93e22cb78ac41171782a698d56e0",
+  "retained": {
+    "oos_train_staged_pending_review": 14,
+    "oos_test_never_train_benchmark": 984
+  },
+  "nexus_exact_text_overlaps_discarded": {
+    "oos_train": 86,
+    "oos_test": 16
+  },
+  "discarded": "All 150 in-scope classes, validation rows, alternate dataset versions, nonessential source fields, and exact NEXUS dataset overlaps"
+}

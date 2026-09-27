@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "settings-sidebar-cap",
+  "description": "Capabilities for the NEXUS Settings sidebar window — event listening (backdrop), settings get/save, orb position, TTS speak, OAuth.",
+  "windows": ["settings-sidebar"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

@@ -24,7 +24,7 @@ import { execSync, spawnSync } from "node:child_process";
 // We control all arguments (no user input) — the warning is a false positive
 // for our use case of launching .cmd shims like npm.cmd on Windows.
 process.removeAllListeners("warning");
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, copyFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, arch } from "node:os";
@@ -364,12 +364,15 @@ function cmdSetup() {
       { allowFail: true, hint: "If pip fails, create a venv: python -m venv .venv && activate it" });
   }
 
-  // 6. Verify NLU model is present
-  const nluModel = join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx");
-  if (existsSync(nluModel)) {
-    ok("NLU model found (committed in repo)");
+  // 6. Verify NLU model is present (either in server/nlu/model/ or resources/)
+  const nluModelLocal = join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx");
+  const nluModelResources = join(ROOT, "src-tauri", "resources", "server", "nlu", "model", "nexus_nlu.onnx");
+  if (existsSync(nluModelLocal)) {
+    ok("NLU model found (local training output)");
+  } else if (existsSync(nluModelResources)) {
+    ok("NLU model found (committed in resources)");
   } else {
-    warn("NLU model not found — NLU server will fail. Run: cd server/nlu && python train.py");
+    warn("NLU model not found — NLU server will fail. Run: cd server/nlu && python train.py && python export_onnx.py");
   }
 
   // 7. Verify faster-whisper is installed (STT server dependency)
@@ -499,33 +502,85 @@ function killRunningNexus() {
   }
 }
 
+/// Sync the NLU model from server/nlu/model/ to src-tauri/resources/server/nlu/model/.
+/// This ensures the installer always bundles the latest trained ONNX model,
+/// labels.json, and tokenizer. Called before every build.
+/// If the source model doesn't exist (fresh clone, no training done yet),
+/// the existing resources copy is kept (it's committed to git).
+function syncNluModel() {
+  const srcDir = join(ROOT, "server", "nlu", "model");
+  const dstDir = join(ROOT, "src-tauri", "resources", "server", "nlu", "model");
+
+  // Files to sync (only if they exist in source)
+  const files = [
+    "nexus_nlu.onnx",
+    "nexus_nlu.onnx.data",
+    "labels.json",
+  ];
+
+  let synced = 0;
+  for (const file of files) {
+    const src = join(srcDir, file);
+    const dst = join(dstDir, file);
+    if (existsSync(src)) {
+      copyFileSync(src, dst);
+      synced++;
+    }
+  }
+
+  // Sync tokenizer dir
+  const srcTok = join(srcDir, "tokenizer");
+  const dstTok = join(dstDir, "tokenizer");
+  if (existsSync(srcTok)) {
+    mkdirSync(dstTok, { recursive: true });
+    for (const f of readdirSync(srcTok)) {
+      copyFileSync(join(srcTok, f), join(dstTok, f));
+      synced++;
+    }
+  }
+
+  if (synced > 0) {
+    ok(`NLU model synced to resources (${synced} file(s))`);
+  } else {
+    info("NLU model: using existing resources copy (no local training output found)");
+  }
+}
+
 function cmdBuild() {
   // Kill any running instance first — cargo can't replace a running binary
   killRunningNexus();
+
+  // Sync the NLU model from server/nlu/model/ to src-tauri/resources/server/nlu/model/
+  // This ensures the installer always bundles the latest trained model.
+  // The NLU server reads from resources/ in production (no server/ dir in installed builds).
+  syncNluModel();
 
   info("Building frontend (Vite)...");
   run("npm", ["--prefix", "frontend", "install"], { allowFail: true, stdio: "ignore" });
   run("npm", ["--prefix", "frontend", "run", "build"]);
 
-  info("Building Rust release binary (custom-protocol)...");
+  info("Building Rust release binary (custom-protocol + admin-brain)...");
   const cargoEnv = { ...process.env };
   if (IS_WIN && process.env.LIBCLANG_PATH) {
     cargoEnv.LIBCLANG_PATH = process.env.LIBCLANG_PATH;
   }
   if (IS_LINUX && !process.env.LIBCLANG_PATH) {
     // Auto-detect LLVM on Linux (e.g. Pop!_OS / Ubuntu) for bindgen
-    const glob = readdirSync("/usr/lib").filter(f => f.startsWith("llvm-"));
-    if (glob.length > 0) {
-      glob.sort().reverse(); // get highest version
-      const p = join("/usr/lib", glob[0], "lib");
-      if (existsSync(join(p, "libclang.so"))) {
-        cargoEnv.LIBCLANG_PATH = p;
-        info(`Auto-detected LIBCLANG_PATH: ${p}`);
+    try {
+      const glob = readdirSync("/usr/lib").filter(f => f.startsWith("llvm-"));
+      if (glob.length > 0) {
+        glob.sort().reverse(); // get highest version
+        const p = join("/usr/lib", glob[0], "lib");
+        if (existsSync(join(p, "libclang.so"))) {
+          cargoEnv.LIBCLANG_PATH = p;
+          info(`Auto-detected LIBCLANG_PATH: ${p}`);
+        }
       }
-    }
+    } catch {}
   }
-
-  run("cargo", ["build", "--release", "--features", "custom-protocol"],
+  // admin-brain: enables the Qwen brain (admin-only, runtime-gated by admin.json).
+  // The brain code is compiled in but does nothing unless admin.json has is_admin=true.
+  run("cargo", ["build", "--release", "--features", "custom-protocol,admin-brain"],
     { cwd: join(ROOT, "src-tauri"), env: cargoEnv,
       hint: "Make sure LIBCLANG_PATH is set (Windows) or LLVM is installed" });
 
@@ -614,8 +669,10 @@ function cmdCheck() {
     return existsSync(join(ROOT, "src-tauri", "target", "release", `nexus${ext}`));
   });
 
-  // NLU
-  check("NLU model present", () => existsSync(join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx")));
+  // NLU — check either local training output or committed resources copy
+  const nluModelLocal = join(ROOT, "server", "nlu", "model", "nexus_nlu.onnx");
+  const nluModelResources = join(ROOT, "src-tauri", "resources", "server", "nlu", "model", "nexus_nlu.onnx");
+  check("NLU model present", () => existsSync(nluModelLocal) || existsSync(nluModelResources));
   check("NLU requirements.txt", () => existsSync(join(ROOT, "server", "nlu", "requirements.txt")));
 
   // Worker
@@ -664,6 +721,313 @@ function cmdWorker() {
   run("npx", ["wrangler", "deploy"], { cwd: workerDir });
 }
 
+/// Train or retrain the BERT-Mini NLU model.
+/// Runs the full pipeline: clean dataset → generate examples → merge →
+/// train → export ONNX → sync to resources.
+/// Contributors just run: nexus train
+function cmdTrain() {
+  const trainScript = join(ROOT, "server", "nlu", "train_all.py");
+  if (!existsSync(trainScript)) {
+    err("Training script not found: " + trainScript);
+    err("Ensure you have the latest code: git pull");
+    process.exit(1);
+  }
+
+  // Check Python is available
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+
+  // Check training dependencies (torch, transformers)
+  info("Checking training dependencies (PyTorch, Transformers)...");
+  const depCheck = spawnSync(py, ["-c", "import torch; import transformers; print('ok')"], {
+    encoding: "utf-8",
+  });
+  if (depCheck.stdout?.trim() !== "ok") {
+    info("Installing training dependencies...");
+    const reqPath = join(ROOT, "server", "nlu", "requirements-train.txt");
+    if (existsSync(reqPath)) {
+      run(py, ["-m", "pip", "install", "-r", reqPath], {
+        allowFail: true,
+        hint: "If pip fails, create a venv: python -m venv .venv && activate it",
+      });
+    } else {
+      warn("requirements-train.txt not found — install manually: pip install torch transformers onnx");
+    }
+  } else {
+    ok("Training dependencies OK");
+  }
+
+  // Run the unified training pipeline
+  info("Starting NLU training pipeline...");
+  const args = [trainScript];
+  // Pass through --clean-only or --skip-train if provided
+  const extraArgs = process.argv.slice(3);
+  args.push(...extraArgs);
+
+  run(py, args, { cwd: join(ROOT, "server", "nlu") });
+
+  console.log(`\n${C.bold}${C.green}═════════════════════════════════════════════════════════════${C.reset}`);
+  ok("NLU training complete!");
+  console.log(`${C.green}  The new model is synced to src-tauri/resources/.${C.reset}`);
+  console.log(`${C.green}  Run '${IS_WIN ? "nexus" : "./nexus"} build' to bundle it into the installer.${C.reset}`);
+  console.log(`${C.bold}${C.green}═════════════════════════════════════════════════════════════${C.reset}\n`);
+}
+
+function cmdAudit() {
+  const auditScript = join(ROOT, "server", "nlu", "audit_nlu.py");
+  if (!existsSync(auditScript)) {
+    err("NLU audit script not found: " + auditScript);
+    process.exit(1);
+  }
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+  const extraArgs = process.argv.slice(3);
+  info("Auditing NLU dataset and ONNX model...");
+  run(py, [auditScript, ...extraArgs], { cwd: ROOT });
+}
+
+/// Collect real voice samples for NLU training.
+/// Prompts you with phrases to speak, records your voice, transcribes via STT,
+/// and saves the real transcripts as training data for BERT-Mini.
+/// Contributors run: nexus collect
+function cmdCollect() {
+  const collectScript = join(ROOT, "scripts", "collect_nlu_samples.py");
+  if (!existsSync(collectScript)) {
+    err("Collection script not found: " + collectScript);
+    err("Ensure you have the latest code: git pull");
+    process.exit(1);
+  }
+
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+
+  // Check audio recording deps
+  info("Checking audio recording dependencies (sounddevice, numpy, scipy)...");
+  const depCheck = spawnSync(py, ["-c", "import sounddevice; import numpy; import scipy; print('ok')"], {
+    encoding: "utf-8",
+  });
+  if (depCheck.stdout?.trim() !== "ok") {
+    info("Installing audio recording dependencies...");
+    run(py, ["-m", "pip", "install", "sounddevice", "numpy", "scipy"], {
+      allowFail: true,
+      hint: "If pip fails, create a venv: python -m venv .venv && activate it",
+    });
+  } else {
+    ok("Audio recording dependencies OK");
+  }
+
+  // Pass through all extra args to the Python script
+  const extraArgs = process.argv.slice(3);
+  info("Starting voice sample collector...");
+  info("Make sure NEXUS is running (for STT) or GROQ_API_KEY is set.");
+  run(py, [collectScript, ...extraArgs], { cwd: ROOT });
+}
+
+/// Verify every registered MCP server end to end (read-only, no sends).
+/// Registry check + reachability probe + one read-only tool call +
+/// one expected failure per server. Exit 0 only if all are reachable.
+/// Contributors run: nexus mcp check
+function cmdMcpCheck() {
+  const checkScript = join(ROOT, "scripts", "mcp_check.py");
+  if (!existsSync(checkScript)) {
+    err("MCP check script not found: " + checkScript);
+    process.exit(1);
+  }
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+  run(py, [checkScript], { cwd: ROOT });
+}
+
+/// Inspect training dataset category coverage, voice sample health, and targeted recommendations.
+/// Contributors run: nexus stats
+function cmdStats() {
+  const statsScript = join(ROOT, "scripts", "nlu_stats.py");
+  if (!existsSync(statsScript)) {
+    err("NLU stats script not found: " + statsScript);
+    process.exit(1);
+  }
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+  const extraArgs = process.argv.slice(3);
+  run(py, [statsScript, ...extraArgs], { cwd: ROOT });
+}
+
+/// Record wake word audio samples or view wake dataset statistics.
+/// Examples:
+///   nexus wake record 300
+///   nexus wake record positive 300
+///   nexus wake record negative 100
+///   nexus wake stats
+function cmdWake() {
+  const wakeScript = join(ROOT, "scripts", "record_wake_samples.py");
+  if (!existsSync(wakeScript)) {
+    err("Wake recorder script not found: " + wakeScript);
+    process.exit(1);
+  }
+
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+
+  // Check audio recording dependencies
+  info("Checking wake word recording dependencies (sounddevice, numpy, scipy)...");
+  const depCheck = spawnSync(py, ["-c", "import sounddevice; import numpy; import scipy; print('ok')"], {
+    encoding: "utf-8",
+  });
+  if (depCheck.stdout?.trim() !== "ok") {
+    info("Installing audio recording dependencies...");
+    run(py, ["-m", "pip", "install", "sounddevice", "numpy", "scipy"], {
+      allowFail: true,
+      hint: "If pip fails, create a venv: python -m venv .venv && activate it",
+    });
+  } else {
+    ok("Audio recording dependencies OK");
+  }
+
+  const sub = process.argv[3]?.toLowerCase();
+  let args = [];
+
+  if (sub === "probe" || sub === "calibrate") {
+    const probeScript = join(ROOT, "scripts", "probe_microphone.py");
+    if (!existsSync(probeScript)) {
+      err("Probe script not found: " + probeScript);
+      process.exit(1);
+    }
+    info("Starting microphone hardware acoustic prober...");
+    run(py, [probeScript], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "test" || sub === "live" || sub === "benchmark" || sub === "devices") {
+    const testScript = join(ROOT, "scripts", "test_wake_live.py");
+    if (!existsSync(testScript)) {
+      err("Test script not found: " + testScript);
+      process.exit(1);
+    }
+    const testArgs = process.argv.slice(4);
+    if (sub === "benchmark" && !testArgs.includes("--batch")) {
+      testArgs.push("--batch");
+    }
+    if (sub === "devices" && !testArgs.includes("--devices")) {
+      testArgs.push("--devices");
+    }
+    info("Starting wake word live tester / benchmark...");
+    run(py, [testScript, ...testArgs], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "train" || sub === "retrain") {
+    const trainScript = join(ROOT, "scripts", "train_local_wakeword.py");
+    if (!existsSync(trainScript)) {
+      err("Train script not found: " + trainScript);
+      process.exit(1);
+    }
+    info("Starting wake word neural classifier training...");
+    run(py, [trainScript], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "ingest" || sub === "noise") {
+    const ingestScript = join(ROOT, "scripts", "ingest_opensource_noise.py");
+    if (!existsSync(ingestScript)) {
+      err("Ingest script not found: " + ingestScript);
+      process.exit(1);
+    }
+    info("Starting multi-source noise ingestion & screening...");
+    run(py, [ingestScript], { cwd: ROOT });
+    return;
+  }
+
+  if (!sub || sub === "record") {
+    // Default to positive 300 if no extra arg, or check if next arg is a number/mode
+    const nextArg = process.argv[4];
+    const thirdArg = process.argv[5];
+    if (!nextArg) {
+      args = ["positive", "300"];
+    } else if (!isNaN(Number(nextArg))) {
+      args = ["positive", nextArg];
+    } else if (["positive", "negative", "free", "background"].includes(nextArg.toLowerCase())) {
+      args = [nextArg.toLowerCase(), thirdArg || "300"];
+    } else {
+      args = [nextArg, thirdArg || "300"];
+    }
+  } else if (["positive", "negative", "free", "background", "stats"].includes(sub)) {
+    args = process.argv.slice(3);
+  } else {
+    err(`Unknown wake sub-command: ${sub}`);
+    info("Usage:");
+    info("  nexus wake probe                 (probe microphone hardware & calibrate acoustic profile)");
+    info("  nexus wake test                  (real-time live microphone listening test)");
+    info("  nexus wake test --batch          (benchmark model against all 3,000 dataset WAVs)");
+    info("  nexus wake test --devices        (benchmark model across 5 hardware microphone profiles)");
+    info("  nexus wake train                 (train device-invariant wake neural model)");
+    info("  nexus wake ingest                (ingest & screen open-source noise corpora)");
+    info("  nexus wake record 300            (record 300 positive wake words)");
+    info("  nexus wake record negative 100   (record 100 negative soundalikes)");
+    info("  nexus wake stats                 (show sample counts & size)");
+    process.exit(1);
+  }
+
+  info(`Starting wake recorder: ${args.join(" ")}...`);
+  run(py, [wakeScript, ...args], { cwd: ROOT });
+}
+
+function cmdData() {
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+
+  const area = process.argv[3];
+  const action = process.argv[4] || "validate";
+  if (area === "nlu") {
+    if (action === "import-clinc") {
+      const importer = join(ROOT, "server", "nlu", "import_clinc150.py");
+      run(py, [importer, ...process.argv.slice(5)], { cwd: ROOT });
+      return;
+    }
+    const script = join(ROOT, "server", "nlu", "data_foundation.py");
+    const allowed = new Set(["validate", "freeze-evaluation"]);
+    if (!allowed.has(action)) {
+      err(`Unknown NLU data action: ${action}`);
+      process.exit(1);
+    }
+    run(py, [script, action, ...process.argv.slice(5)], { cwd: ROOT });
+    return;
+  }
+  if (area === "wake") {
+    const script = join(ROOT, "scripts", "wake_data_foundation.py");
+    const mappedAction = action === "fingerprint" ? "fingerprint-models" : action;
+    const allowed = new Set(["validate", "fingerprint-models"]);
+    if (!allowed.has(mappedAction)) {
+      err(`Unknown wake data action: ${action}`);
+      process.exit(1);
+    }
+    run(py, [script, mappedAction, ...process.argv.slice(5)], { cwd: ROOT });
+    return;
+  }
+  err("Usage: nexus data <nlu|wake> <validate|freeze-evaluation|import-clinc|fingerprint>");
+  process.exit(1);
+}
+
 function cmdHelp() {
   console.log(`
 ${C.bold}NEXUS — Unified Cross-Platform Developer Command${C.reset}
@@ -681,6 +1045,13 @@ ${C.cyan}Commands:${C.reset}
   ${C.green}check${C.reset}    Run diagnostics (tools, frontend, Rust, NLU, Worker)
   ${C.green}clean${C.reset}    Remove build artifacts (target/, dist/)
   ${C.green}worker${C.reset}   Deploy the Cloudflare Worker (optional, self-host backend)
+  ${C.green}train${C.reset}    Retrain the BERT-Mini NLU model (clean → generate → train → export)
+  ${C.green}audit${C.reset}    Audit NLU data/model quality, coverage, leakage, slots, and OOS behavior
+  ${C.green}collect${C.reset}  Collect real voice samples for NLU training (speak phrases → transcribe → save)
+  ${C.green}wake${C.reset}     Record wake word audio samples for wake model training (nexus wake record 300)
+  ${C.green}stats${C.reset}    Inspect dataset category coverage, voice health, and training recommendations
+  ${C.green}data${C.reset}     Validate NLU provenance/evaluation locks and wake data/model manifests
+  ${C.green}mcp check${C.reset} Verify every registered MCP server end to end (read-only, no sends)
   ${C.green}help${C.reset}     Show this help
 
 ${C.cyan}Examples:${C.reset}
@@ -688,6 +1059,14 @@ ${C.cyan}Examples:${C.reset}
   ${IS_WIN ? "nexus" : "./nexus"} start       # launch the built app
   ${IS_WIN ? "nexus" : "./nexus"} dev         # develop with hot reload
   ${IS_WIN ? "nexus" : "./nexus"} build       # rebuild after changes
+  ${IS_WIN ? "nexus" : "./nexus"} train       # retrain the NLU model with new data
+  ${IS_WIN ? "nexus" : "./nexus"} stats       # inspect dataset coverage & weakest categories
+  ${IS_WIN ? "nexus" : "./nexus"} audit       # audit the current NLU dataset and ONNX model
+  ${IS_WIN ? "nexus" : "./nexus"} collect     # speak phrases → save real voice samples for training
+  ${IS_WIN ? "nexus" : "./nexus"} wake record 300 # record 300 real wake word samples ("NEXUS")
+  ${IS_WIN ? "nexus" : "./nexus"} wake stats  # inspect wake word audio dataset statistics
+  ${IS_WIN ? "nexus" : "./nexus"} data nlu validate
+  ${IS_WIN ? "nexus" : "./nexus"} data wake validate
 
 ${C.cyan}Environment:${C.reset}
   NEXUS_SERVER_URL   Cloudflare Worker URL (default: baked at build time)
@@ -716,6 +1095,19 @@ switch (command) {
   case "check":   cmdCheck(); break;
   case "clean":   cmdClean(); break;
   case "worker":  cmdWorker(); break;
+  case "train":   cmdTrain(); break;
+  case "audit":   cmdAudit(); break;
+  case "collect": cmdCollect(); break;
+  case "wake":    cmdWake(); break;
+  case "stats":
+  case "status":
+  case "coverage":
+    cmdStats(); break;
+  case "mcp":
+    if (process.argv[3] === "check") { cmdMcpCheck(); break; }
+    err("Usage: nexus mcp check");
+    process.exit(1);
+  case "data":    cmdData(); break;
   case "help":
   case "--help":
   case "-h":

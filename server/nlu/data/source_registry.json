@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "nexus_reviewed",
+      "name": "Reviewed NEXUS examples",
+      "license": "project-owned",
+      "allowed_use": "training and evaluation",
+      "requires_consent": false,
+      "status": "active"
+    },
+    {
+      "id": "nexus_opt_in",
+      "name": "Opt-in NEXUS transcripts and outcomes",
+      "license": "explicit-user-consent",
+      "allowed_use": "training after local sanitization and review",
+      "requires_consent": true,
+      "status": "planned"
+    },
+    {
+      "id": "nexus_prompted_voice",
+      "name": "Prompted NEXUS voice-to-ASR transcripts",
+      "license": "explicit-contributor-consent",
+      "allowed_use": "training after transcript approval",
+      "requires_consent": true,
+      "status": "planned"
+    },
+    {
+      "id": "clinc150",
+      "name": "CLINC150",
+      "license": "CC-BY-4.0",
+      "allowed_use": "reviewed OOS and mapped text subsets with attribution",
+      "source_url": "https://archive.ics.uci.edu/dataset/570/clinc150",
+      "doi": "10.24432/C5MP58",
+      "requires_consent": false,
+      "status": "staged_pending_review"
+    },
+    {
+      "id": "massive_en",
+      "name": "MASSIVE English",
+      "license": "CC-BY-4.0",
+      "allowed_use": "reviewed English text subsets with attribution",
+      "requires_consent": false,
+      "status": "planned"
+    },
+    {
+      "id": "slurp_text",
+      "name": "SLURP textual annotations",
+      "license": "CC-BY-4.0-text-only",
+      "allowed_use": "reviewed text only; audio excluded without separate approval",
+      "requires_consent": false,
+      "status": "planned"
+    },
+    {
+      "id": "nl2bash",
+      "name": "NL2Bash data/bash subset",
+      "license": "MIT-data-subset",
+      "allowed_use": "reviewed developer-domain hard negatives with source verification",
+      "requires_consent": false,
+      "status": "planned"
+    },
+    {
+      "id": "nexus_synthetic",
+      "name": "Reviewed NEXUS synthetic examples",
+      "license": "project-owned-or-recorded-provider-terms",
+      "allowed_use": "training after deterministic and human validation",
+      "requires_consent": false,
+      "status": "active"
+    }
+  ]
+}

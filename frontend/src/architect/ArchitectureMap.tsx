@@ -18,7 +18,7 @@ import dagre from "dagre";
 import { useArchitect, type ArchitectLayer, type FileNodeInfo } from "./architectStore";
 
 // ─── 1. Custom Layer Node Component (Phase 1) ────────────────────
-const LayerNodeComponent = ({ data, selected }: NodeProps) => {
+const LayerNodeComponent = React.memo(({ data, selected }: NodeProps) => {
   const layer = data.layer as ArchitectLayer;
   const isSelected = selected;
 
@@ -91,10 +91,10 @@ const LayerNodeComponent = ({ data, selected }: NodeProps) => {
       <Handle type="source" position={Position.Bottom} className="architect-handle" />
     </div>
   );
-};
+});
 
 // ─── 2. Custom File Node Component (Phase 2) ─────────────────────
-const FileNodeComponent = ({ data, selected }: NodeProps) => {
+const FileNodeComponent = React.memo(({ data, selected }: NodeProps) => {
   const file = data.file as FileNodeInfo;
   const isSelected = selected;
 
@@ -168,7 +168,7 @@ const FileNodeComponent = ({ data, selected }: NodeProps) => {
       <Handle type="source" position={Position.Bottom} className="architect-handle" />
     </div>
   );
-};
+});
 
 const nodeTypes = {
   layerNode: LayerNodeComponent,
@@ -236,7 +236,10 @@ export function ArchitectureMap() {
     return set;
   }, [highlightedPaths]);
 
-  // Construct ReactFlow nodes and edges based on phase and viewMode
+  // Construct ReactFlow nodes and edges based on phase and viewMode.
+  // NOTE: `selectedNodeId` is intentionally excluded from this effect's
+  // deps so clicking a node doesn't re-run the expensive dagre layout.
+  // Selection is applied via the separate effect below.
   useEffect(() => {
     // 1. Phase 2 Detailed File Dependency Graph View
     if (phase2Data && (viewMode === "files" || viewMode === "hotspots" || viewMode === "cycles")) {
@@ -247,7 +250,7 @@ export function ArchitectureMap() {
       } else if (viewMode === "cycles") {
         filteredEntries = filteredEntries.filter(([_, f]) => f.is_circular);
       } else {
-        // In full file mode, prioritize top 60 files to maintain super smooth performance
+        // In full file mode, prioritize top 75 files to maintain smooth performance
         filteredEntries = filteredEntries
           .sort((a, b) => b[1].in_degree - a[1].in_degree)
           .slice(0, 75);
@@ -260,7 +263,6 @@ export function ArchitectureMap() {
         type: "fileNode",
         data: { file },
         position: { x: 0, y: 0 },
-        selected: selectedNodeId === path,
       }));
 
       const rawEdges: Edge[] = [];
@@ -302,7 +304,6 @@ export function ArchitectureMap() {
         type: "layerNode",
         data: { layer },
         position: { x: 0, y: 0 },
-        selected: selectedNodeId === layer.id,
       }));
 
       const rawEdges: Edge[] = phase1Data.edges.map((edge) => ({
@@ -325,7 +326,14 @@ export function ArchitectureMap() {
       setNodes(layouted.nodes);
       setEdges(layouted.edges);
     }
-  }, [phase1Data, phase2Data, viewMode, selectedNodeId, highlightedEdgeSet, setNodes, setEdges]);
+  }, [phase1Data, phase2Data, viewMode, highlightedEdgeSet, setNodes, setEdges]);
+
+  // Apply selection state without re-running dagre layout.
+  useEffect(() => {
+    setNodes((nds) =>
+      nds.map((n) => ({ ...n, selected: n.id === selectedNodeId }))
+    );
+  }, [selectedNodeId, setNodes]);
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {

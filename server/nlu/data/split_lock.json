@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "family_algorithm": "intent-plus-slot-masked-normalized-text-v1",
+  "splits": {
+    "train": {
+      "rows": 3001,
+      "sha256": "cc7d2f769eeda5aed7f2da8f4ebafee13cd572092fc347abe685f130498eebfc",
+      "families": 1971,
+      "intents": 55
+    },
+    "validation": {
+      "rows": 483,
+      "sha256": "657460f1d3434fb00d80fb49fd1a1ff3747763025c6e4b9bc4a5b0fed483de89",
+      "families": 269,
+      "intents": 55
+    },
+    "calibration": {
+      "rows": 468,
+      "sha256": "e0f8d90e46b85afec425d640aed2c872103b28080c54af15efffa73ca77d4316",
+      "families": 268,
+      "intents": 55
+    },
+    "test": {
+      "rows": 481,
+      "sha256": "958fd5e0ba224278e55cd7556dc02661e860c181774de271b3004aab94c8ca02",
+      "families": 354,
+      "intents": 55
+    }
+  },
+  "quarantine": {
+    "rows": 1289,
+    "sha256": "8820474a5bd8bfed5d58faecd87c6dae330ea28b59530d8953e7651ff3d9c6e9",
+    "reason": "Phrase family overlaps frozen final test; excluded from optimization and model selection"
+  }
+}

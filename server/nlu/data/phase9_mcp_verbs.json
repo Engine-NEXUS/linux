@@ -1,0 +1,1104 @@
+{
+  "schema_version": 1,
+  "source": "nexus_synthetic_phase9",
+  "review_status": "approved_for_candidate_training",
+  "policy": "MCP verb alternates + STT confusables for order_food, search_product, send_whatsapp_message. No new labels.",
+  "total_examples": 146,
+  "unique_families": 28,
+  "intent_counts": {
+    "order_food": 59,
+    "send_whatsapp_message": 59,
+    "search_product": 23,
+    "unknown": 5
+  },
+  "examples": [
+    {
+      "text": "i want vada pav",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "vada pav"
+      }
+    },
+    {
+      "text": "get me vada pav",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "vada pav"
+      }
+    },
+    {
+      "text": "i am craving vada pav",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "vada pav"
+      }
+    },
+    {
+      "text": "bring me vada pav",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "vada pav"
+      }
+    },
+    {
+      "text": "i want chole bhature",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "chole bhature"
+      }
+    },
+    {
+      "text": "get me chole bhature",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "chole bhature"
+      }
+    },
+    {
+      "text": "i am craving chole bhature",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "chole bhature"
+      }
+    },
+    {
+      "text": "bring me chole bhature",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "chole bhature"
+      }
+    },
+    {
+      "text": "i want thali",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "thali"
+      }
+    },
+    {
+      "text": "get me thali",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "thali"
+      }
+    },
+    {
+      "text": "i am craving thali",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "thali"
+      }
+    },
+    {
+      "text": "bring me thali",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "thali"
+      }
+    },
+    {
+      "text": "i want idli",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "idli"
+      }
+    },
+    {
+      "text": "get me idli",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "idli"
+      }
+    },
+    {
+      "text": "i am craving idli",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "idli"
+      }
+    },
+    {
+      "text": "bring me idli",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "idli"
+      }
+    },
+    {
+      "text": "i want samosa",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "samosa"
+      }
+    },
+    {
+      "text": "get me samosa",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "samosa"
+      }
+    },
+    {
+      "text": "i am craving samosa",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "samosa"
+      }
+    },
+    {
+      "text": "bring me samosa",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "samosa"
+      }
+    },
+    {
+      "text": "i want fried rice",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "fried rice"
+      }
+    },
+    {
+      "text": "get me fried rice",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "fried rice"
+      }
+    },
+    {
+      "text": "i am craving fried rice",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "fried rice"
+      }
+    },
+    {
+      "text": "bring me fried rice",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "fried rice"
+      }
+    },
+    {
+      "text": "i want hakka noodles",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "hakka noodles"
+      }
+    },
+    {
+      "text": "get me hakka noodles",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "hakka noodles"
+      }
+    },
+    {
+      "text": "i am craving hakka noodles",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "hakka noodles"
+      }
+    },
+    {
+      "text": "bring me hakka noodles",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "hakka noodles"
+      }
+    },
+    {
+      "text": "i want tacos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "tacos"
+      }
+    },
+    {
+      "text": "get me tacos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "tacos"
+      }
+    },
+    {
+      "text": "i am craving tacos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "tacos"
+      }
+    },
+    {
+      "text": "bring me tacos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "tacos"
+      }
+    },
+    {
+      "text": "i want shawarma",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "shawarma"
+      }
+    },
+    {
+      "text": "get me shawarma",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "shawarma"
+      }
+    },
+    {
+      "text": "i am craving shawarma",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "shawarma"
+      }
+    },
+    {
+      "text": "bring me shawarma",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "shawarma"
+      }
+    },
+    {
+      "text": "i want cake",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "cake"
+      }
+    },
+    {
+      "text": "get me cake",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "cake"
+      }
+    },
+    {
+      "text": "i am craving cake",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "cake"
+      }
+    },
+    {
+      "text": "bring me cake",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "cake"
+      }
+    },
+    {
+      "text": "fetch vada pav from behrouz",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "vada pav",
+        "restaurant": "behrouz"
+      }
+    },
+    {
+      "text": "fetch vada pav from faasos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "vada pav",
+        "restaurant": "faasos"
+      }
+    },
+    {
+      "text": "fetch vada pav from oven story",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "vada pav",
+        "restaurant": "oven story"
+      }
+    },
+    {
+      "text": "fetch chole bhature from behrouz",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "chole bhature",
+        "restaurant": "behrouz"
+      }
+    },
+    {
+      "text": "fetch chole bhature from faasos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "chole bhature",
+        "restaurant": "faasos"
+      }
+    },
+    {
+      "text": "fetch chole bhature from oven story",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "chole bhature",
+        "restaurant": "oven story"
+      }
+    },
+    {
+      "text": "fetch thali from behrouz",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "thali",
+        "restaurant": "behrouz"
+      }
+    },
+    {
+      "text": "fetch thali from faasos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "thali",
+        "restaurant": "faasos"
+      }
+    },
+    {
+      "text": "fetch thali from oven story",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "thali",
+        "restaurant": "oven story"
+      }
+    },
+    {
+      "text": "fetch idli from behrouz",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "idli",
+        "restaurant": "behrouz"
+      }
+    },
+    {
+      "text": "fetch idli from faasos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "idli",
+        "restaurant": "faasos"
+      }
+    },
+    {
+      "text": "fetch idli from oven story",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "idli",
+        "restaurant": "oven story"
+      }
+    },
+    {
+      "text": "fetch samosa from behrouz",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "samosa",
+        "restaurant": "behrouz"
+      }
+    },
+    {
+      "text": "fetch samosa from faasos",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "samosa",
+        "restaurant": "faasos"
+      }
+    },
+    {
+      "text": "fetch samosa from oven story",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "samosa",
+        "restaurant": "oven story"
+      }
+    },
+    {
+      "text": "order food from swigy",
+      "intent": "order_food",
+      "slots": {
+        "restaurant": "swiggy"
+      }
+    },
+    {
+      "text": "order food from swigi",
+      "intent": "order_food",
+      "slots": {
+        "restaurant": "swiggy"
+      }
+    },
+    {
+      "text": "order pizza from dominose",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pizza",
+        "restaurant": "dominose"
+      }
+    },
+    {
+      "text": "order pizza from pizzahut",
+      "intent": "order_food",
+      "slots": {
+        "food_item": "pizza",
+        "restaurant": "pizzahut"
+      }
+    },
+    {
+      "text": "check the price of power bank on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "power bank"
+      }
+    },
+    {
+      "text": "buy power bank on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "power bank"
+      }
+    },
+    {
+      "text": "look up power bank on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "power bank"
+      }
+    },
+    {
+      "text": "check the price of earphones on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "earphones"
+      }
+    },
+    {
+      "text": "buy earphones on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "earphones"
+      }
+    },
+    {
+      "text": "look up earphones on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "earphones"
+      }
+    },
+    {
+      "text": "check the price of backpack on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "backpack"
+      }
+    },
+    {
+      "text": "buy backpack on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "backpack"
+      }
+    },
+    {
+      "text": "look up backpack on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "backpack"
+      }
+    },
+    {
+      "text": "check the price of water bottle on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "water bottle"
+      }
+    },
+    {
+      "text": "buy water bottle on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "water bottle"
+      }
+    },
+    {
+      "text": "look up water bottle on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "water bottle"
+      }
+    },
+    {
+      "text": "check the price of desk lamp on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "desk lamp"
+      }
+    },
+    {
+      "text": "buy desk lamp on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "desk lamp"
+      }
+    },
+    {
+      "text": "look up desk lamp on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "desk lamp"
+      }
+    },
+    {
+      "text": "check the price of notebook on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "notebook"
+      }
+    },
+    {
+      "text": "buy notebook on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "notebook"
+      }
+    },
+    {
+      "text": "look up notebook on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "notebook"
+      }
+    },
+    {
+      "text": "hunt down power bank on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "power bank"
+      }
+    },
+    {
+      "text": "hunt down earphones on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "earphones"
+      }
+    },
+    {
+      "text": "hunt down backpack on amazon",
+      "intent": "search_product",
+      "slots": {
+        "query": "backpack"
+      }
+    },
+    {
+      "text": "search for laptop on amazone",
+      "intent": "search_product",
+      "slots": {
+        "query": "laptop"
+      }
+    },
+    {
+      "text": "search for laptop on amazan",
+      "intent": "search_product",
+      "slots": {
+        "query": "laptop"
+      }
+    },
+    {
+      "text": "tell amma reached home on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "text amma saying reached home",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "tell amma starting now on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "text amma saying starting now",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "tell amma happy diwali on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "text amma saying happy diwali",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "tell nanna reached home on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "text nanna saying reached home",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "tell nanna starting now on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "text nanna saying starting now",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "tell nanna happy diwali on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "text nanna saying happy diwali",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "tell akka reached home on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "text akka saying reached home",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "tell akka starting now on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "text akka saying starting now",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "tell akka happy diwali on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "text akka saying happy diwali",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "tell anna reached home on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "anna",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "text anna saying reached home",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "anna",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "tell anna starting now on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "anna",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "text anna saying starting now",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "anna",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "tell anna happy diwali on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "anna",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "text anna saying happy diwali",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "anna",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "tell thanmayee reached home on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "thanmayee",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "text thanmayee saying reached home",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "thanmayee",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "tell thanmayee starting now on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "thanmayee",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "text thanmayee saying starting now",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "thanmayee",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "tell thanmayee happy diwali on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "thanmayee",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "text thanmayee saying happy diwali",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "thanmayee",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "tell lakshya reached home on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "text lakshya saying reached home",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "reached home"
+      }
+    },
+    {
+      "text": "tell lakshya starting now on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "text lakshya saying starting now",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "starting now"
+      }
+    },
+    {
+      "text": "tell lakshya happy diwali on whatsapp",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "text lakshya saying happy diwali",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "lakshya",
+        "message": "happy diwali"
+      }
+    },
+    {
+      "text": "ping amma saying all the best",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "all the best"
+      }
+    },
+    {
+      "text": "forward this to amma saying all the best",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "all the best"
+      }
+    },
+    {
+      "text": "ping amma saying take care",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "take care"
+      }
+    },
+    {
+      "text": "forward this to amma saying take care",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "take care"
+      }
+    },
+    {
+      "text": "ping amma saying call when free",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "call when free"
+      }
+    },
+    {
+      "text": "forward this to amma saying call when free",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "amma",
+        "message": "call when free"
+      }
+    },
+    {
+      "text": "ping nanna saying all the best",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "all the best"
+      }
+    },
+    {
+      "text": "forward this to nanna saying all the best",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "all the best"
+      }
+    },
+    {
+      "text": "ping nanna saying take care",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "take care"
+      }
+    },
+    {
+      "text": "forward this to nanna saying take care",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "take care"
+      }
+    },
+    {
+      "text": "ping nanna saying call when free",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "call when free"
+      }
+    },
+    {
+      "text": "forward this to nanna saying call when free",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "nanna",
+        "message": "call when free"
+      }
+    },
+    {
+      "text": "ping akka saying all the best",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "all the best"
+      }
+    },
+    {
+      "text": "forward this to akka saying all the best",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "all the best"
+      }
+    },
+    {
+      "text": "ping akka saying take care",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "take care"
+      }
+    },
+    {
+      "text": "forward this to akka saying take care",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "take care"
+      }
+    },
+    {
+      "text": "ping akka saying call when free",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "call when free"
+      }
+    },
+    {
+      "text": "forward this to akka saying call when free",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "akka",
+        "message": "call when free"
+      }
+    },
+    {
+      "text": "send mom a whatsup message saying hello",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "hello"
+      }
+    },
+    {
+      "text": "send mom a watsapp message saying hello",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "hello"
+      }
+    },
+    {
+      "text": "send mom a vatsap message saying hello",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "hello"
+      }
+    },
+    {
+      "text": "whatsapp mommy saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "whatsapp momy saying on my way",
+      "intent": "send_whatsapp_message",
+      "slots": {
+        "contact": "mom",
+        "message": "on my way"
+      }
+    },
+    {
+      "text": "order a book on amazon",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "send the file to rahul",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what is on the tv menu tonight",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "forward the mail to accounts",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "check the price of bitcoin",
+      "intent": "unknown",
+      "slots": {}
+    }
+  ]
+}

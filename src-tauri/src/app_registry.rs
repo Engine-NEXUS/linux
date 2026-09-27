@@ -105,7 +105,7 @@ struct ResolutionDiskCache {
     entries: HashMap<String, ResolutionEntry>,
 }
 
-const RESOLUTION_CACHE_VERSION: u32 = 1;
+const RESOLUTION_CACHE_VERSION: u32 = 2;
 
 // ─── Global singleton ──────────────────────────────────────────────────────
 
@@ -190,6 +190,12 @@ pub fn init() {
         let mut cache = registry.cache.write();
         for entry in disk.entries {
             for name in &entry.search_names {
+                // Skip stop-words from stale disk caches — generic words like
+                // "the" (from long PWA titles) used to claim an entire hash
+                // key via last-write-wins, hijacking unrelated queries.
+                if is_stopword(name) {
+                    continue;
+                }
                 cache.insert(name.clone(), entry.clone());
             }
         }
@@ -290,9 +296,15 @@ pub fn lookup(query: &str) -> Option<AppEntry> {
         }
     }
 
-    // 4. Contains match — "chrome" in "google chrome"
+    // 4. Contains match — "chrome" in "google chrome".
+    // Guard: keys shorter than 4 chars never participate — a 3-letter key
+    // like "the"/"top" would otherwise match almost any query via
+    // q.contains(name) and hijack it (last-write-wins key ownership).
     if best.is_none() {
         for (name, entry) in cache.iter() {
+            if name.len() < 4 {
+                continue;
+            }
             if name.contains(&q) || q.contains(name.as_str()) {
                 let score = score_match(&q, name, entry);
                 if best.is_none() || score > best.unwrap().1 {
@@ -884,6 +896,11 @@ fn refresh_from_os(registry: &AppRegistry) {
             }
         }
         for name in entry.search_names.clone() {
+            // Never index stop-words (see build_search_names) — a stale
+            // disk cache or fresh scan must not reintroduce them.
+            if is_stopword(&name) {
+                continue;
+            }
             cache.insert(name, entry.clone());
         }
     }
@@ -1813,15 +1830,31 @@ fn add_url_fallbacks(entries: &mut Vec<AppEntry>) {
 
 /// Build normalized search names from a display name.
 /// "Google Chrome" → ["google chrome", "chrome", "googlechrome"]
+/// Generic words that must never become registry lookup keys.
+/// A long-titled app (e.g. a PWA like "Dribbble - Discover the World's Top
+/// Designers…") contributes each word as a key; without this filter the word
+/// "the" becomes a key owned by whichever app was scanned last, and then
+/// every query containing "the" ("open the chrome") resolves to that app.
+fn is_stopword(word: &str) -> bool {
+    matches!(
+        word,
+        "the" | "and" | "for" | "with" | "from" | "top" | "app" | "new" | "all"
+            | "web" | "free" | "pro" | "my" | "your" | "our" | "discover"
+    )
+}
+
 fn build_search_names(display_name: &str) -> Vec<String> {
     let lower = display_name.to_lowercase();
     let mut names = vec![lower.clone()];
 
-    // Add individual words (for "Google Chrome" → "chrome")
+    // Add individual words (for "Google Chrome" → "chrome"), skipping
+    // stop-words — generic words ("the", "top", "app") as lookup keys let
+    // one long-titled app (e.g. a PWA) hijack unrelated queries through
+    // last-write-wins key ownership + substring matching.
     let words: Vec<&str> = lower.split_whitespace().collect();
     if words.len() > 1 {
         for word in &words {
-            if word.len() >= 3 {
+            if word.len() >= 3 && !is_stopword(word) {
                 names.push(word.to_string());
             }
         }
@@ -1842,4 +1875,41 @@ fn build_search_names(display_name: &str) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopwords_never_become_search_names() {
+        // Regression: the word "the" from a long PWA title
+        // ("Dribbble - Discover the World's Top Designers…") used to become
+        // a registry key owned by last-write-wins, hijacking every query
+        // containing "the" ("open the chrome" → Dribbble).
+        let names = build_search_names(
+            "Dribbble - Discover the World's Top Designers & Creative Professionals",
+        );
+        for stop in ["the", "top", "discover"] {
+            assert!(
+                !names.contains(&stop.to_string()),
+                "stop-word '{stop}' must not be a search name"
+            );
+        }
+        // Real words still indexed.
+        for keep in ["dribbble", "designers", "creative"] {
+            assert!(
+                names.contains(&keep.to_string()),
+                "'{keep}' must stay a search name"
+            );
+        }
+    }
+
+    #[test]
+    fn stopword_predicate() {
+        assert!(is_stopword("the"));
+        assert!(is_stopword("app"));
+        assert!(!is_stopword("chrome"));
+        assert!(!is_stopword("creative"));
+    }
 }

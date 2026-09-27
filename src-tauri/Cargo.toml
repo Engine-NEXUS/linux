@@ -53,8 +53,13 @@ circular-buffer = "1.2"
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 
-# TTS engine (in-process Kokoro)
-# TTS engine (Piper — lightweight neural TTS, ~80 MB RAM, 85ms load)
+# TTS engines:
+# - edge-tts-rust: Microsoft Edge Neural TTS (cloud, free, no API key, 400+ voices)
+#   Primary TTS — 0 MB local RAM, ~200ms latency, broadcast-quality voices.
+# - piper-rs: Piper VITS ONNX (local fallback, 80 MB RAM, 60 MB model, 40ms latency)
+#   Fallback when internet is unavailable.
+# - rodio: audio playback (shared by both engines)
+edge-tts-rust = "0.1"
 piper-rs = "0.2"
 rodio = "0.19"
 
@@ -80,6 +85,38 @@ sysinfo = "0.32"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 
+# AST-aware symbol extraction for the Architecture Mapper (tree-sitter)
+tree-sitter = "0.25"
+tree-sitter-rust = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+# SHA-256 for content hashing in symbol extraction
+sha2 = "0.10"
+
+# GitHub API client for the GitHub sub-command system (Phase 2A).
+# octocrab provides a typed semantic API + low-level HTTP fallback.
+# Used by github_cmd.rs to execute structured GitHubCommand operations.
+octocrab = "0.42"
+async-trait = "0.1"
+
+# Live mode: cross-platform keyboard/mouse simulation + clipboard for paste-text.
+# enigo: used by live/commands/keyboard.rs to type text and press keys.
+# arboard: used by live/commands/keyboard.rs for clipboard-paste (avoids
+# autocomplete corruption when typing into WhatsApp/search boxes).
+enigo = "0.5"
+arboard = "3.4"
+
+# Auth vault: OS credential store (Windows Credential Manager / macOS
+# Keychain / Linux Secret Service) for MCP OAuth tokens. Used by
+# auth_vault.rs — one login per service group, auto-refresh on 401.
+keyring = "3"
+
+# Telegram remote (owner-only bridge, long-polling, no public IP needed).
+teloxide = { version = "0.17", default-features = false, features = ["macros", "native-tls"] }
+webrtc-vad = "0.4.0"
+
 
 # Windows-specific: EnumWindows + SetForegroundWindow + ShellExecuteW
 [target.'cfg(windows)'.dependencies]
@@ -94,10 +131,13 @@ windows = { version = "0.36", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
     "Win32_Graphics_Gdi",
 ] }
 # Registry access for App Paths + Uninstall keys (app discovery)
 winreg = "0.55"
+# UI Automation for active browser URL detection (Architecture Mapper)
+uiautomation = "0.25"
 # WebView2 COM bindings for the PermissionRequested handler (auto-approve mic
 # permission so the prompt never re-appears). Version pinned to match wry's.
 webview2-com = "0.38"
@@ -131,7 +171,14 @@ default = ["wakeword-oww"]
 # dev server and hot reload keep working.
 custom-protocol = ["tauri/custom-protocol"]
 wakeword-oww = []                # openWakeWord via tract-onnx (new, default)
+wakeword-sherpa = []             # Sherpa-ONNX wake word + speaker verification (optional, not in default build)
 mock-wake = []                   # CI: skip native lib, emit fake wake on hotkey only
+# Admin-only brain system (Qwen 0.5B + pronunciation learning + auto-train).
+# When enabled, brain_client + brain_monitor modules are compiled in.
+# When disabled (default), all brain code is compiled out — normal users
+# can never run the brain even if they find the files.
+# Build with: cargo build --features admin-brain
+admin-brain = []
 
 [profile.dev]
 opt-level = 0

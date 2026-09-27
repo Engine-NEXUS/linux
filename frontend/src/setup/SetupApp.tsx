@@ -24,6 +24,7 @@ export function SetupApp() {
   const [hotkey] = useState("Super+Space");
   const [wakeWordEnabled, setWakeWordEnabled] = useState(true);
   const [autostart, setAutostart] = useState(true);
+  const [ttsVolume, setTtsVolume] = useState(75);
 
   // Mic permission
   const [micStatus, setMicStatus] = useState<"checking" | "granted" | "denied" | "no_device">("checking");
@@ -35,6 +36,10 @@ export function SetupApp() {
   // Accounts
   const [oauthStatus, setOauthStatus] = useState<Record<string, OAuthStatus>>({});
   const [connecting, setConnecting] = useState<string | null>(null);
+  // connectingPhase: "opening" → browser is opening
+  //                  "waiting" → browser is open, waiting for user to authorize
+  //                  "done"    → connected successfully
+  const [connectingPhase, setConnectingPhase] = useState<"opening" | "waiting" | "done">("opening");
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -53,6 +58,7 @@ export function SetupApp() {
           if (s.ttsVoice) setSelectedVoice(s.ttsVoice);
           if (typeof s.wakeWordEnabled === "boolean") setWakeWordEnabled(s.wakeWordEnabled);
           if (typeof s.autostart === "boolean") setAutostart(s.autostart);
+          if (typeof s.ttsVolume === "number") setTtsVolume(s.ttsVolume);
         }
       })
       .catch(() => {});
@@ -94,7 +100,7 @@ export function SetupApp() {
     if (step === 3) checkServer();
   }, [step, checkServer]);
 
-  const handleConnect = async (provider: "google" | "github") => {
+  const handleConnect = async (provider: "google" | "github" | "swiggy") => {
     // Fallback: if serverUrl hasn't loaded yet, try loading it now
     let url = serverUrl;
     if (!url) {
@@ -103,7 +109,9 @@ export function SetupApp() {
         url = cfg.serverUrl;
         setServerUrl(cfg.serverUrl);
         setUserId(cfg.userId);
-      } catch {
+        console.log(`[Setup] loaded server config: url=${cfg.serverUrl}, userId=${cfg.userId}`);
+      } catch (e) {
+        console.error("[Setup] failed to load server config:", e);
         setError("Server not configured");
         return;
       }
@@ -112,14 +120,28 @@ export function SetupApp() {
       setError("Server not configured");
       return;
     }
+    if (!userId) {
+      console.warn("[Setup] userId is empty — OAuth state will have empty user_id");
+    }
     setConnecting(provider);
+    setConnectingPhase("opening");
     setError(null);
     try {
       setSidecarBaseUrl(url);
-      await connectOAuth(provider, userId);
+      console.log(`[Setup] connecting ${provider} via ${url}, userId=${userId}`);
+      // connectOAuth opens the browser and waits for the redirect/polling.
+      // The callback fires when the browser is opened, so we can update
+      // the UI from "Opening GitHub..." to "Waiting for authorization..."
+      await connectOAuth(provider, userId, () => {
+        setConnectingPhase("waiting");
+      });
+      setConnectingPhase("done");
       await checkServer();
+      console.log(`[Setup] ${provider} connected successfully`);
     } catch (err) {
-      setError(`${provider} connection failed: ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[Setup] ${provider} connection failed:`, msg, err);
+      setError(`${provider} connection failed: ${msg}`);
     } finally {
       setConnecting(null);
     }
@@ -256,6 +278,7 @@ export function SetupApp() {
         hotkey,
         wakeWordEnabled,
         autostart,
+        ttsVolume,
       };
       await invoke("save_settings", { settings: updated });
     } catch (e) {
@@ -493,7 +516,7 @@ export function SetupApp() {
                   color: "var(--nx-text-secondary)",
                 }}>
                   <strong style={{ color: "var(--nx-text-primary)" }}>Privacy:</strong> All speech recognition
-                  runs locally via faster-whisper. Audio is never sent to the cloud. Only the transcribed
+                  runs locally via Moonshine ONNX. Audio is never sent to the cloud. Only the transcribed
                   text is sent to the NEXUS Worker for intent processing.
                 </div>
               </section>
@@ -546,6 +569,27 @@ export function SetupApp() {
                       style={{ width: "18px", height: "18px", accentColor: "var(--nx-accent-blue)" }}
                     />
                   </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px", border: "1px solid var(--nx-border)", borderRadius: "8px" }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 600, fontSize: "var(--nx-text-sm)" }}>NEXUS Volume</div>
+                      <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)" }}>
+                        NEXUS sets system volume to {ttsVolume}% while speaking, then restores it
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={ttsVolume}
+                        onChange={(e) => setTtsVolume(parseInt(e.target.value))}
+                        style={{ width: "120px", accentColor: "var(--nx-accent-blue)" }}
+                      />
+                      <span style={{ fontSize: "var(--nx-text-sm)", fontWeight: 600, minWidth: "36px", textAlign: "right" }}>{ttsVolume}%</span>
+                    </div>
+                  </div>
                 </div>
 
                 <div style={{ marginTop: "var(--nx-space-5)" }}>
@@ -556,92 +600,153 @@ export function SetupApp() {
             </>
           )}
 
-          {/* ── Step 3: Accounts ── */}
+                    {/* 🔹 Step 3: Accounts 🔹 */}
           {step === 3 && (
-            <>
-              <StepHeader step={step} />
-              <section className="setup-section">
-                <h2>Connect Integrations</h2>
-                <p style={{ marginBottom: "var(--nx-space-4)", color: "var(--nx-text-secondary)", fontSize: "var(--nx-text-sm)" }}>
-                  Connect Google and GitHub to let NEXUS manage your emails, calendar, and GitHub repos. (You can also skip and connect later).
-                </p>
-
-                {/* Google card */}
-                <div className="setup-provider setup-provider--large">
-                  <div className="setup-provider-icon setup-provider-icon--google">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <div style={{ position: 'fixed', inset: 0, background: '#E2E2E2', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+              <div className="installer-card">
+                
+                <div className="installer-header-icons">
+                  <div className="installer-icon-circle">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
                       <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
                       <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
                       <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
                       <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84C6.71 7.31 9.14 5.38 12 5.38z" fill="#EA4335"/>
                     </svg>
+                    {oauthStatus.google?.connected && (
+                      <div className="installer-icon-checkmark">
+                        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                      </div>
+                    )}
                   </div>
-                  <div className="setup-provider-info">
-                    <h3>Google</h3>
-                    <p>Gmail · Calendar · Meet</p>
-                  </div>
-                  {oauthStatus.google?.connected ? (
-                    <span className="setup-badge setup-badge--ok">Connected</span>
-                  ) : (
-                    <button className="setup-btn setup-btn--primary setup-btn--small" disabled={connecting !== null} onClick={() => handleConnect("google")}>
-                      {connecting === "google" ? "Connecting..." : "Connect"}
-                    </button>
-                  )}
-                </div>
-
-                {/* GitHub card */}
-                <div className="setup-provider setup-provider--large">
-                  <div className="setup-provider-icon setup-provider-icon--github">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                  <div className="installer-icon-circle">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                       <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
                     </svg>
+                    {oauthStatus.github?.connected && (
+                      <div className="installer-icon-checkmark">
+                        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                      </div>
+                    )}
                   </div>
-                  <div className="setup-provider-info">
-                    <h3>GitHub</h3>
-                    <p>Repos · Pull Requests</p>
-                  </div>
-                  {oauthStatus.github?.connected ? (
-                    <span className="setup-badge setup-badge--ok">Connected</span>
-                  ) : (
-                    <button className="setup-btn setup-btn--primary setup-btn--small" disabled={connecting !== null} onClick={() => handleConnect("github")}>
-                      {connecting === "github" ? "Connecting..." : "Connect"}
-                    </button>
-                  )}
                 </div>
-              </section>
-            </>
+
+                <div className="installer-title">Connect Integrations</div>
+                <div className="installer-subtitle">Connect your app accounts before you proceed.</div>
+
+                <div className="installer-list">
+                  <div className="installer-list-item" onClick={() => !oauthStatus.google?.connected && connecting !== "google" && handleConnect("google")}>
+                    <div className="installer-icon-circle">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                        <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                        <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                        <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                        <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84C6.71 7.31 9.14 5.38 12 5.38z" fill="#EA4335"/>
+                      </svg>
+                      {oauthStatus.google?.connected && (
+                        <div className="installer-icon-checkmark">
+                          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                        </div>
+                      )}
+                    </div>
+                    <div className="installer-list-item-content">
+                      <div className="installer-list-item-title">
+                        Google {oauthStatus.google?.connected && <span className="installer-badge">Connected</span>}
+                      </div>
+                      <div className="installer-list-item-subtitle">
+                        {connecting === "google" && connectingPhase === "opening" && "Opening Google..."}
+                        {connecting === "google" && connectingPhase === "waiting" && "Waiting for authorization..."}
+                        {connecting === "google" && connectingPhase === "done" && "Connected!"}
+                        {connecting !== "google" && (oauthStatus.google?.connected ? "nexus-assistant@google.com" : "Gmail, Calendar & Meet")}
+                      </div>
+                    </div>
+                    {!oauthStatus.google?.connected && connecting !== "google" && (
+                      <div className="installer-list-item-chevron">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </div>
+                    )}
+                    {connecting === "google" && (
+                      <div className="installer-list-item-spinner" style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.2)", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "nx-spin 0.8s linear infinite" }} />
+                    )}
+                  </div>
+
+                  <div className="installer-list-item" onClick={() => !oauthStatus.github?.connected && connecting !== "github" && handleConnect("github")}>
+                    <div className="installer-icon-circle">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+                      </svg>
+                      {oauthStatus.github?.connected && (
+                        <div className="installer-icon-checkmark">
+                          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                        </div>
+                      )}
+                    </div>
+                    <div className="installer-list-item-content">
+                      <div className="installer-list-item-title">
+                        GitHub {oauthStatus.github?.connected && <span className="installer-badge">Connected</span>}
+                      </div>
+                      <div className="installer-list-item-subtitle">
+                        {connecting === "github" && connectingPhase === "opening" && "Opening GitHub..."}
+                        {connecting === "github" && connectingPhase === "waiting" && "Waiting for authorization..."}
+                        {connecting === "github" && connectingPhase === "done" && "Connected!"}
+                        {connecting !== "github" && (oauthStatus.github?.connected ? "GitHub User" : "Click to connect — opens GitHub in browser")}
+                      </div>
+                    </div>
+                    {!oauthStatus.github?.connected && connecting !== "github" && (
+                      <div className="installer-list-item-chevron">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </div>
+                    )}
+                    {connecting === "github" && (
+                      <div className="installer-list-item-spinner" style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.2)", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "nx-spin 0.8s linear infinite" }} />
+                    )}
+                  </div>
+                </div>
+
+                <button className="installer-btn-proceed" onClick={handleFinish}>
+                  Proceed
+                </button>
+
+                <div className="installer-footer">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+                  Powered by NEXUS
+                </div>
+              </div>
+            </div>
           )}
         </div>
 
-      {/* ── Footer navigation ── */}
-      <div className="setup-footer">
-        {step > 0 ? (
-          <button className="setup-btn" onClick={() => setStep((step - 1) as Step)}>
-            ← Back
-          </button>
-        ) : (
-          <div />
+        {/* 🔹 Footer navigation 🔹 */}
+        {step !== 3 && (
+          <div className="setup-footer">
+            {step > 0 ? (
+              <button className="setup-btn" onClick={() => setStep((step - 1) as Step)}>
+                ← Back
+              </button>
+            ) : (
+              <div />
+            )}
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--nx-space-3)" }}>
+              {saved && <span className="setup-saved">Ready!</span>}
+              {step < 3 ? (
+                <button
+                  className="setup-btn setup-btn--primary"
+                  disabled={step === 1 && !canAdvanceFromPermissions}
+                  onClick={async () => {
+                    await saveAllSettings();
+                    setStep((step + 1) as Step);
+                  }}
+                >
+                  Continue →
+                </button>
+              ) : (
+                <button className="setup-btn setup-btn--primary" style={{ padding: "10px 24px" }} onClick={handleFinish}>
+                  🚀 Launch Assistant
+                </button>
+              )}
+            </div>
+          </div>
         )}
-        <div style={{ display: "flex", alignItems: "center", gap: "var(--nx-space-3)" }}>
-          {saved && <span className="setup-saved">Ready!</span>}
-          {step < 3 ? (
-            <button
-              className="setup-btn setup-btn--primary"
-              disabled={step === 1 && !canAdvanceFromPermissions}
-              onClick={async () => {
-                await saveAllSettings();
-                setStep((step + 1) as Step);
-              }}
-            >
-              Continue →
-            </button>
-          ) : (
-            <button className="setup-btn setup-btn--primary" style={{ padding: "10px 24px" }} onClick={handleFinish}>
-              🚀 Launch Assistant
-            </button>
-          )}
-        </div>
-      </div>
     </div>
   );
 }

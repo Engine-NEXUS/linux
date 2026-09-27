@@ -1,8 +1,10 @@
 # NEXUS NLU — training-only dependencies (not needed to run the server).
-# Used by train.py to fine-tune a BERT-Mini model and export to ONNX.
+# Used by train_all.py to fine-tune a BERT-Mini model and export to ONNX.
 #
 # Install:  pip install -r requirements-train.txt
-# Run:      cd server/nlu && python train.py
+# Run:      nexus train   (or: cd server/nlu && python train_all.py)
 
 -r requirements.txt
 torch>=2.2,<3.0
+transformers>=4.40,<5.0
+onnx>=1.14

@@ -7,14 +7,19 @@
  */
 
 // ---- Per-user daily limits (configurable) ----
+// Tuned for 10 users × 150 requests/day on Workers Paid ($5/mo) plan.
+// PR analysis uses GLM-4.7-flash (Cloudflare neurons).
+// Architecture + research routed to free external providers (Gemini/Groq).
 export const LIMITS = {
-  requests_per_day: 500,
-  ai_neurons_per_day: 3000,
-  deep_calls_per_day: 10,
-  search_calls_per_day: 100,
+  requests_per_day: 150,        // 50 PR + 50 research + 50 architecture
+  ai_neurons_per_day: 8000,     // PR analysis only (arch/research go external)
+  deep_calls_per_day: 15,       // GLM-5.3-flash deep reviews
+  search_calls_per_day: 50,     // Wikipedia/Wikidata + Gemini synthesis
 };
 
-// Global neuron budget — when all users combined approach this, degrade
+// Global neuron budget — 10K free/day on Workers Paid, then $0.011/1K neurons.
+// PR analysis is the only neuron consumer now (architecture + research are free).
+// Warn at 8K (switch to cheaper model), hard reject deep at 9.5K.
 const GLOBAL_NEURON_WARN = 8000; // switch to cheap model
 const GLOBAL_NEURON_HARD = 9500; // reject deep analysis
 

@@ -10,7 +10,7 @@ function isTauri(): boolean {
 const STT_TIMEOUT_MS = 30000;
 
 /**
- * Transcribe raw 16-bit mono PCM audio to text with local faster-whisper.
+ * Transcribe raw 16-bit mono PCM audio to text with local faster-whisper sidecar.
  *
  * @param samples - Raw 16-bit LE mono PCM at 16 kHz
  * @returns Transcribed text, or empty string on failure
