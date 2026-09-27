@@ -9,7 +9,7 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
 
 MISSING=()
-for pkg in libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config; do
+for pkg in libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config portaudio19-dev; do
   dpkg -s "$pkg" &>/dev/null || MISSING+=("$pkg")
 done
 if [ ${#MISSING[@]} -gt 0 ]; then

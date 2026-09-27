@@ -40,7 +40,7 @@ fi
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
   if command -v apt-get &> /dev/null; then
     MISSING_PKGS=()
-    for pkg in libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev; do
+    for pkg in libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev portaudio19-dev; do
       if ! dpkg -s "$pkg" &> /dev/null; then
         MISSING_PKGS+=("$pkg")
       fi
