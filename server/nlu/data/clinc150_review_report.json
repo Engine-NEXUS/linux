@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "mapping_version": "clinc-nexus-capability-v1",
+  "policy": {
+    "supported": "Only narrow anchored rules representing typed NEXUS capabilities",
+    "unknown": "No capability-adjacent term, or an unsupported sensitive request",
+    "excluded": "Capability-adjacent but not safe to map automatically"
+  },
+  "input": {
+    "train": 14,
+    "test": 984
+  },
+  "counts": {
+    "test_approved_unknown": 852,
+    "test_excluded_ambiguous": 127,
+    "test_mapped_supported": 5,
+    "train_excluded_ambiguous": 14
+  },
+  "output": {
+    "approved_unknown_train": 0,
+    "approved_unknown_test": 852,
+    "mapped_supported_test": 5,
+    "excluded_or_ambiguous": 141
+  },
+  "hashes": {
+    "reviewed_train": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "reviewed_test": "df631459aaaaaba9dfbedb86b78e5f4915677abe5abba0e0aad8400fa337e042",
+    "mapped_test": "ee117a88a7585b2c754a64ff33fa867de7a49ac069ecc96139814338df634844",
+    "excluded": "6d6eaa939c6b85c98f28c9a4535ed640bd1fb77b41222a1ef333ed53a80caaf7"
+  }
+}

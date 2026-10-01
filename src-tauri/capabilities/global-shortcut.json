@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "global-shortcut-cap",
+  "description": "Global shortcut permissions (Windows + macOS only — plugin not available on Linux)",
+  "windows": ["main", "setup"],
+  "platforms": ["windows", "macOS"],
+  "permissions": [
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister"
+  ]
+}

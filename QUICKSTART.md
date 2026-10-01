@@ -44,6 +44,11 @@ No `.env` needed. Backend Worker URL is hardcoded (`src-tauri/src/commands.rs`
 
 | Issue | Fix |
 | :--- | :--- |
-| Mic silent | `pavucontrol` → Input Devices → pick real mic, not `.monitor` |
+| Mic silent (Linux) | `pavucontrol` → Input Devices → pick real mic, not `.monitor` |
 | Hotkey dead (COSMIC) | Re-run `./scripts/register-hotkey.sh`, else manual keybind |
 | No display in packaged app | Rebuild via `scripts/build-prod.sh`, never plain `cargo build` |
+| **Microphone is silent or blocked** | Press hotkey to trigger listening directly. On Linux check `pavucontrol`; on Windows check *Settings → Privacy → Microphone*. |
+| **Intel SST mic goes silent (RMS=0.000000)** | Intel SST driver stops delivering audio after 2-25 min (Linux + Windows). Linux: restart PipeWire / re-plug; Windows: **Device Manager → Intel SST → Disable → Enable** or `Restart-Service Audiosrv` (Admin). NEXUS auto-recovers via silence thread. |
+| **STT returns truncated transcripts ("open-")** | Caused by mic silence above. NEXUS auto-corrects "open-" → "open architecture mapper". |
+| **Want to change voice settings** | Tray icon → **Settings** → **Audio & Voice**. |
+| **Need diagnostics report** | Tray icon → **Diagnostics** (checks STT, TTS, Worker, OAuth). |

@@ -4,14 +4,25 @@ const ORB = 180;
 const MARGIN = 24;
 const SPEED_PX_S = 70;
 const RESUME_AFTER_MS = 3000;
+// Park anchor clearance above taskbar/dock when woken.
+const PARK_BOTTOM_GAP = 96;
 
-/** Random waypoint inside the viewport, keeping the full orb on-screen. */
+/** Park position: bottom-center, fully on-screen. */
+function parkPosition(): { x: number; y: number } {
+  return {
+    x: Math.max((window.innerWidth - ORB) / 2, MARGIN),
+    y: Math.max(window.innerHeight - ORB - PARK_BOTTOM_GAP, MARGIN),
+  };
+}
+
+/** Random waypoint in the bottom band, keeping the full orb on-screen. */
 function randomWaypoint(): { x: number; y: number } {
   const w = Math.max(window.innerWidth - ORB - MARGIN * 2, MARGIN);
-  const h = Math.max(window.innerHeight - ORB - MARGIN * 2, MARGIN);
+  const top = Math.max(window.innerHeight - ORB - 220, MARGIN);
+  const bottom = Math.max(window.innerHeight - ORB - MARGIN, top);
   return {
     x: MARGIN + Math.random() * w,
-    y: MARGIN + Math.random() * h,
+    y: top + Math.random() * Math.max(bottom - top, 1),
   };
 }
 
@@ -124,11 +135,15 @@ export function useRoam(roaming: boolean): Roam {
     heldRef.current = held;
   }, [held]);
 
-  // When wake parks the orb, release any drag hold.
+  // When wake parks the orb, release drag hold and snap to park anchor.
   useEffect(() => {
     if (!roaming) {
       heldRef.current = false;
       setHeld(false);
+      const park = parkPosition();
+      posRef.current = park;
+      targetRef.current = park;
+      setPos(park);
     }
   }, [roaming]);
 

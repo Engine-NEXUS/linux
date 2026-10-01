@@ -30,6 +30,7 @@ export type Intent =
   | { action: "close_app"; target: string }
   | { action: "whatsapp_chat"; contact: string }
   | { action: "open_architect" }
+  | { action: "open_settings" }
   | { action: "search"; query: string }
   | { action: "analyse_repo"; owner?: string; repo: string }
   | { action: "analyse_pr"; owner?: string; repo: string; pr_number: number }
@@ -39,7 +40,17 @@ export type Intent =
   | { action: "media_next" }
   | { action: "media_previous" }
   | { action: "media_stop" }
+  | { action: "github_command"; command: unknown }
+  | { action: "order_food"; query: string; restaurant?: string }
+  | { action: "search_product"; query: string }
+  | { action: "send_whatsapp_message"; contact: string; message: string }
+  | { action: "need_more_info"; prompt: string }
+  | { action: "enter_ghostwriter"; contact?: string }
+  | { action: "screen_click"; ordinal: number }
+  | { action: "screen_read"; ordinal: number }
+  | { action: "browser_tab"; index: number }
   | { action: "greeting"; reply: string }
+  | { action: "nlu_result"; intent: string; slots: unknown; confidence: number }
   | { action: "unknown"; raw: string };
 
 /**
@@ -539,6 +550,32 @@ export function parseIntent(transcript: string): Intent {
     return { action: "open_architect" };
   }
 
+  // --- Open Settings / Command Center ---
+  // "open settings" / "show settings" / "open command center" / "open preferences"
+  // "configure NEXUS" / "NEXUS settings" / "open config" / "show preferences"
+  if (/^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?settings?$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?command\s+center$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?preferences?$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^(?:open|launch|start|show|bring\s+up|pull\s+up|give\s+me|show\s+me)\s+(?:me\s+)?(?:the\s+)?(?:config|configuration)$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^configure\s+nexus$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  if (/^nexus\s+(?:settings?|config|configuration|preferences?|command\s+center)$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+  // Bare words (Intel SST mic truncation)
+  if (/^(?:settings|preferences|config|configuration)$/i.test(text)) {
+    return { action: "open_settings" };
+  }
+
   // --- Media Control (MPRIS D-Bus / System Keys) ---
   if (/^(?:pause|pause\s+music|pause\s+media|play|resume|resume\s+music|play\s*[\/\s]*pause|toggle\s+media)$/i.test(text)) {
     return { action: "media_play_pause" };
@@ -623,13 +660,22 @@ export function parseIntent(transcript: string): Intent {
     }
   }
 
-  // --- "open chat with <name>" / "message <name>" / "whatsapp <name>" ---
+  // --- "open chat with <name>" / "chat with <name>" (chat-open ONLY) ---
+  // Anything send-shaped ("send message to X", anything with "saying",
+  // "message <X> saying ...") is NOT claimed here — it belongs to the Rust
+  // orchestrator (NeedMoreInfo / SendWhatsAppMessage), which asks for
+  // missing slots and gates the send. Claiming it here caused "Ok sir"
+  // + a garbage contact ("mommy in WhatsApp") with no question asked.
+  if (/\bsaying\b/i.test(text)) {
+    return { action: "unknown", raw: text };
+  }
   const whatsappMatch = text.match(
-    /^(?:open\s+(?:my\s+)?chat\s+with|chat\s+with|message|whatsapp|open\s+whatsapp\s+chat\s+with|send\s+message\s+to|send\s+whatsapp\s+to)\s+(.+?)(?:\s+on\s+whatsapp)?$/i,
+    /^(?:open\s+(?:my\s+)?chat\s+with|chat\s+with|message|whatsapp|open\s+whatsapp\s+chat\s+with)\s+(.+?)(?:\s+(?:on|in)\s+whatsapp)?$/i,
   );
   if (whatsappMatch) {
     const contact = whatsappMatch[1].trim();
-    if (contact) {
+    // "send ..." leftovers are send-shaped, not chat opens — defer to Rust.
+    if (contact && !/^send\b/i.test(contact)) {
       return { action: "whatsapp_chat", contact };
     }
   }

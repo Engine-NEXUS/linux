@@ -33,6 +33,17 @@ database_id = "4bca5d1b-55e1-4a30-bbf9-ca28cf96e3ea"
 binding = "CACHE"
 id = "2af54bd3039040969e2ffac4c745e443"
 
+# ---- R2 Bucket (NLU model distribution) ----
+# Free tier: 10 GB storage, 10M reads/month.
+# Create first:
+#   npx wrangler r2 bucket create nexus-models
+# Then uncomment the binding below and redeploy.
+# Admin publishes via: python server/nlu/publish_nlu.py
+# Also set: npx wrangler secret put NEXUS_ADMIN_TOKEN
+# [[r2_buckets]]
+# binding = "MODELS"
+# bucket_name = "nexus-models"
+
 # ---- Observability ----
 [observability]
 enabled = true

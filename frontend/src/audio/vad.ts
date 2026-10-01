@@ -43,11 +43,14 @@ const ORT_CDN_BASE = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION
 const POSITIVE_SPEECH_THRESHOLD = 0.5;  // Above this = speech detected
 const NEGATIVE_SPEECH_THRESHOLD = 0.35; // Below this = silence detected
 // Grace period before declaring speech end. This is pure end-to-end latency:
-// nothing happens until it expires. 2000ms absorbs natural pauses between
+// nothing happens until it expires. 3000ms absorbs natural pauses between
 // words in longer commands (e.g. "deep analysis for the PR 24 in nexus-agent")
-// without cutting off mid-sentence. The previous 500ms was too aggressive —
-// it fired onSpeechEnd during inter-word gaps, sending incomplete transcripts.
-const REDEMPTION_MS = 2000;
+// without cutting off mid-sentence. Also helps with the Intel SST mic driver
+// which can drop audio briefly mid-utterance — the extra 1s gives the stream
+// time to recover before we declare speech end. The previous 500ms was too
+// aggressive; 2000ms was better but still truncated "open architecture mapper"
+// to "open-" on Intel SST.
+const REDEMPTION_MS = 3000;
 const PRE_SPEECH_PAD_MS = 500;          // Audio to prepend before speech start
 const MIN_SPEECH_MS = 500;              // Discard segments shorter than this
 
@@ -200,7 +203,8 @@ let sileroPreloaded = false;
 let sileroPreloadPromise: Promise<void> | null = null;
 
 export async function preloadSileroVad(): Promise<void> {
-  if (sileroPreloaded || sileroPreloadPromise) return sileroPreloadPromise ?? undefined;
+  if (sileroPreloadPromise) return sileroPreloadPromise;
+  if (sileroPreloaded) return;
   sileroPreloadPromise = _preloadSilero();
   return sileroPreloadPromise;
 }

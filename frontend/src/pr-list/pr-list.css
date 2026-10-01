@@ -1,0 +1,255 @@
+/* NEXUS PR List Sidebar — liquid glass styling matching the response sidebar.
+   Transparent, always-on-top, non-activating window with a frosted glass card.
+   The blurred desktop backdrop is rendered by ::after using
+   --sidebar-backdrop-image (set from JS when the "sidebar:backdrop" event
+   arrives from Rust). This is a carbon copy of the response sidebar's
+   liquid glass effect. */
+
+:root {
+  /* ── Liquid Glass Parameters (retired — flat minimal look) ─────── */
+  --lg-sheen-opacity: 0;
+  --lg-rim-width: 0px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color: rgba(255, 255, 255, 0.95);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+.pr-list-container {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* The blurred backdrop image is rendered by ::after (see below)
+     with a CSS opacity transition for smooth crossfading between live
+     capture frames. --sidebar-backdrop-image is set on <html> from JS
+     (PrListApp.tsx) when the "sidebar:backdrop" event arrives from Rust. */
+  background-color: rgba(20, 20, 22, 0.60);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  padding: 14px 16px 8px 16px;
+  gap: 10px;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* Blurred backdrop layer — renders the live-capture JPEG behind all
+   content with a smooth opacity crossfade. When Rust emits a new frame,
+   the JS sets --sidebar-backdrop-image on <html>; the transition on
+   opacity makes the swap look like a gentle dissolve rather than a
+   hard frame cut. z-index: 0 puts it behind content (z-index: 2+). */
+.pr-list-container::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  background-color: rgba(8, 8, 10, 0.45);
+  background-image: var(--sidebar-backdrop-image, none);
+  background-size: cover;
+  background-position: center;
+  opacity: 1;
+  transition: opacity 0.3s ease-out;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Ensure content sits above the backdrop layer */
+.pr-list-header,
+.pr-list-loading,
+.pr-list-empty,
+.pr-list-scroll,
+.pr-list-footer {
+  position: relative;
+  z-index: 2;
+}
+
+/* ─── Header ─── */
+.pr-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.pr-list-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  letter-spacing: 0.02em;
+}
+
+.pr-list-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 6px;
+  transition: all 0.15s;
+}
+
+.pr-list-close:hover {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* ─── Loading / Empty ─── */
+.pr-list-loading,
+.pr-list-empty {
+  text-align: center;
+  padding: 40px 0;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13px;
+}
+
+/* ─── Scrollable PR list ─── */
+.pr-list-scroll {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.pr-list-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.pr-list-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.pr-list-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+}
+
+/* ─── PR Card ─── */
+.pr-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: background 0.15s;
+}
+
+.pr-card:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.pr-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.pr-number {
+  font-weight: 700;
+  color: rgba(100, 200, 255, 0.9);
+  font-size: 12px;
+}
+
+.pr-repo {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+}
+
+.pr-time {
+  margin-left: auto;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 10px;
+}
+
+.pr-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.9);
+  line-height: 1.3;
+  /* Clamp to 2 lines */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pr-author {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* ─── Action Buttons ─── */
+.pr-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.pr-btn {
+  flex: 1;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.pr-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pr-btn-merge {
+  background: #2ea043;
+  color: #ffffff;
+  border: 1px solid #2ea043;
+}
+
+.pr-btn-merge:hover:not(:disabled) {
+  background: #388e3c;
+}
+
+.pr-btn-analyse {
+  background: #3a3a3d;
+  color: #ffffff;
+  border: 1px solid #4d4d52;
+}
+
+.pr-btn-analyse:hover:not(:disabled) {
+  background: #48484c;
+}
+
+/* ─── Footer ─── */
+.pr-list-footer {
+  text-align: center;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.25);
+  padding-top: 4px;
+}

@@ -16,10 +16,13 @@ use std::time::{Duration, Instant};
 
 static STT_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 static STT_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Guard against concurrent ensure_stt_running calls — set to true atomically
+/// before spawning, so a second caller sees it and returns immediately.
+static STT_STARTING: AtomicBool = AtomicBool::new(false);
 static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
 
-const STT_IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes (unused — STT kept alive permanently)
-const STT_KEEP_ALIVE: bool = true; // Never kill STT — 128 MB idle cost is worth 0.5s response
+const STT_IDLE_TIMEOUT: Duration = Duration::from_secs(60); // 60s idle timeout
+const STT_KEEP_ALIVE: bool = false; // Kill idle STT fallback after 60s to enforce strict <150MB RAM limit
 const STT_PORT: u16 = 39217;
 
 /// Get the STT server script path.
@@ -177,15 +180,24 @@ pub fn find_python() -> Option<String> {
 
 /// Start the STT server if it's not already running.
 /// Called when the wake word fires or when a transcription is needed.
+/// Uses STT_STARTING as a compare-and-swap guard to prevent two concurrent
+/// callers from both spawning a child process.
 pub fn ensure_stt_running() {
     // Already running?
     if STT_RUNNING.load(Ordering::Relaxed) {
         return;
     }
 
+    // Atomically claim the "starting" slot — prevents concurrent spawns
+    if STT_STARTING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        tracing::debug!("lazy_stt: another thread is already starting STT, skipping");
+        return;
+    }
+
     // Check if an external STT server is already running (e.g. started by run.ps1)
     if is_stt_responsive() {
         STT_RUNNING.store(true, Ordering::Relaxed);
+        STT_STARTING.store(false, Ordering::SeqCst);
         tracing::info!("lazy_stt: external STT server already running on port {STT_PORT}");
         return;
     }
@@ -194,6 +206,7 @@ pub fn ensure_stt_running() {
     let script = match stt_script_path() {
         Some(p) => p,
         None => {
+            STT_STARTING.store(false, Ordering::SeqCst);
             tracing::warn!("lazy_stt: stt_server.py not found — skipping (external server may be used)");
             return;
         }
@@ -204,9 +217,10 @@ pub fn ensure_stt_running() {
     let python_cmd = match find_python() {
         Some(cmd) => cmd,
         None => {
+            STT_STARTING.store(false, Ordering::SeqCst);
             tracing::error!(
                 "lazy_stt: no Python interpreter found. Install Python 3.12+ and run: \
-                 pip install faster-whisper fastapi uvicorn python-multipart"
+                 pip install moonshine-voice fastapi uvicorn python-multipart"
             );
             return;
         }
@@ -214,6 +228,7 @@ pub fn ensure_stt_running() {
 
     let child = Command::new(&python_cmd)
         .arg(&script)
+        .env("MOONSHINE_MODEL", read_moonshine_model())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn();
@@ -223,6 +238,7 @@ pub fn ensure_stt_running() {
             let pid = c.id();
             *STT_CHILD.lock().unwrap() = Some(c);
             STT_RUNNING.store(true, Ordering::Relaxed);
+            STT_STARTING.store(false, Ordering::SeqCst);
             *LAST_REQUEST.lock().unwrap() = Some(Instant::now());
             tracing::info!("lazy_stt: STT server started (PID {pid})");
 
@@ -239,6 +255,7 @@ pub fn ensure_stt_running() {
             });
         }
         Err(e) => {
+            STT_STARTING.store(false, Ordering::SeqCst);
             tracing::error!("lazy_stt: failed to start STT server: {e}");
         }
     }
@@ -292,4 +309,83 @@ pub fn start_idle_monitor() {
             check_stt_idle();
         }
     });
+}
+
+/// Pre-warm the local STT server shortly after boot so the first voice
+/// command has zero cold-start delay (cold model load is 10-15s).
+///
+/// Only spawns when cloud STT won't be used (no Groq key or localSttOnly),
+/// mirroring the wake-word path's decision in wakeword_oww.rs — Groq users
+/// pay no RAM. Runs on a background thread; never blocks startup or paint.
+pub fn spawn_prewarm(app_data_dir: std::path::PathBuf) {
+    std::thread::Builder::new()
+        .name("stt-prewarm".into())
+        .spawn(move || {
+            // Let boot settle (wake engine + first paint win the race).
+            std::thread::sleep(Duration::from_secs(20));
+            let settings_path = app_data_dir.join("settings.json");
+            let (groq_key, local_only) = match std::fs::read_to_string(&settings_path) {
+                Ok(content) => {
+                    let json: serde_json::Value =
+                        serde_json::from_str(&content).unwrap_or_default();
+                    let key = json
+                        .get("groqApiKey")
+                        .or_else(|| json.get("groq_api_key"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let local = json
+                        .get("localSttOnly")
+                        .or_else(|| json.get("local_stt_only"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    (key, local)
+                }
+                Err(_) => (String::new(), false),
+            };
+            if groq_key.is_empty() || local_only {
+                tracing::info!(
+                    "lazy_stt: pre-warming local STT server for zero-delay first command"
+                );
+                ensure_stt_running();
+            } else {
+                tracing::info!(
+                    "lazy_stt: Groq cloud STT configured, skipping pre-warm (saves RAM)"
+                );
+            }
+        })
+        .ok();
+}
+
+/// Read the Moonshine model name from settings.json. Falls back to
+/// "medium_streaming" (245M, 6.65% WER) for admin accuracy. Family
+/// members with 8GB laptops can set "small_streaming" (123M, 7.84% WER)
+/// in Settings to reduce RAM usage.
+fn read_moonshine_model() -> String {
+    // Try %APPDATA%/com.nexus.assistant/settings.json
+    let path = if let Ok(appdata) = std::env::var("APPDATA") {
+        std::path::PathBuf::from(appdata)
+            .join("com.nexus.assistant")
+            .join("settings.json")
+    } else if let Ok(home) = std::env::var("HOME") {
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("com.nexus.assistant")
+            .join("settings.json")
+    } else {
+        return "medium_streaming".to_string();
+    };
+
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return "medium_streaming".to_string();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return "medium_streaming".to_string();
+    };
+
+    json.get("moonshineModel")
+        .or_else(|| json.get("moonshine_model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("medium_streaming")
+        .to_string()
 }

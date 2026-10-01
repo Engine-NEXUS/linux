@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-cap",
   "description": "Capabilities for the NEXUS app (main + setup windows)",
-  "windows": ["main", "setup"],
+  "windows": ["main", "setup", "loading", "loading-indicator"],
   "permissions": [
     "core:default",
     "core:window:allow-set-ignore-cursor-events",
@@ -24,6 +24,6 @@
     "deep-link:default",
     "positioner:allow-move-window",
     "positioner:default",
-    "shell:allow-open"
+    "shell:default"
   ]
 }

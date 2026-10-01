@@ -33,44 +33,114 @@ export interface RetrievalResult {
 }
 
 /**
+ * Extract the core entity/topic from a natural-language question.
+ * Strips question prefixes ("what is", "who is", "tell me about", etc.)
+ * and trailing punctuation so Wikipedia/Wikidata search for the entity
+ * rather than the full question wording.
+ *
+ *   "what is the capital of France" → "capital of France"
+ *   "who is Einstein"               → "Einstein"
+ *   "what is Rust"                   → "Rust"
+ *   "tell me about quantum computing" → "quantum computing"
+ */
+export function extractSearchEntity(query: string): string {
+  let q = query.trim();
+  // Strip leading question word + auxiliary: "what is", "who was", "how do", etc.
+  q = q.replace(
+    /^(what|who|where|when|why|how)\s+(?:is|are|was|were|do|does|did|can|could|'s|s)\s+/i,
+    "",
+  );
+  // Strip standalone question word: "what X", "who X"
+  q = q.replace(/^(what|who|where|when|why|how)\s+/i, "");
+  // Strip command prefixes
+  q = q.replace(
+    /^(?:tell me about|explain|describe|define|research|look\s*up|find info(?:rmation)? on|search for)\s+/i,
+    "",
+  );
+  // Strip leading articles
+  q = q.replace(/^(the|a|an)\s+/i, "");
+  // Strip trailing punctuation
+  q = q.replace(/[?\.!]+$/, "");
+  return q.trim() || query.trim();
+}
+
+/**
+ * Check if a Wikipedia result is relevant to the query by comparing
+ * significant word overlap. Returns false if the title shares no
+ * meaningful words with the query entity (beyond common stop words).
+ */
+function isRelevantResult(title: string, queryEntity: string): boolean {
+  const stopWords = new Set([
+    "the", "a", "an", "is", "are", "was", "were", "of", "in", "on",
+    "at", "to", "for", "and", "or", "by", "with", "from", "as", "that",
+    "this", "it", "its", "be", "been", "has", "have", "had", "do",
+    "does", "did", "will", "would", "could", "should", "may", "might",
+    "what", "who", "where", "when", "why", "how", "which", "whose",
+  ]);
+  const titleWords = new Set(
+    title.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 1 && !stopWords.has(w)),
+  );
+  const queryWords = queryEntity.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 1 && !stopWords.has(w));
+  if (queryWords.length === 0) return true; // can't judge, allow
+  const overlap = queryWords.filter(w => titleWords.has(w));
+  // Require at least one significant word to overlap
+  return overlap.length > 0;
+}
+
+/**
  * Search Wikipedia for a query and return the top summary result.
  * Uses the REST API (no key, no ads, free).
  */
 export async function searchWikipedia(query: string, lang: string = "en"): Promise<SearchResult | null> {
   const wikiHost = lang === "en" ? "en.wikipedia.org" : `${lang}.wikipedia.org`;
 
-  // Step 1: search for the best matching page title
-  // Note: no origin=* param — Cloudflare Workers don't need CORS
-  const searchUrl = `https://${wikiHost}/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&srlimit=1&format=json`;
-  try {
-    const searchResp = await fetch(searchUrl, {
-      headers: { "Accept": "application/json", "User-Agent": "NEXUS-Worker/1.0" },
-    });
-    if (!searchResp.ok) return null;
-    const searchData = await searchResp.json() as any;
-    const hit = searchData?.query?.search?.[0];
-    if (!hit) return null;
+  // Extract the entity from question-style queries so Wikipedia searches
+  // for the topic, not the full question wording (which causes irrelevant
+  // matches like "Closed-ended question" for "what is the capital of France").
+  const entity = extractSearchEntity(query);
 
-    const title = hit.title as string;
+  // Try the extracted entity first; fall back to the full query if it fails
+  // or returns an irrelevant result.
+  for (const searchTerm of [entity, query]) {
+    // Step 1: search for the best matching page title
+    const searchUrl = `https://${wikiHost}/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(searchTerm)}&srlimit=1&format=json`;
+    try {
+      const searchResp = await fetch(searchUrl, {
+        headers: { "Accept": "application/json", "User-Agent": "NEXUS-Worker/1.0" },
+      });
+      if (!searchResp.ok) continue;
+      const searchData = await searchResp.json() as any;
+      const hit = searchData?.query?.search?.[0];
+      if (!hit) continue;
 
-    // Step 2: get the page summary via REST API
-    const summaryUrl = `https://${wikiHost}/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
-    const summaryResp = await fetch(summaryUrl, {
-      headers: { "Accept": "application/json", "User-Agent": "NEXUS-Worker/1.0" },
-    });
-    if (!summaryResp.ok) return null;
-    const summary = await summaryResp.json() as any;
+      const title = hit.title as string;
 
-    return {
-      title: summary.title || title,
-      url: summary.content_urls?.desktop?.page || `https://${wikiHost}/wiki/${encodeURIComponent(title)}`,
-      snippet: summary.extract || "",
-      source: "wikipedia",
-      retrieved_at: new Date().toISOString(),
-    };
-  } catch {
-    return null;
+      // Relevance check: skip results whose title shares no significant
+      // words with the query entity.
+      if (searchTerm === entity && !isRelevantResult(title, entity)) {
+        continue;
+      }
+
+      // Step 2: get the page summary via REST API
+      const summaryUrl = `https://${wikiHost}/api/rest_v1/page/summary/${encodeURIComponent(title)}`;
+      const summaryResp = await fetch(summaryUrl, {
+        headers: { "Accept": "application/json", "User-Agent": "NEXUS-Worker/1.0" },
+      });
+      if (!summaryResp.ok) continue;
+      const summary = await summaryResp.json() as any;
+
+      return {
+        title: summary.title || title,
+        url: summary.content_urls?.desktop?.page || `https://${wikiHost}/wiki/${encodeURIComponent(title)}`,
+        snippet: summary.extract || "",
+        source: "wikipedia",
+        retrieved_at: new Date().toISOString(),
+      };
+    } catch {
+      continue;
+    }
   }
+  return null;
 }
 
 /**
@@ -78,7 +148,9 @@ export async function searchWikipedia(query: string, lang: string = "en"): Promi
  * Returns a compact result with key properties.
  */
 export async function searchWikidata(query: string): Promise<SearchResult | null> {
-  const url = `https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${encodeURIComponent(query)}&language=en&format=json&limit=1&origin=*`;
+  const entity = extractSearchEntity(query);
+  const searchTerm = entity || query;
+  const url = `https://www.wikidata.org/w/api.php?action=wbsearchentities&search=${encodeURIComponent(searchTerm)}&language=en&format=json&limit=1&origin=*`;
   try {
     const resp = await fetch(url, { headers: { "Accept": "application/json" } });
     if (!resp.ok) return null;

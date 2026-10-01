@@ -1,0 +1,864 @@
+{
+  "schema_version": 1,
+  "source": "nexus_synthetic_phase7",
+  "review_status": "approved_for_candidate_training",
+  "policy": "get_pr examples using 'in' preposition with additional context words to create different phrase families while teaching the 'in' preposition. Additional OOS examples for browser_search false positives.",
+  "total_examples": 110,
+  "unique_families": 24,
+  "intent_counts": {
+    "get_pr": 100,
+    "unknown": 10
+  },
+  "examples": [
+    {
+      "text": "get pull request 42 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pull request 7 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pull request 15 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pull request 88 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pull request 3 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pull request 99 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "99"
+      }
+    },
+    {
+      "text": "get pull request 100 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "100"
+      }
+    },
+    {
+      "text": "get pull request 55 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "55"
+      }
+    },
+    {
+      "text": "get pull request 33 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "33"
+      }
+    },
+    {
+      "text": "get pull request 77 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "77"
+      }
+    },
+    {
+      "text": "get pull request 42 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pull request 7 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pull request 15 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pull request 88 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pull request 3 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pull request 99 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "99"
+      }
+    },
+    {
+      "text": "get pull request 100 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "100"
+      }
+    },
+    {
+      "text": "get pull request 55 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "55"
+      }
+    },
+    {
+      "text": "get pull request 33 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "33"
+      }
+    },
+    {
+      "text": "get pull request 77 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "77"
+      }
+    },
+    {
+      "text": "get pull request 42 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pull request 7 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pull request 15 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pull request 88 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pull request 3 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pull request 42 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pull request 7 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pull request 15 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pull request 88 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pull request 3 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "show pull request 42 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show pull request 7 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "show pull request 15 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "show pull request 88 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "show pull request 3 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "show pull request 99 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "99"
+      }
+    },
+    {
+      "text": "show pull request 100 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "100"
+      }
+    },
+    {
+      "text": "show pull request 55 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "55"
+      }
+    },
+    {
+      "text": "show pull request 33 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "33"
+      }
+    },
+    {
+      "text": "show pull request 77 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "77"
+      }
+    },
+    {
+      "text": "show pull request 42 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show pull request 7 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "show pull request 15 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "show pull request 88 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "show pull request 3 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "show pull request 99 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "99"
+      }
+    },
+    {
+      "text": "show pull request 100 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "100"
+      }
+    },
+    {
+      "text": "show pull request 55 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "55"
+      }
+    },
+    {
+      "text": "show pull request 33 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "33"
+      }
+    },
+    {
+      "text": "show pull request 77 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "77"
+      }
+    },
+    {
+      "text": "show pull request 42 in octo/tools please",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show pull request 7 in octo/tools please",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "show pull request 15 in octo/tools please",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "show pull request 88 in octo/tools please",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "show pull request 3 in octo/tools please",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "show pull request 42 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show pull request 7 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "show pull request 15 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "show pull request 88 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "show pull request 3 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pr 42 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pr 7 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pr 15 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pr 88 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pr 3 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pr 99 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "99"
+      }
+    },
+    {
+      "text": "get pr 100 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "100"
+      }
+    },
+    {
+      "text": "get pr 55 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "55"
+      }
+    },
+    {
+      "text": "get pr 33 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "33"
+      }
+    },
+    {
+      "text": "get pr 77 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "77"
+      }
+    },
+    {
+      "text": "get pr 42 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pr 7 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pr 15 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pr 88 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pr 3 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pr 99 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "99"
+      }
+    },
+    {
+      "text": "get pr 100 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "100"
+      }
+    },
+    {
+      "text": "get pr 55 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "55"
+      }
+    },
+    {
+      "text": "get pr 33 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "33"
+      }
+    },
+    {
+      "text": "get pr 77 in octo/tools on github",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "77"
+      }
+    },
+    {
+      "text": "get pr 42 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pr 7 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pr 15 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pr 88 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pr 3 in octo/tools for me",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pr 42 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pr 7 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pr 15 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pr 88 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pr 3 in octo/tools now",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "info about pr 42 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "info about pr 7 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "info about pr 15 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "info about pr 88 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "info about pr 3 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "details of pr 42 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "details of pr 7 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "details of pr 15 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "details of pr 88 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "details of pr 3 in the octo/tools repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "tell me who gives the best motivational speeches on the web",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "tell me who invented the telephone",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "tell me who wrote the declaration of independence",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "tell me who won the world series last year",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "tell me who painted the sistine chapel",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "tell me who discovered penicillin",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "tell me who composed the moonlight sonata",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "tell me who built the first airplane",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "tell me who directed the godfather",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "tell me who founded amazon",
+      "intent": "unknown",
+      "slots": {}
+    }
+  ]
+}

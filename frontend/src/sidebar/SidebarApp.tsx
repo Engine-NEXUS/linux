@@ -6,6 +6,8 @@ import { useSidebar } from "./sidebarStore";
 import { renderMarkdownToHtml } from "./markdownRenderer";
 import { speak, stopTts } from "../audio/ttsPlayer";
 import { AnalysisDashboard } from "./AnalysisDashboard";
+import { GitHubConflictPanel } from "./GitHubConflictPanel";
+import { ConfirmationPanel } from "./ConfirmationPanel";
 
 /**
  * NEXUS Response Sidebar
@@ -18,6 +20,7 @@ import { AnalysisDashboard } from "./AnalysisDashboard";
  * - Safe external link handling in user's default browser
  * - Read Aloud (TTS) control, Copy Full Response, Font-size adjustment
  * - Rich repository analysis dashboard with pie charts
+ * - Interactive action confirmation cards (WhatsApp, Swiggy, GitHub)
  * - Smooth acrylic blur with readable high-contrast typography
  */
 export function SidebarApp() {
@@ -28,6 +31,8 @@ export function SidebarApp() {
   const speaking = useSidebar((s) => s.speaking);
   const activeImage = useSidebar((s) => s.activeImage);
   const analysisData = useSidebar((s) => s.analysisData);
+  const conflictData = useSidebar((s) => s.conflictData);
+  const confirmationData = useSidebar((s) => s.confirmationData);
 
   const show = useSidebar((s) => s.show);
   const hide = useSidebar((s) => s.hide);
@@ -100,26 +105,36 @@ export function SidebarApp() {
 
     // Fetch pending content on mount — handles the fresh-window case
     // where events were emitted before the listener was registered.
-    invoke<{ query: string; text: string; backdrop: string | null; analysis?: any } | null>(
+    invoke<{ query: string; text: string; backdrop: string | null; analysis?: any; confirmation?: any } | null>(
       "get_pending_sidebar_content"
     )
       .then((pending) => {
+        console.log("[sidebar] get_pending_sidebar_content result:", pending ? `query=${pending.query?.length}chars text=${pending.text?.length}chars` : "null");
         if (pending) {
           if (pending.backdrop) {
+            console.log("[sidebar] setting backdrop image");
             document.documentElement.style.setProperty(
               "--sidebar-backdrop-image",
               `url(${pending.backdrop})`
             );
           }
-          // If analysis data is present, use the rich dashboard view
-          if (pending.analysis) {
+          // If confirmation data is present, render confirmation panel
+          if (pending.confirmation) {
+            console.log("[sidebar] showing with confirmation data");
+            useSidebar.getState().showConfirmation(pending.confirmation);
+          } else if (pending.analysis) {
+            // If analysis data is present, use the rich dashboard view
+            console.log("[sidebar] showing with analysis data");
             useSidebar.getState().showAnalysis(pending.query, pending.text, pending.analysis);
           } else {
+            console.log("[sidebar] showing with plain text");
             show(pending.query, pending.text);
           }
+        } else {
+          console.warn("[sidebar] no pending content — sidebar will be empty");
         }
       })
-      .catch((e) => console.warn("[sidebar] get_pending_sidebar_content failed:", e));
+      .catch((e) => console.error("[sidebar] get_pending_sidebar_content FAILED:", e));
 
     listen<{ query: string; text: string }>("sidebar:show", (event) => {
       show(event.payload.query, event.payload.text);
@@ -132,6 +147,14 @@ export function SidebarApp() {
         useSidebar.getState().showAnalysis(q, t, analysis);
       } else {
         show(q, t);
+      }
+    }).then((u) => unlisteners.push(u));
+
+    // Listen for action confirmation requests (WhatsApp, Swiggy, GitHub)
+    listen<{ query: string; prompt: string; confirmation: any }>("sidebar:confirmation", (event) => {
+      const { confirmation } = event.payload;
+      if (confirmation) {
+        useSidebar.getState().showConfirmation(confirmation);
       }
     }).then((u) => unlisteners.push(u));
 
@@ -288,41 +311,73 @@ export function SidebarApp() {
 
   return (
     <div id="sidebar-app" className={visible ? "sidebar--visible" : "sidebar--hidden"}>
-      <div className={`sidebar-card font-size--${fontSize}`}>
-        {/* ── Top Header Toolbar ─────────────────────────────────────── */}
-        <header className="sidebar-header">
-          <div className="sidebar-header-actions">
-            {/* Read Aloud (TTS) */}
+      <div className={`sidebar-card ${confirmationData ? "mode--confirmation" : ""} font-size--${fontSize}`}>
+        {/* ── Top Header Toolbar (hidden in confirmation mode for minimal UI) ── */}
+        {!confirmationData && (
+          <header className="sidebar-header">
+            <div className="sidebar-header-actions">
+              {/* Read Aloud (TTS) */}
+              <button
+                type="button"
+                className={`sidebar-action-btn ${speaking ? "sidebar-action-btn--active" : ""}`}
+                onClick={handleToggleTts}
+                title={speaking ? "Stop reading aloud" : "Read aloud (TTS)"}
+              >
+                {speaking ? (
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  </svg>
+                ) : (
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                  </svg>
+                )}
+              </button>
+            </div>
+            {/* Heading — shows the command/repo name */}
+            {heading && (
+              <div className="sidebar-header-heading">{heading}</div>
+            )}
+            <div className="sidebar-header-spacer" />
+            {/* Settings (gear) button — opens the settings sidebar */}
             <button
               type="button"
-              className={`sidebar-action-btn ${speaking ? "sidebar-action-btn--active" : ""}`}
-              onClick={handleToggleTts}
-              title={speaking ? "Stop reading aloud" : "Read aloud (TTS)"}
+              className="sidebar-action-btn"
+              onClick={() => {
+                import("@tauri-apps/api/core").then(({ invoke }) => {
+                  invoke("show_settings_sidebar").catch(() => {});
+                });
+              }}
+              title="Settings"
             >
-              {speaking ? (
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
-                  <rect x="6" y="6" width="12" height="12" rx="2" />
-                </svg>
-              ) : (
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                </svg>
-              )}
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
             </button>
-          </div>
-          {/* Heading — shows the command/repo name */}
-          {heading && (
-            <div className="sidebar-header-heading">{heading}</div>
-          )}
-          <div className="sidebar-header-spacer" />
-        </header>
+          </header>
+        )}
 
         {/* ── Response Body ─────────────────────────────────────────── */}
-        {/* If we have analysis data, show the rich dashboard. Otherwise, show markdown. */}
+        {/* Priority: conflict panel > confirmation panel > analysis dashboard > markdown */}
         <div className="sidebar-response" ref={responseScrollRef} onScroll={handleScroll}>
-          {analysisData ? (
+          {conflictData ? (
+            <GitHubConflictPanel
+              prNumber={conflictData.prNumber}
+              repo={conflictData.repo}
+              conflictFiles={conflictData.conflictFiles}
+              message={conflictData.message}
+            />
+          ) : confirmationData ? (
+            <ConfirmationPanel
+              data={confirmationData}
+              onClose={() => {
+                hide();
+              }}
+            />
+          ) : analysisData ? (
             <AnalysisDashboard data={analysisData} />
           ) : (
             <div
@@ -334,20 +389,22 @@ export function SidebarApp() {
         </div>
 
         {/* ── Floating Scroll to Top button ──────────────────────────── */}
-        {showScrollTop && (
+        {showScrollTop && !confirmationData && (
           <button type="button" className="sidebar-scroll-top-btn" onClick={scrollToTop} title="Scroll to top">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polyline points="18 15 12 9 6 15" />
             </svg>
           </button>
         )}
 
-        {/* ── Footer Status Bar ──────────────────────────────────────── */}
-        <footer className="sidebar-footer">
-          <div className="sidebar-footer-hint">
-            <kbd className="sidebar-kbd">Ctrl+Space</kbd> to close
-          </div>
-        </footer>
+        {/* ── Footer Status Bar (hidden in confirmation mode) ──────────────── */}
+        {!confirmationData && (
+          <footer className="sidebar-footer">
+            <div className="sidebar-footer-hint">
+              <kbd className="sidebar-kbd">Ctrl+Space</kbd> to close
+            </div>
+          </footer>
+        )}
       </div>
 
       {/* ── Image Lightbox Modal ─────────────────────────────────────── */}

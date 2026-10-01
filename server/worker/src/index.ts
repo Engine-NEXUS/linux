@@ -30,7 +30,7 @@
 import { checkQuota, incrementUsage, getUsage, type UsageRow } from "./quota";
 import { cacheGet, cacheSet, contentHash, prAnalysisKey, searchKey } from "./cache";
 import { retrieve, retrieveCascade, buildSearchSynthesisPrompt, isSearchQuestion, searchWikipedia, type SearchResult } from "./research";
-import { synthesizeWithCascade, callGroq } from "./external_llm";
+import { synthesizeWithCascade, callGroq, callGemini } from "./external_llm";
 import { dedupeSources, stripInjection, buildResponse, extractCaveats } from "./clean";
 import {
   ANALYSIS_FALLBACK_CHAIN, DEEP_ANALYSIS_FALLBACK_CHAIN, SUMMARY_FALLBACK_CHAIN,
@@ -45,30 +45,46 @@ interface Env {
   AI: Ai;
   DB: D1Database;
   CACHE?: KVNamespace;  // optional KV namespace for edge caching
+  MODELS?: R2Bucket;    // optional R2 bucket for NLU model distribution
   // Secrets (set via wrangler secret put)
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
+  SWIGGY_CLIENT_ID: string;
+  SWIGGY_CLIENT_SECRET: string;
   NEXUS_ENCRYPTION_KEY: string;
+  NEXUS_ADMIN_TOKEN?: string;  // gates POST /models/nlu/publish
 }
 
 // ---- OAuth configuration ----
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
+const SWIGGY_TOKEN_URL = "https://partner.swiggy.com/oauth/token";
+const SWIGGY_AUTH_URL = "https://partner.swiggy.com/oauth/authorize";
 const OAUTH_REDIRECT_URI = "nexus://oauth/callback";
 
 const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.send",
   "https://www.googleapis.com/auth/calendar",
-  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/contacts",
+  "https://www.googleapis.com/auth/drive",
+  "https://www.googleapis.com/auth/spreadsheets",
   "openid",
   "email",
   "profile",
 ].join(" ");
 
 const GITHUB_SCOPES = "repo read:org workflow";
+
+// Swiggy MCP OAuth (Builders Club required for production; localhost dev free)
+const SWIGGY_SCOPES = "read write";
+// RFC 8707 resource indicator: binds the token to the MCP server it's for
+// (2026-07-28 spec makes sending it a client MUST). Base origin covers all
+// three Swiggy MCP endpoints (food/im/dineout).
+const SWIGGY_RESOURCE = "https://mcp.swiggy.com";
 
 // ---- Model constants (re-exported from models.ts for backward compat) ----
 const INTENT_MODEL = "@cf/meta/llama-3.2-1b-instruct";
@@ -100,6 +116,15 @@ function extractText(response: any): string {
   return "";
 }
 
+/**
+ * Detect greetings, thanks, and identity questions so the LLM classifier
+ * doesn't misclassify them as "search" (e.g., "who are you" → LLM says search).
+ */
+function isGreetingOrThanks(transcript: string): boolean {
+  const t = transcript.toLowerCase().trim();
+  return /\b(hello|hi|hey|thanks|thank you|good morning|good evening|good afternoon|how are you|who are you|what can you do|what is your name|bye|goodbye|see you|never mind)\b/.test(t);
+}
+
 async function classifyIntent(transcript: string, env: Env): Promise<string> {
   // Check keyword fallback FIRST for reliable intent detection.
   // The LLM classifier is a secondary signal — keywords are more reliable
@@ -107,6 +132,13 @@ async function classifyIntent(transcript: string, env: Env): Promise<string> {
   const keywordIntent = keywordFallback(transcript);
   if (keywordIntent !== "general") {
     return keywordIntent;
+  }
+
+  // Greetings/thanks were matched by keywordFallback as "general" — but we
+  // don't want the LLM classifier to override them with "search" (e.g.,
+  // "who are you" → LLM says "search"). Short-circuit here.
+  if (isGreetingOrThanks(transcript)) {
+    return "general";
   }
 
   const prompt = `You are an intent classifier. Read the user request and respond with exactly one word from this list:
@@ -213,10 +245,13 @@ function keywordFallback(transcript: string): string {
     return "github_analyse";
   }
 
-  if (/\b(pr|pull request|repo|repository|commit|issue|branch|merge|github|list\s+prs)\b/.test(t)) return "github";
+  if (/\b(pr|pull requests?|repo|repository|commit|issue|branch|merge|github|list\s+prs)\b/.test(t)) return "github";
 
   if (/\b(email|inbox|mail|message|gmail|send to)\b/.test(t)) return "gmail";
   if (/\b(calendar|schedule|meeting|event|appointment)\b/.test(t)) return "calendar";
+  // Greetings / thanks — must be checked BEFORE search so "thank you nexus"
+  // doesn't get misclassified as a search question by the LLM.
+  if (/\b(hello|hi|hey|thanks|thank you|thank you nexus|good morning|good evening|good afternoon|how are you|who are you|what can you do|what is your name|bye|goodbye|see you|never mind)\b/.test(t)) return "general";
   if (/\b(search|google|look up|find|what is|who is|where is|research|look\s*up|tell me about|explain|define)\b/.test(t)) return "search";
   return "general";
 }
@@ -293,6 +328,71 @@ async function refreshGoogleToken(env: Env, refreshToken: string): Promise<{ acc
   return { access_token: data.access_token, expires_in: data.expires_in || 3600 };
 }
 
+async function refreshSwiggyToken(env: Env, refreshToken: string): Promise<{ access_token: string; expires_in: number; refresh_token?: string }> {
+  const resp = await fetch(SWIGGY_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: env.SWIGGY_CLIENT_ID,
+      client_secret: env.SWIGGY_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: "refresh_token",
+      resource: SWIGGY_RESOURCE,
+    }),
+  });
+  if (!resp.ok) throw new Error(`Swiggy refresh failed: ${resp.status}`);
+  const data = await resp.json() as any;
+  return { access_token: data.access_token, expires_in: data.expires_in || 3600, refresh_token: data.refresh_token };
+}
+
+/**
+ * Get a valid Swiggy token for MCP vault use. Mirrors Google: refresh
+ * silently when near expiry; null on refresh failure so the client
+ * guides reconnect instead of proceeding with a dead token.
+ */
+async function getValidSwiggyToken(env: Env, userId: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE user_id = ? AND provider = 'swiggy'"
+  ).bind(userId).first();
+
+  if (!row) return null;
+
+  const now = Date.now() / 1000;
+  const expiresAt = row.expires_at as number;
+
+  // Refresh if expired (with 60s buffer) and we have a refresh token
+  if (expiresAt && now > expiresAt - 60 && row.refresh_token) {
+    try {
+      const refreshed = await refreshSwiggyToken(env, row.refresh_token as string);
+      const newExpiresAt = now + refreshed.expires_in;
+      // OAuth 2.1: public clients MUST rotate refresh tokens — persist the
+      // new one when the server rotated, or the next refresh uses a
+      // rotated-away token and dies.
+      if (refreshed.refresh_token) {
+        await env.DB.prepare(
+          "UPDATE oauth_tokens SET access_token = ?, refresh_token = ?, expires_at = ? WHERE user_id = ? AND provider = 'swiggy'"
+        ).bind(refreshed.access_token, refreshed.refresh_token, newExpiresAt, userId).run();
+      } else {
+        await env.DB.prepare(
+          "UPDATE oauth_tokens SET access_token = ?, expires_at = ? WHERE user_id = ? AND provider = 'swiggy'"
+        ).bind(refreshed.access_token, newExpiresAt, userId).run();
+      }
+      return refreshed.access_token;
+    } catch {
+      // Refresh failed (revoked or transient): report disconnected so the
+      // client guides reconnect instead of proceeding with a dead token.
+      return null;
+    }
+  }
+
+  // Expired without a refresh token: unusable — report disconnected.
+  if (expiresAt && now > expiresAt) {
+    return null;
+  }
+
+  return row.access_token as string;
+}
+
 async function getValidGoogleToken(env: Env, userId: string): Promise<string | null> {
   const row = await env.DB.prepare(
     "SELECT access_token, refresh_token, expires_at FROM oauth_tokens WHERE user_id = ? AND provider = 'google'"
@@ -313,9 +413,16 @@ async function getValidGoogleToken(env: Env, userId: string): Promise<string | n
       ).bind(refreshed.access_token, newExpiresAt, userId).run();
       return refreshed.access_token;
     } catch {
-      // Fall back to the stored token (might still work briefly)
-      return row.access_token as string;
+      // Refresh failed (revoked or transient): report disconnected so the
+      // client guides reconnect instead of proceeding with a dead token.
+      // Reconnect heals both cases; a stale token heals neither.
+      return null;
     }
+  }
+
+  // Expired without a refresh token: unusable — report disconnected.
+  if (expiresAt && now > expiresAt) {
+    return null;
   }
 
   return row.access_token as string;
@@ -412,13 +519,19 @@ async function handleGitHub(req: NexusRequest, env: Env, token: string): Promise
   // Match on lowercased transcript for keywords, but extract repo from original
   const prMatch = transcriptLower.match(/(?:pr|pull request)\s*#?\s*(\d+)\s*(?:of|in|from)?\s*(?:repo\s+)?([\w\-./]+)?/);
   const listPrMatch = transcriptLower.match(/(?:list|show|open)\s+(?:open\s+)?(?:prs|pull requests?)(?:\s+(?:in|of|from)\s+([\w\-./]+))?/);
+  // "latest PR", "current PR", "newest PR", "most recent PR", "check PR",
+  // "view PR", "see PR", "get PR" — fetch the most recent PR (open or all).
+  // The optional "in/of/from <repo>" group captures the repo.
+  const latestPrMatch = transcriptLower.match(/(?:check|view|see|get|show|look\s+at|latest|current|newest|most\s+recent|recent|last)\s+(?:the\s+)?(?:latest\s+|current\s+|newest\s+|most\s+recent\s+)?(?:pr|pull\s*request)(?:\s+(?:in|of|from)\s+([\w\-./]+))?/);
   const issueMatch = transcriptLower.match(/(?:issue|bug)\s*#?\s*(\d+)\s*(?:in|of|from)?\s*(?:repo\s+)?([\w\-./]+)?/);
 
-  // Extract repo name from the original transcript (preserves case)
-  function extractRepo(lowerMatch: RegExpMatchArray | null): string | null {
-    if (!lowerMatch || !lowerMatch[2]) return null;
+  // Extract repo name from the original transcript (preserves case).
+  // groupIdx: which capture group in the regex holds the repo name.
+  // prMatch uses group 2 (pr number is group 1), listPrMatch uses group 1.
+  function extractRepo(lowerMatch: RegExpMatchArray | null, groupIdx: number = 2): string | null {
+    if (!lowerMatch || !lowerMatch[groupIdx]) return null;
     // Find the repo name in the original transcript at the same position
-    const repoLower = lowerMatch[2];
+    const repoLower = lowerMatch[groupIdx];
     const idx = transcriptLower.indexOf(repoLower);
     if (idx >= 0) return transcriptOrig.substr(idx, repoLower.length);
     return repoLower;
@@ -450,7 +563,7 @@ Changes: +${pr["additions"]} -${pr["deletions"]} across ${pr["changed_files"]} f
     }
 
     if (listPrMatch) {
-      let repo = extractRepo(listPrMatch) || "zync";
+      let repo = extractRepo(listPrMatch, 1) || "zync";
       if (!repo.includes("/")) {
         const resolved = await resolveRepo(token, repo);
         if (resolved.full_name) repo = resolved.full_name;
@@ -466,6 +579,37 @@ Changes: +${pr["additions"]} -${pr["deletions"]} across ${pr["changed_files"]} f
 
       return await summarize(
         `The user asked for open PRs in ${repo}. Summarize this list concisely:\n\n${prList}`,
+        env
+      );
+    }
+
+    if (latestPrMatch) {
+      // Fetch the most recent PR. Default to open state, but if none are open,
+      // fall back to the most recent PR of any state so the user still gets an answer.
+      let repo = extractRepo(latestPrMatch, 1) || "zync";
+      if (!repo.includes("/")) {
+        const resolved = await resolveRepo(token, repo);
+        if (resolved.full_name) repo = resolved.full_name;
+      }
+
+      let resp = await fetch(`https://api.github.com/repos/${repo}/pulls?state=open&sort=created&direction=desc&per_page=1`, { headers });
+      let prs = resp.ok ? (await resp.json() as Array<Record<string, unknown>>) : [];
+      if (prs.length === 0) {
+        // No open PRs — try the most recent PR of any state
+        resp = await fetch(`https://api.github.com/repos/${repo}/pulls?state=all&sort=created&direction=desc&per_page=1`, { headers });
+        prs = resp.ok ? (await resp.json() as Array<Record<string, unknown>>) : [];
+      }
+      if (!resp.ok) return githubErrorMessage(resp.status, `fetch latest PR in ${repo}`);
+      if (prs.length === 0) return `There are no pull requests in ${repo}.`;
+      const pr = prs[0];
+      const prInfo = `PR #${pr["number"]}: ${pr["title"]}
+State: ${pr["state"]}, Mergeable: ${pr["mergeable_state"] || "unknown"}
+Author: ${(pr["user"] as Record<string, string>)?.login || "unknown"}
+Body: ${(pr["body"] as string || "").slice(0, 500)}
+Changes: +${pr["additions"]} -${pr["deletions"]} across ${pr["changed_files"]} files`;
+
+      return await summarize(
+        `Summarize this GitHub PR for the user in 2-3 sentences. Be concise and mention the status, what it changes, and whether it's ready to merge:\n\n${prInfo}`,
         env
       );
     }
@@ -748,98 +892,61 @@ async function handleGitHubWrite(req: NexusRequest, env: Env, token: string): Pr
 // ---- GitHub deep analysis handler (GLM-5.2) ----
 
 /**
- * Parse a PR number, repo, and optional author from the transcript.
+ * Parse a PR number and repo from the transcript.
  * Patterns:
- *   "analyse PR 24 in zync"             → pr=24, repo=zync, author=null
- *   "analyse the PR of zync"            → latest PR, repo=zync, author=null
- *   "analyse the PR by prem in servx"   → latest PR by prem, repo=servx, author=prem
- *   "analyse the PR of prem in servx"   → latest PR by prem, repo=servx, author=prem
- *   "analyse the PR from prem in servx" → latest PR by prem, repo=servx, author=prem
- *   "review PR 76 in owner/repo"        → pr=76, repo=owner/repo, author=null
- *   "analyse the pull request"          → latest PR, default repo, author=null
+ *   "analyse PR 24 in zync"        → pr=24, repo=zync
+ *   "analyse the PR of zync"       → latest PR, repo=zync
+ *   "review PR 76 in owner/repo"   → pr=76, repo=owner/repo
+ *   "analyse the pull request"     → latest PR, default repo
  */
-function parsePRRequest(transcript: string): { prNumber: number | null; repoName: string | null; author: string | null } {
+function parsePRRequest(transcript: string): { prNumber: number | null; repoName: string | null } {
   const tLower = transcript.toLowerCase();
 
   // "PR 24", "PR #24", "pull request 24", "PR number 24" (STT variation)
   const prNumMatch = tLower.match(/(?:pr|pull\s*request)\s*(?:number|#\s*)?\s*#?\s*(\d+)/);
   const prNumber = prNumMatch ? parseInt(prNumMatch[1], 10) : null;
 
-  // Extract author: "by prem", "of prem", "from prem" (but NOT "of zync" when zync is a repo)
-  // The author is the word after by/of/from, and the repo is after "in <repo>"
-  // Pattern: "[by|of|from] <author> in <repo>"
-  const authorRepoMatch = tLower.match(/(?:by|of|from)\s+(\w+)\s+in\s+([\w\-./]+(?:\s+[\w\-./]+)?)/);
-  let author: string | null = null;
-  let repoName: string | null = null;
-
-  if (authorRepoMatch && authorRepoMatch[1] && authorRepoMatch[2]) {
-    // Check if the word after "of/by/from" is actually a repo name (not a person)
-    // If the pattern is "of <word> in <repo>", <word> could be a repo or author
-    // Heuristic: if <word> is followed by "in <repo>", it's likely an author
-    // (because "analyse the PR of zync" has no "in <repo>" after "of zync")
-    author = authorRepoMatch[1];
-    const repoLower = authorRepoMatch[2].trim();
-    const idx = tLower.indexOf(repoLower);
-    repoName = idx >= 0 ? transcript.substr(idx, repoLower.length) : repoLower;
-  } else {
-    // No author pattern — just extract repo
-    // "in zync", "of zync", "on NEXUS agent", "from owner/repo"
-    // Exclude "of PR" and "of pull" — those are not repo names
-    // Also exclude common English words that follow "of/in/from/on"
-    const repoMatch = tLower.match(/(?:in|of|from|on)\s+(?!pr\b|pull\b|the\b|this\b|that\b|a\b|an\b)([\w\-./]+(?:\s+[\w\-./]+)?)/);
-    if (repoMatch && repoMatch[1]) {
-      const repoLower = repoMatch[1].trim();
-      const idx = tLower.indexOf(repoLower);
-      repoName = idx >= 0 ? transcript.substr(idx, repoLower.length) : repoLower;
-    }
+  // "in zync", "of zync", "on NEXUS agent", "from owner/repo",
+  // "in ledger ai", "in ledger-ai" — support multi-word repo names
+  // Exclude "of PR" and "of pull" — those are not repo names
+  // Also exclude common English words that follow "of/in/from/on"
+  const repoMatch = tLower.match(/(?:in|of|from|on)\s+(?!pr\b|pull\b|the\b|this\b|that\b|a\b|an\b)([\w\-./]+(?:\s+[\w\-./]+)?)/);
+  if (!repoMatch || !repoMatch[1]) {
+    return { prNumber, repoName: null };
   }
+  // Extract from original transcript to preserve case
+  const repoLower = repoMatch[1].trim();
+  const idx = tLower.indexOf(repoLower);
+  const repoName = idx >= 0 ? transcript.substr(idx, repoLower.length) : repoLower;
 
-  return { prNumber, repoName, author };
+  return { prNumber, repoName };
 }
 
 /**
- * Parse a branch name, repo, and optional author from the transcript.
+ * Parse a branch name and repo from the transcript.
  * Patterns:
  *   "analyse branch sidebar-markdown-rich-rendering in zync"
  *   "analyse the branch feature-auth in servx"
  *   "analyse branch main in ledger-ai"
- *   "check the latest branch of servx created by eesha"  → branchName=null, author=eesha
- *   "check the latest branch by eesha in servx"          → branchName=null, author=eesha
  */
-function parseBranchRequest(transcript: string): { branchName: string | null; repoName: string | null; author: string | null } {
+function parseBranchRequest(transcript: string): { branchName: string | null; repoName: string | null } {
   const tLower = transcript.toLowerCase();
-
-  // Extract author: "by <author>" or "created by <author>"
-  // Must be checked BEFORE branch name extraction, because
-  // "check the latest branch by eesha" has no branch name
-  const authorMatch = tLower.match(/(?:created\s+)?by\s+(\w+)/);
-  const author = authorMatch && authorMatch[1] ? authorMatch[1] : null;
 
   // Extract branch name: "branch <name>" or "the branch <name>"
   // Branch names can contain hyphens, underscores, slashes, and dots
-  // But NOT "branch by" or "branch of" or "branch in" or "branch created"
-  // (those are the new "latest branch" patterns, not a specific branch name)
   const branchMatch = tLower.match(/(?:branch|ranch|bench)\s+(?:the\s+)?([\w\-./]+)/);
-  let branchName: string | null = null;
-  if (branchMatch && branchMatch[1]) {
-    const candidate = branchMatch[1];
-    // Reject prepositions — "branch by", "branch of", "branch in", "branch created"
-    // These indicate the "latest branch" pattern, not a specific branch name
-    if (!["by", "of", "in", "created", "from"].includes(candidate.toLowerCase())) {
-      branchName = candidate;
-    }
-  }
+  const branchName = branchMatch ? branchMatch[1] : null;
 
   // Extract repo name (same logic as parsePRRequest)
-  const repoMatch = tLower.match(/(?:in|of|from|on)\s+(?!pr\b|pull\b|the\b|this\b|that\b|a\b|an\b|branch\b|created\b|by\b)([\w\-./]+(?:\s+[\w\-./]+)?)/);
+  const repoMatch = tLower.match(/(?:in|of|from|on)\s+(?!pr\b|pull\b|the\b|this\b|that\b|a\b|an\b|branch\b)([\w\-./]+(?:\s+[\w\-./]+)?)/);
   if (!repoMatch || !repoMatch[1]) {
-    return { branchName, repoName: null, author };
+    return { branchName, repoName: null };
   }
   const repoLower = repoMatch[1].trim();
   const idx = tLower.indexOf(repoLower);
   const repoName = idx >= 0 ? transcript.substr(idx, repoLower.length) : repoLower;
 
-  return { branchName, repoName, author };
+  return { branchName, repoName };
 }
 
 /**
@@ -1019,11 +1126,25 @@ function levenshtein(a: string, b: string): number {
  * Fetch full PR context via GitHub REST API (no cloning needed).
  * Returns: metadata, files with diffs, commits, and review comments.
  */
+/** Result of fetchPRContext — includes both the text context for the LLM
+ * and the raw PR stats for deterministic section generation. */
+interface PRContextResult {
+  context: string;
+  stats: {
+    insertions: number;
+    deletions: number;
+    filesChanged: number;
+    commits: number;
+    mergeableState: string;
+    hasMergeConflicts: boolean;
+  } | null;
+}
+
 async function fetchPRContext(
   token: string,
   repo: string,
   prNumber: number,
-): Promise<string> {
+): Promise<PRContextResult> {
   const headers: Record<string, string> = {
     "Authorization": `Bearer ${token}`,
     "Accept": "application/vnd.github+json",
@@ -1034,11 +1155,21 @@ async function fetchPRContext(
   // 1. PR metadata
   const prResp = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}`, { headers });
   if (!prResp.ok) {
-    if (prResp.status === 404) return `__ERROR__: PR #${prNumber} not found in ${repo}.`;
-    if (prResp.status === 401) return `__ERROR__: ${githubErrorMessage(401, `analyse PR #${prNumber}`)}`;
-    return `__ERROR__: GitHub API returned ${prResp.status} for PR #${prNumber}.`;
+    if (prResp.status === 404) return { context: `__ERROR__: PR #${prNumber} not found in ${repo}.`, stats: null };
+    if (prResp.status === 401) return { context: `__ERROR__: ${githubErrorMessage(401, `analyse PR #${prNumber}`)}`, stats: null };
+    return { context: `__ERROR__: GitHub API returned ${prResp.status} for PR #${prNumber}.`, stats: null };
   }
   const pr = await prResp.json() as Record<string, unknown>;
+
+  // Extract deterministic stats for the structured output sections
+  const prStats = {
+    insertions: (pr["additions"] as number) || 0,
+    deletions: (pr["deletions"] as number) || 0,
+    filesChanged: (pr["changed_files"] as number) || 0,
+    commits: (pr["commits"] as number) || 0,
+    mergeableState: (pr["mergeable_state"] as string) || "unknown",
+    hasMergeConflicts: (pr["mergeable_state"] as string) === "dirty" || pr["mergeable"] === false,
+  };
 
   // 2. Files with diffs (parallel with commits + comments)
   const [filesResp, commitsResp, commentsResp, reviewsResp] = await Promise.all([
@@ -1117,7 +1248,7 @@ ${patch}`);
     return `  ${user}: ${state}${body ? ` — ${body}` : ""}`;
   }).join("\n");
 
-  return `${meta}
+  const context = `${meta}
 
 === FILES CHANGED (${files.length}) ===
 ${fileSections.join("\n\n")}
@@ -1130,6 +1261,8 @@ ${commentList || "(none)"}
 
 === REVIEWS (${reviews.length}) ===
 ${reviewList || "(none)"}`;
+
+  return { context, stats: prStats };
 }
 
 /**
@@ -1164,7 +1297,7 @@ async function handleGitHubAnalyse(req: NexusRequest, env: Env, token: string): 
     return handleBranchAnalyse(req, env, token);
   }
 
-  const { prNumber, repoName, author } = parsePRRequest(req.task.request);
+  const { prNumber, repoName } = parsePRRequest(req.task.request);
   const userId = req.requester.id;
 
   try {
@@ -1188,44 +1321,26 @@ async function handleGitHubAnalyse(req: NexusRequest, env: Env, token: string): 
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "NEXUS-Worker",
       };
-
-      // If author is specified, use GitHub Search API to find the latest PR by that author
-      if (author) {
-        // Use search API: "repo:{repo} is:pr author:{author}" sorted by created desc
-        const searchUrl = `https://api.github.com/search/issues?q=${encodeURIComponent(`repo:${repo} is:pr author:${author}`)}&sort=created&order=desc&per_page=1`;
-        const searchResp = await fetch(searchUrl, { headers });
-        if (!searchResp.ok) {
-          if (searchResp.status === 401) return githubErrorMessage(401, `search PRs by ${author} in ${repo}`);
-          return `I couldn't find any pull requests by "${author}" in ${repo}. Error: ${searchResp.status}. Try saying "analyse PR 24 in ${repo}".`;
-        }
-        const searchData = await searchResp.json() as Record<string, unknown>;
-        const items = searchData["items"] as Array<Record<string, unknown>>;
-        if (!items || items.length === 0) {
-          return `There are no pull requests by "${author}" in ${repo}. Try a different author name or specify a PR number.`;
-        }
-        // Search API returns issues — the PR number is the "number" field
-        actualPrNumber = items[0]["number"] as number;
-      } else {
-        // No author filter — get the latest PR overall
-        const resp = await fetch(`https://api.github.com/repos/${repo}/pulls?state=all&per_page=1&sort=created&direction=desc`, { headers });
-        if (!resp.ok) {
-          if (resp.status === 401) return githubErrorMessage(401, `find PRs in ${repo}`);
-          return `I couldn't find any pull requests in ${repo}. Error: ${resp.status}. Try saying "analyse PR 24 in ${repo}".`;
-        }
-        const prs = await resp.json() as Array<Record<string, unknown>>;
-        if (!prs || prs.length === 0) {
-          return `There are no pull requests in ${repo}. Try specifying a PR number, like "analyse PR 24".`;
-        }
-        actualPrNumber = prs[0]["number"] as number;
+      const resp = await fetch(`https://api.github.com/repos/${repo}/pulls?state=all&per_page=1&sort=created&direction=desc`, { headers });
+      if (!resp.ok) {
+        if (resp.status === 401) return githubErrorMessage(401, `find PRs in ${repo}`);
+        return `I couldn't find any pull requests in ${repo}. Error: ${resp.status}. Try saying "analyse PR 24 in ${repo}".`;
       }
+      const prs = await resp.json() as Array<Record<string, unknown>>;
+      if (!prs || prs.length === 0) {
+        return `There are no pull requests in ${repo}. Try specifying a PR number, like "analyse PR 24".`;
+      }
+      actualPrNumber = prs[0]["number"] as number;
     }
 
     // Fetch full PR context
-    const context = await fetchPRContext(token, repo, actualPrNumber);
+    const prContextResult = await fetchPRContext(token, repo, actualPrNumber);
 
-    if (context.startsWith("__ERROR__:")) {
-      return context.replace("__ERROR__:", "");
+    if (prContextResult.context.startsWith("__ERROR__:")) {
+      return prContextResult.context.replace("__ERROR__:", "");
     }
+    const context = prContextResult.context;
+    const prStats = prContextResult.stats;
 
     // Determine which model to use:
     // 1. Re-evaluation request → deep model (GLM-5.3-Flash, 1M context)
@@ -1234,6 +1349,19 @@ async function handleGitHubAnalyse(req: NexusRequest, env: Env, token: string): 
     const isReEval = isReEvaluationRequest(req.task.request, userId, repo, actualPrNumber);
     const contextTooLarge = context.length > FLASH_CONTEXT_LIMIT_CHARS;
     const useDeepModel = isReEval || contextTooLarge;
+
+    // ── Cache check: skip LLM if we already analysed this exact PR context ──
+    // Re-evaluation requests always bypass cache (user wants a fresh review).
+    const ctxHash = contentHash(context);
+    const cacheKey = prAnalysisKey(userId, repo, actualPrNumber, ctxHash);
+    if (!isReEval) {
+      const cached = await cacheGet<string>(env, cacheKey, 7200); // 2h TTL
+      if (cached) {
+        console.log(`[cache] PR analysis HIT: ${repo}#${actualPrNumber} (saved LLM call)`);
+        const repoShort = repo.includes("/") ? repo.split("/")[1] : repo;
+        return `PR #${actualPrNumber} in ${repoShort}\n\n${cached}`;
+      }
+    }
     const model = useDeepModel ? DEEP_ANALYSIS_MODEL : ANALYSIS_MODEL;
 
     // Record this analysis for re-evaluation detection
@@ -1257,11 +1385,8 @@ async function handleGitHubAnalyse(req: NexusRequest, env: Env, token: string): 
 
 Format your response EXACTLY as follows (use Markdown):
 
-## Description
-What does this PR do? (2-3 sentences explaining the changes)
-
-## How It Helps the Project
-Explain the impact and benefit of this PR to the project. (2-3 sentences)
+## How It Helps the Existing Codebase
+Explain how this PR impacts and benefits the existing codebase/repo. Reference specific files, modules, or architecture patterns it touches. (3-4 sentences)
 
 ## Bugs Found
 
@@ -1314,120 +1439,48 @@ ${context}
     const repoShort = repo.includes("/") ? repo.split("/")[1] : repo;
     const understoodPrefix = `PR #${actualPrNumber} in ${repoShort}\n\n`;
 
-    // Prefix deep reviews so the user knows which model was used
-    if (useDeepModel) {
-      return `${understoodPrefix}[${modelLabel}] ${analysis}`;
+    // ── Deterministic sections (from GitHub API, not LLM) ──
+    // These are appended after the LLM output so they are always accurate.
+    let deterministicSection = "";
+    if (prStats) {
+      const conflictStatus = prStats.hasMergeConflicts
+        ? "Yes — merge conflicts detected. Resolve before merging."
+        : prStats.mergeableState === "unknown"
+          ? "Unknown — GitHub is still computing mergeability. Check again shortly."
+          : "No — this PR can be merged cleanly.";
+      deterministicSection = `
+
+## Stats
+
+| Metric | Value |
+|--------|-------|
+| Insertions | +${prStats.insertions} |
+| Deletions | -${prStats.deletions} |
+| Files changed | ${prStats.filesChanged} |
+| Commits | ${prStats.commits} |
+
+## Merge Conflicts
+
+**${conflictStatus}**`;
     }
-    return `${understoodPrefix}${analysis}`;
+
+    // Prefix deep reviews so the user knows which model was used
+    const finalText = useDeepModel
+      ? `${understoodPrefix}[${modelLabel}] ${analysis}${deterministicSection}`
+      : `${understoodPrefix}${analysis}${deterministicSection}`;
+
+    // ── Cache the analysis result (2h TTL) ──
+    // Store without the understoodPrefix so cached text is reusable.
+    // The prefix is re-added on cache hit.
+    if (!isReEval) {
+      const cacheText = useDeepModel ? `[${modelLabel}] ${analysis}${deterministicSection}` : `${analysis}${deterministicSection}`;
+      await cacheSet(env, cacheKey, cacheText, 7200);
+      console.log(`[cache] PR analysis stored: ${repo}#${actualPrNumber} (TTL 2h)`);
+    }
+
+    return finalText;
   } catch (err) {
     return `I had trouble analysing the PR. Error: ${(err as Error).message}`;
-  }
-}
-
-/**
- * Find the latest branch created by a specific author in a repo.
- * Uses GitHub Search Commits API to find the most recent commit by the author,
- * then resolves the branch name from the commit SHA.
- *
- * Called when the user says "check the latest branch of servx created by eesha"
- * (no branch name specified, just author + repo).
- */
-async function handleLatestBranchByAuthor(
-  req: NexusRequest,
-  env: Env,
-  token: string,
-  repoName: string | null,
-  author: string,
-): Promise<string> {
-  try {
-    // Resolve the repo name
-    const repoResult = await resolveRepo(token, repoName);
-    const repo = repoResult.full_name;
-    if (!repo) {
-      const repoList = repoResult.availableRepos.length > 0
-        ? `\n\nYour available repositories: ${repoResult.availableRepos.join(", ")}`
-        : "";
-      return `I couldn't find a repository matching "${repoName}" in your GitHub account. Try specifying the full name, like "check the latest branch of owner/repo by ${author}".${repoList}`;
-    }
-
-    const headers: Record<string, string> = {
-      "Authorization": `Bearer ${token}`,
-      "Accept": "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "NEXUS-Worker",
-    };
-
-    // Use GitHub Search Commits API to find the latest commit by the author
-    // q=repo:{repo}+author:{author}&sort=committer-date&order=desc
-    const searchUrl = `https://api.github.com/search/commits?q=${encodeURIComponent(`repo:${repo} author:${author}`)}&sort=committer-date&order=desc&per_page=10`;
-    const searchResp = await fetch(searchUrl, { headers });
-    if (!searchResp.ok) {
-      if (searchResp.status === 401) return githubErrorMessage(401, `search commits by ${author} in ${repo}`);
-      return `I couldn't find any commits by "${author}" in ${repo}. Error: ${searchResp.status}.`;
-    }
-    const searchData = await searchResp.json() as Record<string, unknown>;
-    const items = searchData["items"] as Array<Record<string, unknown>>;
-    if (!items || items.length === 0) {
-      return `There are no commits by "${author}" in ${repo}. Check the author name (GitHub username) and try again.`;
-    }
-
-    // Get the commit SHA from the first result
-    const latestCommitSha = items[0]["sha"] as string;
-    const commitInfo = items[0]["commit"] as Record<string, unknown>;
-    const commitMessage = (commitInfo?.["message"] as string || "").split("\n")[0];
-    const commitDate = (commitInfo?.["committer"] as Record<string, unknown>)?.["date"] as string || "unknown";
-
-    // Now find which branch this commit is on
-    // GitHub API: GET /repos/{owner}/{repo}/commits/{sha}/branches-where-head
-    // (This returns branches where this commit is the HEAD)
-    const branchesResp = await fetch(
-      `https://api.github.com/repos/${repo}/commits/${latestCommitSha}/branches-where-head`,
-      { headers },
-    );
-
-    let branchName: string | null = null;
-    if (branchesResp.ok) {
-      const branches = await branchesResp.json() as Array<Record<string, unknown>>;
-      if (branches && branches.length > 0) {
-        branchName = branches[0]["name"] as string;
-      }
-    }
-
-    // Fallback: if we can't find the branch, list all branches and check
-    // if any match the author's name pattern (e.g. "author/feature-x")
-    if (!branchName) {
-      const allBranchesResp = await fetch(
-        `https://api.github.com/repos/${repo}/branches?per_page=100`,
-        { headers },
-      );
-      if (allBranchesResp.ok) {
-        const allBranches = await allBranchesResp.json() as Array<Record<string, unknown>>;
-        // Look for branches that contain the author's name
-        const authorBranch = allBranches.find(b => {
-          const name = (b["name"] as string || "").toLowerCase();
-          return name.includes(author.toLowerCase());
-        });
-        if (authorBranch) {
-          branchName = authorBranch["name"] as string;
-        } else if (allBranches.length > 0) {
-          // Last resort: just return the first branch
-          branchName = allBranches[0]["name"] as string;
-        }
-      }
-    }
-
-    if (!branchName) {
-      // We found commits by the author but couldn't resolve the branch name
-      return `I found commits by "${author}" in ${repo}, but couldn't determine which branch they're on. The latest commit is "${commitMessage}" (${commitDate}). Try specifying a branch name directly.`;
-    }
-
-    // Now we have the branch name — delegate to the normal branch analysis
-    // by modifying the request transcript to include the branch name
-    const newTranscript = `analyse branch ${branchName} in ${repo}`;
-    const newReq = { ...req, task: { ...req.task, request: newTranscript } };
-    return handleBranchAnalyse(newReq, env, token);
-  } catch (err) {
-    return `I had trouble finding the latest branch by "${author}" in ${repoName}. Error: ${(err as Error).message}`;
   }
 }
 
@@ -1437,16 +1490,11 @@ async function handleLatestBranchByAuthor(
  * sends to GLM for analysis.
  */
 async function handleBranchAnalyse(req: NexusRequest, env: Env, token: string): Promise<string> {
-  const { branchName, repoName, author } = parseBranchRequest(req.task.request);
+  const { branchName, repoName } = parseBranchRequest(req.task.request);
   const userId = req.requester.id;
 
-  // If no branch name but author is specified, find the latest branch by that author
-  if (!branchName && author) {
-    return handleLatestBranchByAuthor(req, env, token, repoName, author);
-  }
-
   if (!branchName) {
-    return `I couldn't identify which branch you want to analyse. Try saying "analyse branch feature-name in repo-name" or "check the latest branch of repo-name by author".`;
+    return `I couldn't identify which branch you want to analyse. Try saying "analyse branch feature-name in repo-name".`;
   }
 
   try {
@@ -1843,6 +1891,25 @@ export default {
       return json({ token });
     }
 
+    // ---- OAuth: get google token (for MCP vault: Gmail/Calendar/
+    // Contacts/Drive/Sheets/Meet — one union consent, refreshed here) ----
+    if (path === "/oauth/google-token" && method === "GET") {
+      const userId = url.searchParams.get("user_id") || "";
+      if (!userId) return json({ error: "user_id required" }, 400);
+      const token = await getValidGoogleToken(env, userId);
+      if (!token) return json({ error: "Google not connected" }, 404);
+      return json({ token });
+    }
+
+    // ---- OAuth: get swiggy token (for MCP vault — silently refreshed) ----
+    if (path === "/oauth/swiggy-token" && method === "GET") {
+      const userId = url.searchParams.get("user_id") || "";
+      if (!userId) return json({ error: "user_id required" }, 400);
+      const token = await getValidSwiggyToken(env, userId);
+      if (!token) return json({ error: "Swiggy not connected" }, 404);
+      return json({ token });
+    }
+
     // ---- OAuth: disconnect ----
     if (path === "/oauth/disconnect" && method === "DELETE") {
       return handleOAuthDisconnect(request, env, json);
@@ -1868,8 +1935,69 @@ export default {
       return json({
         google: { configured: !!env.GOOGLE_CLIENT_ID, scopes: GOOGLE_SCOPES },
         github: { configured: !!env.GITHUB_CLIENT_ID, scopes: GITHUB_SCOPES },
+        swiggy: { configured: !!env.SWIGGY_CLIENT_ID, scopes: SWIGGY_SCOPES },
         redirect_uri: OAUTH_REDIRECT_URI,
       });
+    }
+
+    // ---- NLU model distribution (family devices) ----
+    // Admin retrains BERT-Mini locally, uploads files to R2 via
+    // `wrangler r2 object put`, then POSTs the manifest here. Family
+    // devices poll /latest on startup and pull changed files.
+    //
+    // KV key: "nlu_model_latest" -> { version, updated_at, files: {name: {sha256, size}} }
+    // R2 keys: "nlu/<filename>" under MODELS bucket
+    if (path === "/models/nlu/latest" && method === "GET") {
+      if (!env.CACHE) return json({ error: "model distribution not configured" }, 503);
+      const manifest = await env.CACHE.get("nlu_model_latest");
+      if (!manifest) return json({ error: "no model published yet" }, 404);
+      return new Response(manifest, {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      });
+    }
+
+    if (path === "/models/nlu/download" && method === "GET") {
+      if (!env.MODELS) return json({ error: "model storage not configured" }, 503);
+      const name = url.searchParams.get("name") || "";
+      // Whitelist: only known model files can be fetched (path traversal guard)
+      const allowed = new Set([
+        "nexus_nlu.onnx", "nexus_nlu.onnx.data", "labels.json",
+        "temperature_calibration.json",
+        "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json",
+        "tokenizer/vocab.txt", "tokenizer/special_tokens_map.json",
+      ]);
+      if (!allowed.has(name)) return json({ error: "unknown file" }, 400);
+      const obj = await env.MODELS.get(`nlu/${name}`);
+      if (!obj) return json({ error: "file not found" }, 404);
+      return new Response(obj.body, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    if (path === "/models/nlu/publish" && method === "POST") {
+      if (!env.CACHE) return json({ error: "model distribution not configured" }, 503);
+      const adminToken = env.NEXUS_ADMIN_TOKEN;
+      if (!adminToken) return json({ error: "publish disabled (no admin token)" }, 503);
+      const auth = request.headers.get("Authorization") || "";
+      if (auth !== `Bearer ${adminToken}`) return json({ error: "unauthorized" }, 401);
+      try {
+        const body = await request.json() as { version?: string; files?: Record<string, { sha256: string; size: number }> };
+        if (!body.version || !body.files || Object.keys(body.files).length === 0) {
+          return json({ error: "version and files required" }, 400);
+        }
+        const manifest = {
+          version: body.version,
+          updated_at: new Date().toISOString(),
+          files: body.files,
+        };
+        await env.CACHE.put("nlu_model_latest", JSON.stringify(manifest));
+        return json({ ok: true, version: body.version, file_count: Object.keys(body.files).length });
+      } catch (e) {
+        return json({ error: (e as Error).message }, 500);
+      }
     }
 
     // ---- STT: Transcribe audio via Workers AI Whisper ----
@@ -1978,6 +2106,23 @@ async function handleAuthUrl(
     return json({ url: authUrl, redirect_uri: callbackUrl });
   }
 
+  if (provider === "swiggy") {
+    if (!env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
+    const authUrl = (
+      `${SWIGGY_AUTH_URL}`
+      + `?client_id=${encodeURIComponent(env.SWIGGY_CLIENT_ID)}`
+      + `&redirect_uri=${encodeURIComponent(callbackUrl)}`
+      + `&response_type=code`
+      + `&scope=${encodeURIComponent(SWIGGY_SCOPES)}`
+      + (codeChallenge ? `&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256` : "")
+      + `&resource=${encodeURIComponent(SWIGGY_RESOURCE)}`
+      + `&state=${encodeURIComponent(state)}`
+      + `&access_type=offline`
+      + `&prompt=consent`
+    );
+    return json({ url: authUrl, redirect_uri: callbackUrl });
+  }
+
   return json({ error: `unsupported provider: ${provider}` }, 400);
 }
 
@@ -1988,7 +2133,7 @@ function renderOAuthHtml(
   userId: string,
   accountId = "",
 ): string {
-  const providerDisplay = provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider;
+  const providerDisplay = provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider.toLowerCase() === "swiggy" ? "Swiggy" : provider;
   const deepLink = `nexus://oauth/callback?provider=${encodeURIComponent(provider.toLowerCase())}&user_id=${encodeURIComponent(userId)}&status=${success ? "success" : "error"}`;
 
   if (!success) {
@@ -2169,6 +2314,43 @@ async function handleOAuthBrowserCallback(
           accountId = ghUser.login || userId;
         }
       } catch { /* ignore */ }
+    } else if (provider === "swiggy") {
+      if (!env.SWIGGY_CLIENT_ID) return new Response(renderOAuthHtml("Swiggy", false, "Swiggy OAuth not configured", userId), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+      const resp = await fetch(SWIGGY_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: env.SWIGGY_CLIENT_ID,
+          client_secret: env.SWIGGY_CLIENT_SECRET,
+          code,
+          redirect_uri: callbackUrl,
+          grant_type: "authorization_code",
+          resource: SWIGGY_RESOURCE,
+        }),
+      });
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy token exchange failed: ${resp.status} ${errText}`, userId), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+
+      const tokens = await resp.json() as any;
+      if (!tokens.access_token) {
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy exchange error: ${tokens.error_description || tokens.error || "No access token"}`, userId), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+
+      accessToken = tokens.access_token;
+      refreshToken = tokens.refresh_token || null;
+      expiresIn = tokens.expires_in || 3600;
+
+      // Swiggy doesn't have a standard userinfo endpoint we can use
+      accountId = userId;
     } else {
       return new Response(renderOAuthHtml(provider || "Unknown", false, `Unsupported provider: ${provider}`, userId), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -2178,7 +2360,7 @@ async function handleOAuthBrowserCallback(
     // Save in Cloudflare D1
     const now = Date.now() / 1000;
     const expiresAt = expiresIn ? now + expiresIn : 0;
-    const scopes = provider === "google" ? GOOGLE_SCOPES : GITHUB_SCOPES;
+    const scopes = provider === "google" ? GOOGLE_SCOPES : provider === "github" ? GITHUB_SCOPES : SWIGGY_SCOPES;
 
     await env.DB.prepare(
       "INSERT OR REPLACE INTO oauth_tokens (user_id, provider, access_token, refresh_token, expires_at, scopes, account_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
@@ -2187,7 +2369,8 @@ async function handleOAuthBrowserCallback(
       refreshToken, expiresAt, scopes, accountId, now
     ).run();
 
-    return new Response(renderOAuthHtml(provider === "google" ? "Google" : "GitHub", true, "", userId, accountId), {
+    const displayProvider = provider === "google" ? "Google" : provider === "github" ? "GitHub" : "Swiggy";
+    return new Response(renderOAuthHtml(displayProvider, true, "", userId, accountId), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   } catch (err) {
@@ -2270,6 +2453,26 @@ async function handleOAuthExchange(
           accountId = ghUser.login || userId;
         }
       } catch { /* ignore */ }
+    } else if (provider === "swiggy") {
+      if (!env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
+      const resp = await fetch(SWIGGY_TOKEN_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: env.SWIGGY_CLIENT_ID,
+          client_secret: env.SWIGGY_CLIENT_SECRET,
+          code,
+          code_verifier: codeVerifier,
+          redirect_uri: redirectUri,
+          grant_type: "authorization_code",
+          resource: SWIGGY_RESOURCE,
+        }),
+      });
+      if (!resp.ok) return json({ error: `Swiggy exchange failed (${resp.status})` }, 502);
+      tokens = await resp.json();
+      if (!tokens.access_token) return json({ error: tokens.error_description || tokens.error || "exchange failed" }, 400);
+      // Swiggy has no userinfo endpoint for account display
+      accountId = userId;
     } else {
       return json({ error: `unsupported provider: ${provider}` }, 400);
     }
@@ -2283,7 +2486,7 @@ async function handleOAuthExchange(
     ).bind(
       userId, provider, tokens.access_token,
       tokens.refresh_token || null, expiresAt,
-      provider === "google" ? GOOGLE_SCOPES : GITHUB_SCOPES,
+      provider === "google" ? GOOGLE_SCOPES : provider === "github" ? GITHUB_SCOPES : SWIGGY_SCOPES,
       accountId, now
     ).run();
 
@@ -2303,17 +2506,25 @@ async function handleOAuthStatus(
   const userId = url.searchParams.get("user_id") || "";
   if (!userId) return json({ error: "user_id required" }, 400);
 
-  const result = await env.DB.prepare(
-    "SELECT provider, expires_at, scopes FROM oauth_tokens WHERE user_id = ?"
-  ).bind(userId).all();
-
   const connected: Record<string, any> = {};
   const now = Date.now() / 1000;
-  for (const row of result.results || []) {
+  // We need refresh_token to determine if an expired token can be refreshed
+  const refreshResult = await env.DB.prepare(
+    "SELECT provider, expires_at, scopes, refresh_token FROM oauth_tokens WHERE user_id = ?"
+  ).bind(userId).all();
+
+  for (const row of refreshResult.results || []) {
     const expiresAt = row.expires_at as number;
+    const hasRefresh = !!row.refresh_token;
+    // Classic tokens (expires_at = 0) never expire.
+    // GitHub App tokens with a refresh_token can be refreshed even if
+    // expires_at has passed, so they are NOT reported as expired.
+    // Only report expired if the token has expired AND there is no
+    // refresh_token to renew it.
+    const isExpired = expiresAt ? (now > expiresAt && !hasRefresh) : false;
     connected[row.provider as string] = {
       connected: true,
-      expired: expiresAt ? now > expiresAt : false,
+      expired: isExpired,
       scopes: row.scopes as string,
     };
   }
@@ -2424,8 +2635,10 @@ async function handleTranscript(
   let intent = explicitIntent || await classifyIntent(req.task.request, env);
 
   // 1b. If intent is "general" but the transcript looks like a factual question,
-  // route to "search" so it goes through Wikipedia/Wikidata retrieval
-  if (intent === "general" && isSearchQuestion(req.task.request)) {
+  // route to "search" so it goes through Wikipedia/Wikidata retrieval.
+  // But skip this for greetings/identity questions ("who are you", "thank you")
+  // — those should stay "general" and get a conversational response.
+  if (intent === "general" && isSearchQuestion(req.task.request) && !isGreetingOrThanks(req.task.request)) {
     intent = "search";
   }
 
@@ -2600,14 +2813,18 @@ async function handleFastAnalyse(req: NexusRequest, env: Env, token: string): Pr
   const transcript = req.task.request;
   const userId = req.requester.id;
 
-  // Parse repo name from transcript: "analyse owner/repo" or "analyse repo"
-  const analyseMatch = transcript.match(/analy[sz]e\s+([a-zA-Z0-9_.\-]+\/[a-zA-Z0-9_.\-]+)/i);
+  // Parse repo name from transcript: "analyse owner/repo", "analyse repo owner/repo",
+  // "analyse repoName", or "analyse repo repoName"
+  // The optional "repo" word between the verb and the name must be skipped.
+  const analyseMatch = transcript.match(/analy[sz]e\s+(?:repo\s+)?([a-zA-Z0-9_.\-]+\/[a-zA-Z0-9_.\-]+)/i);
   let repoName: string | null = null;
 
   if (analyseMatch) {
     repoName = analyseMatch[1];
   } else {
-    const singleMatch = transcript.match(/analy[sz]e\s+([a-zA-Z0-9_.\-]+)/i);
+    // Single-name fallback: "analyse repoName" or "analyse repo repoName"
+    // Skip the word "repo" if it appears right after "analyse"
+    const singleMatch = transcript.match(/analy[sz]e\s+(?:repo\s+)?([a-zA-Z0-9_.\-]+)/i);
     if (singleMatch) {
       repoName = singleMatch[1];
     }
@@ -3080,6 +3297,29 @@ Return STRICT JSON only, no markdown fences:
 }`;
 
   try {
+    // ── Try free external providers first (Gemini → Groq) to save Cloudflare neurons ──
+    // Gemini Flash Lite: 1,500 req/day free, 1M context — perfect for this task
+    const geminiResp = await callGemini(prompt, env, "You are a senior software architect. Return STRICT JSON only.", 500);
+    if (geminiResp) {
+      const jsonMatch = geminiResp.text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        console.log(`[architect] Phase 1 enrichment via ${geminiResp.provider} (free, 0 neurons)`);
+        return jsonMatch[0];
+      }
+    }
+
+    // Groq fallback (14,400 req/day free)
+    const groqResp = await callGroq(prompt, env, "You are a senior software architect. Return STRICT JSON only.", 500);
+    if (groqResp) {
+      const jsonMatch = groqResp.text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        console.log(`[architect] Phase 1 enrichment via ${groqResp.provider} (free, 0 neurons)`);
+        return jsonMatch[0];
+      }
+    }
+
+    // Last resort: Cloudflare Workers AI (costs neurons)
+    console.log(`[architect] Phase 1 enrichment falling back to Cloudflare (external providers unavailable)`);
     const response = await env.AI.run(SUMMARY_MODEL as any, {
       messages: [{ role: "user", content: prompt }],
       max_tokens: 500,
@@ -3133,6 +3373,14 @@ Focus on PRODUCTION RISK, not file count. Be specific about the most dangerous p
 If there are test files, note whether they provide adequate coverage.
 Do NOT list every file — focus on the highest-risk path and why it matters.`;
 
+  // Try free external providers first (Gemini → Groq → Cloudflare cascade)
+  const synth = await synthesizeWithCascade(prompt, env,
+    "You are a senior software architect. Explain production risk concisely.", 300);
+  if (synth) {
+    console.log(`[architect] Impact narration via ${synth.provider} (${synth.model})`);
+    return synth.text;
+  }
+  // Last resort: Cloudflare summarize()
   return await summarize(prompt, env);
 }
 

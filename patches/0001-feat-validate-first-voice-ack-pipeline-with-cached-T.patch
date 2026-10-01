@@ -1,0 +1,1105 @@
+From a7ecb4ec9adafad48ff9cd2e55a6f46e80068efe Mon Sep 17 00:00:00 2001
+From: Chitkul Lakshya <chitkullakshya@gmail.com>
+Date: Thu, 3 Sep 2026 16:01:05 +0530
+Subject: [PATCH 1/7] feat: validate-first voice ack pipeline with cached TTS
+
+Eliminates false acknowledgments and audio/animation desync by:
+- Validating commands with local TS parser BEFORE saying "On it sir"
+- Pre-synthesizing 5 ack phrases in Rust for instant (<5ms) playback
+- Emitting tts:audio-started event to sync orb hide + loading show
+- Connecting loading indicator to all backend query paths
+
+Root causes fixed:
+1. isLongRunningQuery() regex fired before validation, acking garbage STT
+2. speak() took 200-1700ms to start audio, orb hid before sound
+3. Invalid commands could get both "On it sir" + "Didn't catch that"
+4. Loading indicator only showed for long-running queries, not all
+
+RAM cost: +528 KB after first speak (0.09% of idle RAM)
+New deps: 0
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ frontend/src/audio/recorder.ts  | 357 +++++++++++++++++++++++---------
+ frontend/src/audio/ttsPlayer.ts |  48 +++++
+ frontend/src/net/wsBridge.ts    |  18 +-
+ src-tauri/src/lib.rs            |  16 +-
+ src-tauri/src/tts.rs            | 260 ++++++++++++++++++++++-
+ 5 files changed, 585 insertions(+), 114 deletions(-)
+
+diff --git a/frontend/src/audio/recorder.ts b/frontend/src/audio/recorder.ts
+index df9eddb..22fee6e 100644
+--- a/frontend/src/audio/recorder.ts
++++ b/frontend/src/audio/recorder.ts
+@@ -8,9 +8,9 @@ import {
+   isLongRunningInFlight,
+   isDuplicateLongRunning,
+ } from "../net/wsBridge";
+-import { showLoadingIndicator } from "../loading/loadingController";
++import { showLoadingIndicator, hideLoadingIndicator } from "../loading/loadingController";
+ import { transcribeAudio } from "./stt";
+-import { speak } from "./ttsPlayer";
++import { speak, speakCached } from "./ttsPlayer";
+ import { parseIntent, type Intent } from "../intent/parser";
+ 
+ /**
+@@ -108,7 +108,7 @@ async function handleDuplicateOrQueuedLongRunning(transcript: string): Promise<v
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("On it sir.");
+     setLocalAckGiven(); // prevent server ack from double-speaking
+-    void speak("On it sir");
++    void speakCached("On it sir");
+     useAssistant.getState().setState("thinking");
+   } else {
+     // Different long-running command — queue it
+@@ -117,7 +117,7 @@ async function handleDuplicateOrQueuedLongRunning(transcript: string): Promise<v
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("On it sir.");
+     setLocalAckGiven(); // prevent server ack from double-speaking
+-    void speak("On it sir");
++    void speakCached("On it sir");
+     useAssistant.getState().setState("thinking");
+   }
+ }
+@@ -251,7 +251,7 @@ function correctSttTranscript(transcript: string): string {
+  * AUDIO STAYS LOCAL: Float32 samples are buffered in memory on the device.
+  * They are NOT sent to the server. When VAD detects silence, the buffered
+  * audio is downsampled to 16kHz, converted to Int16 PCM, and sent to the
+- * LOCAL in-process Moonshine STT engine (Tauri command) for transcription.
++ * LOCAL faster-whisper STT sidecar (Tauri command) for transcription.
+  * Only the resulting TEXT is sent to the remote NEXUS server.
+  *
+  * VAD (`vad.ts`) controls start/stop of the recorder.
+@@ -279,6 +279,89 @@ let nativeSampleRate = 48000;
+  *  from clearing floatBuffer mid-transcription (race condition fix). */
+ let captureInProgress = false;
+ 
++/**
++ * Shared "open architecture mapper" flow — used by both the wake-word path
++ * (finishCapture) and the VAD path (finishCaptureFromVad). Previously this
++ * ~50-line block was duplicated verbatim in both functions.
++ *
++ * Flow (validated, cached TTS, synced animations):
++ *   1. Speak "On it sir" via cached TTS (instant, <5ms)
++ *   2. Orb hides + loading shows AFTER tts:audio-started event (perfect sync)
++ *   3. Run Phase 1 + AI enrichment in background (~3-5s) while TTS plays
++ *   4. Wait for BOTH TTS and invoke to finish before hiding loading
++ *   5. Architect window opens with enriched data, speak result
++ *   6. Release captureInProgress when the assistant returns to idle
++ */
++async function handleOpenArchitect(): Promise<void> {
++  // 1. Speak "On it sir" via cached TTS — instant playback from memory
++  useAssistant.getState().setState("speaking");
++  useAssistant.getState().addAssistantMessage("On it sir, mapping the architecture...");
++  const ttsPromise = speakCached("On it sir");
++
++  // 2. Hide orb + show loading AFTER audio starts (synced via tts:audio-started event).
++  //    The event is emitted by Rust right before playback begins.
++  //    We listen for it once here, with a timeout fallback in case the event
++  //    doesn't arrive (e.g. outside Tauri or TTS fails).
++  let audioStarted = false;
++  const onAudioStarted = () => {
++    if (audioStarted) return;
++    audioStarted = true;
++    console.log("[NEXUS] architect: tts:audio-started — hiding orb + showing loading");
++    useAssistant.getState().setVisible(false);
++    setTimeout(() => useAssistant.getState().reset(), 550);
++    void showLoadingIndicator();
++  };
++
++  // Set up one-shot listener for tts:audio-started
++  let unlistenFn: (() => void) | null = null;
++  try {
++    const { listen } = await import("@tauri-apps/api/event");
++    unlistenFn = await listen<string>("tts:audio-started", () => onAudioStarted());
++  } catch {
++    // Outside Tauri — fall through to timeout fallback below
++  }
++
++  // Fallback: if tts:audio-started doesn't fire within 300ms, hide orb + show
++  // loading anyway (covers cache miss → on-demand synthesis path).
++  const fallbackTimer = setTimeout(() => {
++    if (!audioStarted) {
++      console.log("[NEXUS] architect: tts:audio-started timeout — using fallback");
++      onAudioStarted();
++    }
++  }, 300);
++
++  // 3. Run architect open flow — awaited so callers' finally blocks
++  //    don't reset captureInProgress before the window actually opens.
++  try {
++    const { invoke } = await import("@tauri-apps/api/core");
++    // Phase 1 + AI enrichment (3-5 seconds for real repo, instant for no repo)
++    const result = await invoke<number>("open_architect_with_auto_detect");
++
++    // 4. Wait for "On it sir" TTS to finish before hiding loading indicator
++    try { await ttsPromise; } catch {}
++
++    // 5. Hide loading indicator — architect window is now open
++    void hideLoadingIndicator();
++
++    // 6. Speak the appropriate response
++    if (result === 1) {
++      void speak("Here is the architecture, sir.");
++    } else if (result === 2) {
++      void speak("Found the repository, but analysis failed, sir. Opening the mapper anyway.");
++    } else {
++      void speak("Couldn't detect a repository, sir. Opening the mapper anyway.");
++    }
++  } catch (err) {
++    console.error("[NEXUS] failed to open architect window:", err);
++    try { await ttsPromise; } catch {}
++    void hideLoadingIndicator();
++    void speak("Couldn't open the architecture mapper, sir.");
++  } finally {
++    clearTimeout(fallbackTimer);
++    if (unlistenFn) { try { unlistenFn(); } catch {} }
++  }
++}
++
+ /** Retry counter for "didn't catch that" — allows up to 3 retries before
+  *  giving up and hiding the orb. (AK port) */
+ let didntCatchRetryCount = 0;
+@@ -354,7 +437,7 @@ export async function stopRecording(): Promise<void> {
+     mediaStreamSource = null;
+   }
+   if (audioCtx) {
+-    await audioCtx.close();
++    try { await audioCtx.close(); } catch { /* already closed */ }
+     audioCtx = null;
+   }
+ }
+@@ -465,6 +548,7 @@ export async function finishCapture(): Promise<void> {
+   if (captureInProgress) return;
+   captureInProgress = true;
+ 
++  try {
+   await stopRecording();
+ 
+   // SYNCHRONOUSLY copy the buffer before any await — abortCapture might
+@@ -493,13 +577,18 @@ export async function finishCapture(): Promise<void> {
+   const allPcm = downsampleAndConvert(allFloat, nativeSampleRate, 16000);
+   console.log(`[NEXUS] downsampled to ${allPcm.length} Int16 samples @ 16kHz`);
+ 
+-  // 1. Local STT — audio goes to in-process Moonshine, never to the remote server.
++  // 1. Local STT — audio goes to faster-whisper sidecar, never to the remote server.
+   useAssistant.getState().setState("thinking");
+   let transcript = await transcribeAudio(allPcm);
+ 
+   // Mic stream is no longer needed — release it now to free the hardware.
+   releaseMicStream();
+ 
++  // ─── VALIDATE-FIRST ACK PIPELINE (finishCapture) ──────────────────────
++  // The transcript is validated BEFORE acknowledging. Only valid commands
++  // get "On it sir"; invalid commands get "Didn't understand that sir".
++  // This prevents false acks on garbage STT output.
++
+   if (!transcript) {
+     console.warn("STT returned empty transcript");
+     didntCatchRetryCount++;
+@@ -507,7 +596,7 @@ export async function finishCapture(): Promise<void> {
+       console.log(`[NEXUS] didn't catch that (retry ${didntCatchRetryCount}/${MAX_DIDNT_CATCH_RETRIES}) — staying listening`);
+       useAssistant.getState().setState("speaking");
+       useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
+-      await speak("Didn't catch that sir");
++      await speakCached("Didn't catch that sir");
+       await waitForTtsIdle();
+       useAssistant.getState().setState("listening");
+       import("./vad").then(({ resumeVad }) => resumeVad()).catch(() => {});
+@@ -516,7 +605,7 @@ export async function finishCapture(): Promise<void> {
+       didntCatchRetryCount = 0;
+       useAssistant.getState().setState("speaking");
+       useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
+-      await speak("Didn't catch that sir");
++      await speakCached("Didn't catch that sir");
+       useAssistant.getState().setVisible(false);
+       setTimeout(() => useAssistant.getState().reset(), 550);
+     }
+@@ -532,11 +621,34 @@ export async function finishCapture(): Promise<void> {
+   // 2. Add the transcript to the UI.
+   useAssistant.getState().addUserMessage(transcript);
+ 
+-  // 2b. INSTANT ACK for long-running queries — BEFORE intent parsing.
+-  //     The NLU server can take 3-4s to cold-start on first use, and the
+-  //     user shouldn't wait in silence. isLongRunningQuery() is a pure
+-  //     regex check (<1ms) that catches "analyse PR/repo/branch" patterns.
+-  //     We give "On it sir" immediately, then parse + send in the background.
++  // 2b. VALIDATE FIRST — before acknowledging.
++  //     Use the local TS parser (<1ms) to quickly check if the transcript
++  //     is a valid command. Only say "On it sir" if the command is valid.
++  //     If invalid, say "Didn't understand that sir" instead.
++  //     This prevents false acks on garbage STT output.
++  const quickIntent = parseIntent(transcript);
++  const isValidCommand = quickIntent.action !== "unknown";
++
++  if (!isValidCommand) {
++    // Invalid command — say "Didn't understand that sir" and hide orb.
++    // No "On it sir", no loading indicator, no backend call.
++    console.log("[NEXUS] invalid command (quick parse):", quickIntent.action);
++    useAssistant.getState().setState("speaking");
++    useAssistant.getState().addAssistantMessage("Didn't understand that, sir.");
++    void speakCached("Didn't understand that sir").then(() => {
++      const curState = useAssistant.getState().state;
++      if (curState === "speaking") {
++        useAssistant.getState().setVisible(false);
++        setTimeout(() => useAssistant.getState().reset(), 550);
++      }
++    });
++    captureInProgress = false;
++    return;
++  }
++
++  // 2c. Valid command — check if it's long-running (dedup/queue BEFORE acking).
++  //     isLongRunningQuery() is a pure regex check (<1ms) that catches
++  //     "analyse PR/repo/branch" patterns. Only used AFTER validation.
+   const isLong = isLongRunningQuery(transcript);
+   if (isLong) {
+     // Check dedup/queue BEFORE acking
+@@ -545,27 +657,51 @@ export async function finishCapture(): Promise<void> {
+       await handleDuplicateOrQueuedLongRunning(transcript);
+       return;
+     }
+-    // Immediate ack — fire and forget, don't block on TTS
+-    console.log("[NEXUS] instant ack (before parsing): long-running query detected");
++    // Valid long-running query — ack with cached TTS (instant, <5ms).
++    // The orb hides + loading shows via the tts:audio-started event
++    // (emitted by Rust right before audio playback begins).
++    // Fallback: if the event doesn't fire within 300ms, hide + show loading.
++    console.log("[NEXUS] valid long-running query — acking with cached TTS");
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("On it sir.");
+     setLocalAckGiven(); // prevent server ack from double-speaking
+-    void speak("On it sir").then(() => {
+-      // After ack TTS finishes, hide the orb — it will reappear when
+-      // the Worker response arrives (wsBridge result handler).
+-      // Check both "speaking" (TTS just finished) and "thinking" (Rust
+-      // already emitted thinking state while TTS was playing). In both
+-      // cases, the orb should be hidden — the result handler will
+-      // re-show it when the Worker responds.
++
++    // One-shot listener for tts:audio-started to sync orb hide + loading show
++    let audioStarted = false;
++    const onAudioStarted = () => {
++      if (audioStarted) return;
++      audioStarted = true;
++      console.log("[NEXUS] tts:audio-started — hiding orb + showing loading");
+       const curState = useAssistant.getState().state;
+       if (curState === "speaking" || curState === "thinking") {
+         useAssistant.getState().setVisible(false);
+         setTimeout(() => useAssistant.getState().reset(), 550);
+-        // Show the loading indicator — the orb (wakeup animation) is
+-        // now hidden, so the user sees the loading animation at the
+-        // top-right corner while NEXUS processes the request.
+         void showLoadingIndicator();
+       }
++    };
++
++    let unlistenFn: (() => void) | null = null;
++    try {
++      const { listen } = await import("@tauri-apps/api/event");
++      unlistenFn = await listen<string>("tts:audio-started", () => onAudioStarted());
++    } catch {
++      // Outside Tauri — fall through to timeout fallback
++    }
++
++    // Fallback timer: if tts:audio-started doesn't fire within 300ms,
++    // hide orb + show loading anyway (covers cache miss → synthesis path).
++    const fallbackTimer = setTimeout(() => {
++      if (!audioStarted) {
++        console.log("[NEXUS] tts:audio-started timeout — using fallback");
++        onAudioStarted();
++      }
++    }, 300);
++
++    void speakCached("On it sir").then(() => {
++      clearTimeout(fallbackTimer);
++      if (unlistenFn) { try { unlistenFn(); } catch {} }
++      // If audio-started didn't fire (e.g. cache miss + slow synthesis),
++      // the fallback timer already handled it. This .then() is just cleanup.
+     });
+   }
+ 
+@@ -576,33 +712,9 @@ export async function finishCapture(): Promise<void> {
+   //    Uses the Rust-side enhanced parser (app registry + analyse patterns).
+   const { intent } = await parseTranscriptEnhanced(transcript);
+ 
+-  // Special case: open architecture mapper window directly
++  // Special case: open architecture mapper with auto-detect
+   if (intent.action === "open_architect") {
+-    useAssistant.getState().setState("speaking");
+-    useAssistant.getState().addAssistantMessage("Opening architecture mapper, sir.");
+-    void speak("Opening architecture mapper, sir.");
+-
+-    try {
+-      const { invoke } = await import("@tauri-apps/api/core");
+-      try {
+-        const active = await invoke<{ owner: string; repo: string } | null>("get_active_repo_url");
+-        if (active && active.owner && active.repo) {
+-          await invoke("open_architect_window", { owner: active.owner, repo: active.repo });
+-        } else {
+-          await invoke("open_architect_window");
+-        }
+-      } catch {
+-        await invoke("open_architect_window");
+-      }
+-    } catch (err) {
+-      console.error("[NEXUS] failed to open architect window:", err);
+-    }
+-
+-    await waitForTtsIdle();
+-    await new Promise((resolve) => setTimeout(resolve, 600));
+-    useAssistant.getState().setVisible(false);
+-    setTimeout(() => useAssistant.getState().reset(), 550);
+-    captureInProgress = false;
++    await handleOpenArchitect();
+     return;
+   }
+ 
+@@ -630,7 +742,7 @@ export async function finishCapture(): Promise<void> {
+     // Known local command — execute it directly.
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("Ok sir.");
+-    void speak("Ok sir.");
++    void speakCached("Ok sir");
+ 
+     try {
+       const { invoke } = await import("@tauri-apps/api/core");
+@@ -681,19 +793,29 @@ export async function finishCapture(): Promise<void> {
+   // 5. Neither local intent nor backend available.
+   useAssistant.getState().setState("speaking");
+   useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
+-  await speak("Didn't catch that sir");
++  await speakCached("Didn't catch that sir");
+   useAssistant.getState().setVisible(false);
+   setTimeout(() => useAssistant.getState().reset(), 550);
+   captureInProgress = false;
++  } catch (err) {
++    console.error("[NEXUS] finishCapture: inner function threw:", err);
++  } finally {
++    // CRITICAL: Always reset captureInProgress, even if an uncaught error
++    // was thrown. Without this, a single exception would leave
++    // captureInProgress=true forever, blocking ALL future voice commands.
++    captureInProgress = false;
++  }
+ }
+ 
+ /** Called on error / cancel: stop everything and close the session.
+  *  If finishCapture is in progress, don't clear the buffer — let it finish. */
+ export async function abortCapture(): Promise<void> {
+   // If finishCapture is mid-flight, don't interfere — it has already copied
+-  // the buffer synchronously and is processing it. Just stop the recording.
++  // the buffer synchronously and is processing it. Just stop the recording
++  // and release the capture guard so future captures aren't blocked.
+   if (captureInProgress) {
+     await stopRecording();
++    captureInProgress = false;
+     return;
+   }
+   await stopRecording();
+@@ -737,8 +859,14 @@ export async function finishCaptureFromVad(
+ 
+   try {
+     await _finishCaptureFromVadInner(audio, speculative);
++  } catch (err) {
++    console.error("[NEXUS] finishCaptureFromVad: inner function threw:", err);
+   } finally {
+     clearTimeout(safetyTimeout);
++    // CRITICAL: Always reset captureInProgress, even if the inner function
++    // threw an uncaught error. Without this, a single exception would leave
++    // captureInProgress=true forever, blocking ALL future voice commands.
++    captureInProgress = false;
+   }
+ }
+ 
+@@ -770,7 +898,7 @@ async function _finishCaptureFromVadInner(
+   // Release the mic stream — Silero's MicVAD has already captured the audio.
+   releaseMicStream();
+ 
+-  // 1. Local STT — audio goes to in-process Moonshine, never to the remote server.
++  // 1. Local STT — audio goes to faster-whisper sidecar, never to the remote server.
+   //
+   // If the VAD fired a speculative transcription when speech first dropped to
+   // silence, that request has been running during the redemption window and is
+@@ -803,7 +931,7 @@ async function _finishCaptureFromVadInner(
+       console.log(`[NEXUS] didn't catch that (retry ${didntCatchRetryCount}/${MAX_DIDNT_CATCH_RETRIES}) — staying listening`);
+       useAssistant.getState().setState("speaking");
+       useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
+-      await speak("Didn't catch that sir");
++      await speakCached("Didn't catch that sir");
+       await waitForTtsIdle();
+       useAssistant.getState().setState("listening");
+       import("./vad").then(({ resumeVad }) => resumeVad()).catch(() => {});
+@@ -812,7 +940,7 @@ async function _finishCaptureFromVadInner(
+       didntCatchRetryCount = 0;
+       useAssistant.getState().setState("speaking");
+       useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
+-      await speak("Didn't catch that sir");
++      await speakCached("Didn't catch that sir");
+       useAssistant.getState().setVisible(false);
+       setTimeout(() => useAssistant.getState().reset(), 550);
+     }
+@@ -828,11 +956,34 @@ async function _finishCaptureFromVadInner(
+   // 2. Add the transcript to the UI.
+   useAssistant.getState().addUserMessage(transcript);
+ 
+-  // 2b. INSTANT ACK for long-running queries — BEFORE intent parsing.
+-  //     The NLU server can take 3-4s to cold-start on first use, and the
+-  //     user shouldn't wait in silence. isLongRunningQuery() is a pure
+-  //     regex check (<1ms) that catches "analyse PR/repo/branch" patterns.
+-  //     We give "On it sir" immediately, then parse + send in the background.
++  // 2b. VALIDATE FIRST — before acknowledging.
++  //     Use the local TS parser (<1ms) to quickly check if the transcript
++  //     is a valid command. Only say "On it sir" if the command is valid.
++  //     If invalid, say "Didn't understand that sir" instead.
++  //     This prevents false acks on garbage STT output.
++  const quickIntent = parseIntent(transcript);
++  const isValidCommand = quickIntent.action !== "unknown";
++
++  if (!isValidCommand) {
++    // Invalid command — say "Didn't understand that sir" and hide orb.
++    // No "On it sir", no loading indicator, no backend call.
++    console.log("[NEXUS] invalid command (quick parse):", quickIntent.action);
++    useAssistant.getState().setState("speaking");
++    useAssistant.getState().addAssistantMessage("Didn't understand that, sir.");
++    void speakCached("Didn't understand that sir").then(() => {
++      const curState = useAssistant.getState().state;
++      if (curState === "speaking") {
++        useAssistant.getState().setVisible(false);
++        setTimeout(() => useAssistant.getState().reset(), 550);
++      }
++    });
++    captureInProgress = false;
++    return;
++  }
++
++  // 2c. Valid command — check if it's long-running (dedup/queue BEFORE acking).
++  //     isLongRunningQuery() is a pure regex check (<1ms) that catches
++  //     "analyse PR/repo/branch" patterns. Only used AFTER validation.
+   const isLong = isLongRunningQuery(transcript);
+   if (isLong) {
+     // Check dedup/queue BEFORE acking
+@@ -841,27 +992,51 @@ async function _finishCaptureFromVadInner(
+       await handleDuplicateOrQueuedLongRunning(transcript);
+       return;
+     }
+-    // Immediate ack — fire and forget, don't block on TTS
+-    console.log("[NEXUS] instant ack (before parsing): long-running query detected");
++    // Valid long-running query — ack with cached TTS (instant, <5ms).
++    // The orb hides + loading shows via the tts:audio-started event
++    // (emitted by Rust right before audio playback begins).
++    // Fallback: if the event doesn't fire within 300ms, hide + show loading.
++    console.log("[NEXUS] valid long-running query — acking with cached TTS");
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("On it sir.");
+     setLocalAckGiven(); // prevent server ack from double-speaking
+-    void speak("On it sir").then(() => {
+-      // After ack TTS finishes, hide the orb — it will reappear when
+-      // the Worker response arrives (wsBridge result handler).
+-      // Check both "speaking" (TTS just finished) and "thinking" (Rust
+-      // already emitted thinking state while TTS was playing). In both
+-      // cases, the orb should be hidden — the result handler will
+-      // re-show it when the Worker responds.
++
++    // One-shot listener for tts:audio-started to sync orb hide + loading show
++    let audioStarted = false;
++    const onAudioStarted = () => {
++      if (audioStarted) return;
++      audioStarted = true;
++      console.log("[NEXUS] tts:audio-started — hiding orb + showing loading");
+       const curState = useAssistant.getState().state;
+       if (curState === "speaking" || curState === "thinking") {
+         useAssistant.getState().setVisible(false);
+         setTimeout(() => useAssistant.getState().reset(), 550);
+-        // Show the loading indicator — the orb (wakeup animation) is
+-        // now hidden, so the user sees the loading animation at the
+-        // top-right corner while NEXUS processes the request.
+         void showLoadingIndicator();
+       }
++    };
++
++    let unlistenFn: (() => void) | null = null;
++    try {
++      const { listen } = await import("@tauri-apps/api/event");
++      unlistenFn = await listen<string>("tts:audio-started", () => onAudioStarted());
++    } catch {
++      // Outside Tauri — fall through to timeout fallback
++    }
++
++    // Fallback timer: if tts:audio-started doesn't fire within 300ms,
++    // hide orb + show loading anyway (covers cache miss → synthesis path).
++    const fallbackTimer = setTimeout(() => {
++      if (!audioStarted) {
++        console.log("[NEXUS] tts:audio-started timeout — using fallback");
++        onAudioStarted();
++      }
++    }, 300);
++
++    void speakCached("On it sir").then(() => {
++      clearTimeout(fallbackTimer);
++      if (unlistenFn) { try { unlistenFn(); } catch {} }
++      // If audio-started didn't fire (e.g. cache miss + slow synthesis),
++      // the fallback timer already handled it. This .then() is just cleanup.
+     });
+   }
+ 
+@@ -872,33 +1047,9 @@ async function _finishCaptureFromVadInner(
+   //    Uses the Rust-side enhanced parser (app registry + analyse patterns).
+   const { intent } = await parseTranscriptEnhanced(transcript);
+ 
+-  // Special case: open architecture mapper window directly
++  // Special case: open architecture mapper with auto-detect
+   if (intent.action === "open_architect") {
+-    useAssistant.getState().setState("speaking");
+-    useAssistant.getState().addAssistantMessage("Opening architecture mapper, sir.");
+-    void speak("Opening architecture mapper, sir.");
+-
+-    try {
+-      const { invoke } = await import("@tauri-apps/api/core");
+-      try {
+-        const active = await invoke<{ owner: string; repo: string } | null>("get_active_repo_url");
+-        if (active && active.owner && active.repo) {
+-          await invoke("open_architect_window", { owner: active.owner, repo: active.repo });
+-        } else {
+-          await invoke("open_architect_window");
+-        }
+-      } catch {
+-        await invoke("open_architect_window");
+-      }
+-    } catch (err) {
+-      console.error("[NEXUS] failed to open architect window:", err);
+-    }
+-
+-    await waitForTtsIdle();
+-    await new Promise((resolve) => setTimeout(resolve, 600));
+-    useAssistant.getState().setVisible(false);
+-    setTimeout(() => useAssistant.getState().reset(), 550);
+-    captureInProgress = false;
++    await handleOpenArchitect();
+     return;
+   }
+ 
+@@ -926,7 +1077,7 @@ async function _finishCaptureFromVadInner(
+     // Known local command — execute it directly.
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("Ok sir.");
+-    void speak("Ok sir.");
++    void speakCached("Ok sir");
+ 
+     try {
+       const { invoke } = await import("@tauri-apps/api/core");
+@@ -975,7 +1126,7 @@ async function _finishCaptureFromVadInner(
+   // 5. Neither local intent nor backend available.
+   useAssistant.getState().setState("speaking");
+   useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
+-  await speak("Didn't catch that sir");
++  await speakCached("Didn't catch that sir");
+   useAssistant.getState().setVisible(false);
+   setTimeout(() => useAssistant.getState().reset(), 550);
+   captureInProgress = false;
+diff --git a/frontend/src/audio/ttsPlayer.ts b/frontend/src/audio/ttsPlayer.ts
+index 8f1b698..d4d6224 100644
+--- a/frontend/src/audio/ttsPlayer.ts
++++ b/frontend/src/audio/ttsPlayer.ts
+@@ -176,6 +176,54 @@ export async function speak(text: string, onEnd?: () => void): Promise<void> {
+   return playKokoro(text, voiceId, speed, myGen, onEnd);
+ }
+ 
++/**
++ * Play a pre-cached TTS phrase instantly from memory.
++ *
++ * Uses the Rust `speak_cached` command which plays pre-synthesized audio
++ * (~5ms) instead of synthesizing on the fly (~200-1700ms). Falls back to
++ * `speak()` if outside Tauri or if the IPC call fails.
++ *
++ * Only works for phrases that were pre-generated at Kokoro engine load time:
++ *   "On it sir", "Didn't understand that sir", "Didn't catch that sir",
++ *   "Here is the analysis, sir", "Ok sir"
++ *
++ * The Rust side emits `tts:audio-started` before playback begins, which
++ * the frontend listens for to sync orb hide + loading indicator show.
++ */
++export async function speakCached(text: string, onEnd?: () => void): Promise<void> {
++  const meeting = await isMeetingActive();
++  if (meeting) {
++    console.log("[TTS] Suppressed — meeting mode active");
++    onEnd?.();
++    return;
++  }
++
++  const myGen = ttsGeneration;
++
++  // Check if barge-in happened
++  if (ttsGeneration !== myGen) {
++    console.log("[TTS] cached speak skipped — barge-in before playback");
++    return;
++  }
++
++  void emitTtsEvent("tts-started");
++  try {
++    await invoke("speak_cached", { text });
++  } catch (err) {
++    // Fallback to regular speak() if cached playback fails
++    if (ttsGeneration === myGen) {
++      console.warn("[TTS] cached speak failed, falling back to speak():", err);
++      await speak(text, onEnd);
++      return;
++    }
++  } finally {
++    void emitTtsEvent("tts-ended");
++    if (ttsGeneration === myGen) {
++      onEnd?.();
++    }
++  }
++}
++
+ export function stopTts(): void {
+   // Increment frontend generation — any in-flight speak() calls will
+   // see the mismatch and skip playback / onEnd.
+diff --git a/frontend/src/net/wsBridge.ts b/frontend/src/net/wsBridge.ts
+index 1039d98..89abadf 100644
+--- a/frontend/src/net/wsBridge.ts
++++ b/frontend/src/net/wsBridge.ts
+@@ -1,6 +1,6 @@
+ import { useAssistant, transition } from "../store/assistant";
+ import { speak, stopTts } from "../audio/ttsPlayer";
+-import { hideLoadingIndicator } from "../loading/loadingController";
++import { showLoadingIndicator, hideLoadingIndicator } from "../loading/loadingController";
+ 
+ /**
+  * Sidebar event helpers — emit events to the sidebar window.
+@@ -363,9 +363,10 @@ export function clearDialogContext(): void {
+  * arrives (in the "result" handler), and only if shouldShowSidebar() agrees. */
+ export async function sendTranscript(text: string): Promise<void> {
+   if (!isTauri()) return;
+-  if (!sessionOpen) {
+-    throw new Error("no backend session — local-only mode");
+-  }
++  // Try to send even if sessionOpen is false — the Rust side may have
++  // auto-opened a session from config (network::open_session_from_config)
++  // without the frontend's knowledge. If the Rust side has no session,
++  // it will return an error which we throw to the caller.
+   pendingQuery = text;
+   // If there's a pending dialog context, pass it to the Worker so it can
+   // combine the original request with this follow-up input.
+@@ -432,10 +433,19 @@ async function handle(ev: ServerEvent): Promise<void> {
+       if (ev.data) {
+         store.addAssistantMessage(ev.data);
+         store.setState("speaking");
++        // Hide orb + show loading after ack TTS finishes — the system is
++        // now "thinking" while the Worker processes the request.
++        // For long-running queries, the recorder already handles this via
++        // tts:audio-started event (localAckGiven=true suppresses this path).
+         void speak(ev.data, () => {
+           // After ack finishes, go back to thinking while server processes.
+           if (useAssistant.getState().state === "speaking") {
+             useAssistant.getState().setState("thinking");
++            // Hide orb + show loading indicator for the processing phase.
++            // The result handler will hide the loading + re-show the orb.
++            useAssistant.getState().setVisible(false);
++            setTimeout(() => useAssistant.getState().reset(), 550);
++            void showLoadingIndicator();
+           }
+         });
+       }
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index fa7ece4..afe85dd 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -37,12 +37,15 @@ mod meeting_detect;
+ mod mic_permissions;
+ mod mpris;
+ mod architect;
++mod symbol_extractor;
+ mod dyn_windows;
+ mod diagnostics;
+ #[cfg(target_os = "windows")]
+ mod dwm_corners;
+ #[cfg(target_os = "windows")]
+ mod sidebar_backdrop;
++mod volume;
++mod browser_url;
+ 
+ use tauri::{Emitter, Listener, Manager};
+ #[cfg(not(target_os = "windows"))]
+@@ -385,15 +388,21 @@ pub fn run() {
+             app.manage(meeting_state.clone());
+ 
+             // ─── STT / TTS Local Engine State ──────────────────────────
+-            let stt_state = stt::SttState { _placeholder: std::sync::Arc::new(tokio::sync::Mutex::new(())) };
++            let stt_state = stt::SttState::new();
+             app.manage(stt_state);
+ 
+             let tts_engine_arc = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+-            let tts_state = tts::TtsState { engine: tts_engine_arc.clone() };
++            let tts_cache_arc = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
++            let tts_state = tts::TtsState { engine: tts_engine_arc.clone(), cache: tts_cache_arc.clone() };
+             app.manage(tts_state);
+             // Kokoro TTS is now lazy-loaded on first speak_text call (saves ~350 MB at idle).
+             // See tts::ensure_engine_loaded().
+ 
++            // ─── Architect cancellation registry ──────────────────────
++            // Keyed by channel.id() — allows the frontend to cancel an
++            // in-progress architecture analysis via cancel_architect_analysis.
++            app.manage(architect::ArchitectCancels::new());
++
+             // Wire the meeting state into the wake engine so the audio callback
+             // can check `should_suppress_wake()` on every chunk.
+             #[cfg(feature = "wakeword-oww")]
+@@ -683,15 +692,18 @@ pub fn run() {
+             stt::transcribe_audio,
+             stt::stt_status,
+             tts::speak_text,
++            tts::speak_cached,
+             tts::stop_tts,
+             diagnostics::nexus_diagnostics,
+             command_executor::execute_command,
+             intent_parser::parse_transcript,
+             architect::get_active_repo_url,
+             architect::open_architect_window,
++            architect::open_architect_with_auto_detect,
+             architect::get_pending_architect_repo,
+             architect::analyze_repo_phase1,
+             architect::analyze_repo_deep,
++            architect::cancel_architect_analysis,
+             architect::query_impact,
+             architect::enrich_phase1,
+             architect::analyze_repo_fast,
+diff --git a/src-tauri/src/tts.rs b/src-tauri/src/tts.rs
+index a7253ec..33d0700 100644
+--- a/src-tauri/src/tts.rs
++++ b/src-tauri/src/tts.rs
+@@ -1,20 +1,39 @@
+ use crate::meeting_detect::MeetingState;
+ use kokoro_micro::TtsEngine;
+ use rodio::{buffer::SamplesBuffer, OutputStream, Sink};
++use std::collections::HashMap;
+ use std::sync::atomic::{AtomicUsize, Ordering};
+ use std::sync::Arc;
+ use tokio::sync::Mutex;
+-use tauri::State;
++use tauri::{Emitter, State};
+ 
+ pub struct TtsState {
+     pub engine: Arc<Mutex<Option<TtsEngine>>>,
++    /// Pre-synthesized short phrases for instant acknowledgment playback.
++    /// Keyed by the exact phrase text. Stores 24kHz mono f32 PCM samples.
++    pub cache: Arc<Mutex<HashMap<String, Vec<f32>>>>,
+ }
+ 
++/// Phrases that are pre-synthesized on first Kokoro load for instant playback.
++/// These are the high-frequency acknowledgment/error phrases that must play
++    /// with zero synthesis delay to feel natural.
++const CACHED_PHRASES: &[&str] = &[
++    "On it sir",
++    "Didn't understand that sir",
++    "Didn't catch that sir",
++    "Here is the analysis, sir",
++    "Ok sir",
++];
++
+ /// Lazily initialize the Kokoro TTS engine on first use.
+ /// Called from `speak_text` when the engine is `None`.
+ /// Saves ~350 MB RAM at idle by not loading Kokoro at boot.
+ /// First TTS call takes ~1.7s extra (one-time model load); subsequent calls are instant.
+-async fn ensure_engine_loaded(engine_arc: &Arc<Mutex<Option<TtsEngine>>>) -> Result<(), String> {
++/// Also pre-synthesizes cached acknowledgment phrases for instant playback.
++async fn ensure_engine_loaded(
++    engine_arc: &Arc<Mutex<Option<TtsEngine>>>,
++    cache_arc: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
++) -> Result<(), String> {
+     // Fast path: already loaded
+     if engine_arc.lock().await.is_some() {
+         return Ok(());
+@@ -60,6 +79,12 @@ async fn ensure_engine_loaded(engine_arc: &Arc<Mutex<Option<TtsEngine>>>) -> Res
+                 "tts: Kokoro engine lazy-loaded in {:.2}s",
+                 start_time.elapsed().as_secs_f32()
+             );
++
++            // Pre-synthesize cached phrases for instant acknowledgment playback.
++            // This runs once, right after the engine loads, so all subsequent
++            // speak_cached() calls are instant (<5ms) instead of 200-1700ms.
++            pregenerate_cache(engine_arc, cache_arc).await;
++
+             Ok(())
+         }
+         Err(e) => {
+@@ -69,6 +94,51 @@ async fn ensure_engine_loaded(engine_arc: &Arc<Mutex<Option<TtsEngine>>>) -> Res
+     }
+ }
+ 
++/// Pre-synthesize cached phrases using the loaded Kokoro engine.
++/// Runs once after engine load. Each phrase is synthesized at the default
++/// speed and stored as f32 PCM samples. Total memory: ~528 KB for 5 phrases.
++async fn pregenerate_cache(
++    engine_arc: &Arc<Mutex<Option<TtsEngine>>>,
++    cache_arc: &Arc<Mutex<HashMap<String, Vec<f32>>>>,
++) {
++    let cache_start = std::time::Instant::now();
++    const KOKORO_INTERNAL_SPEED_SCALE: f32 = 0.65;
++    let engine_spd = (1.15_f32 / KOKORO_INTERNAL_SPEED_SCALE).clamp(0.5, 3.0);
++
++    let mut cached_count = 0;
++    for phrase in CACHED_PHRASES {
++        let p = phrase.to_string();
++        let ea = engine_arc.clone();
++        let result = tokio::task::spawn_blocking(move || {
++            let mut lock = ea.blocking_lock();
++            if let Some(engine) = lock.as_mut() {
++                engine.synthesize_with_options(&p, Some("af_sky"), engine_spd, 1.0, Some("en"))
++            } else {
++                Err("TTS Engine not initialized".to_string())
++            }
++        })
++        .await;
++
++        match result {
++            Ok(Ok(audio)) => {
++                cache_arc.lock().await.insert(phrase.to_string(), audio);
++                cached_count += 1;
++            }
++            Ok(Err(e)) => {
++                tracing::warn!("tts: cache pre-gen failed for '{}': {}", phrase, e);
++            }
++            Err(e) => {
++                tracing::warn!("tts: cache pre-gen task panicked for '{}': {}", phrase, e);
++            }
++        }
++    }
++    tracing::info!(
++        "tts: cached {} phrases in {:.2}s",
++        cached_count,
++        cache_start.elapsed().as_secs_f32()
++    );
++}
++
+ /// Global generation counter: incremented by `stop_tts` to signal the playback thread
+ /// to stop the current audio immediately. Using a generation counter prevents race
+ /// conditions where a new speech request clears a boolean flag before the previous
+@@ -94,6 +164,7 @@ pub async fn speak_text(
+     speed: Option<f32>,
+     state: State<'_, TtsState>,
+     meeting: State<'_, Arc<MeetingState>>,
++    app: tauri::AppHandle,
+ ) -> Result<(), String> {
+     tracing::info!("tts: speaking '{}'", text);
+ 
+@@ -107,7 +178,8 @@ pub async fn speak_text(
+     // 2. Lazy-load Kokoro engine on first speak (saves ~350 MB at idle).
+     //    First call: ~1.7s model load. Subsequent calls: instant (fast path).
+     let engine_arc = state.engine.clone();
+-    ensure_engine_loaded(&engine_arc).await?;
++    let cache_arc = state.cache.clone();
++    ensure_engine_loaded(&engine_arc, &cache_arc).await?;
+     let voice_id = match voice.as_deref() {
+         Some("default") | None => "af_sky".to_string(),
+         Some(v) => v.to_string(),
+@@ -116,6 +188,11 @@ pub async fn speak_text(
+     const KOKORO_INTERNAL_SPEED_SCALE: f32 = 0.65;
+     let engine_spd = (spd / KOKORO_INTERNAL_SPEED_SCALE).clamp(0.5, 3.0);
+ 
++    // Read TTS volume setting (0-100, default 75).
++    // 0 means "disabled" — don't adjust system volume.
++    let tts_volume_pct = read_tts_volume(&app);
++
++    let text_for_event = text.clone();
+     let audio = tokio::task::spawn_blocking(move || {
+         let mut lock = engine_arc.blocking_lock();
+         if let Some(engine) = lock.as_mut() {
+@@ -136,7 +213,20 @@ pub async fn speak_text(
+         return Ok(());
+     }
+ 
+-    // 3. Play audio using spawn_blocking so the tokio runtime can still
++    // 3. Save current system volume and set to TTS volume (after synthesis,
++    //    before playback — so if synthesis fails, volume is never changed).
++    let volume_changed = if tts_volume_pct > 0 {
++        let target = tts_volume_pct as f32 / 100.0;
++        crate::volume::save_and_set_volume(target)
++    } else {
++        false
++    };
++
++    // 4. Emit tts:audio-started event so the frontend can sync the orb
++    //    hide + loading indicator show with actual audio playback.
++    let _ = app.emit("tts:audio-started", &text_for_event);
++
++    // 5. Play audio using spawn_blocking so the tokio runtime can still
+     //    process other commands (like stop_tts) while audio plays.
+     //    The old code used std::thread::spawn().join() which BLOCKED the
+     //    tokio worker thread, preventing stop_tts from executing.
+@@ -180,9 +270,169 @@ pub async fn speak_text(
+         Err("Audio thread panicked".to_string())
+     });
+ 
+-    // 4. Grace period for acoustic settling before resuming wake word detection
++    // 6. Restore system volume to the saved value (in ALL exit paths:
++    //    normal completion, barge-in, rodio error, thread panic).
++    if volume_changed {
++        crate::volume::restore_volume();
++    }
++
++    // 7. Grace period for acoustic settling before resuming wake word detection
+     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+     meeting.set_tts_playing(false);
+ 
+     play_result
+ }
++
++/// IPC: Play a pre-cached TTS phrase instantly from memory.
++///
++/// Falls back to `speak_text` if the phrase is not in the cache (e.g. if
++/// Kokoro failed to load or the cache hasn't been generated yet).
++/// Emits `tts:audio-started` event before playback starts, same as `speak_text`.
++#[tauri::command]
++pub async fn speak_cached(
++    text: String,
++    state: State<'_, TtsState>,
++    meeting: State<'_, Arc<MeetingState>>,
++    app: tauri::AppHandle,
++) -> Result<(), String> {
++    tracing::info!("tts: speaking cached '{}'", text);
++
++    // 1. Mark TTS as playing to suppress wake word self-trigger
++    meeting.set_tts_playing(true);
++
++    let my_generation = TTS_GENERATION.load(Ordering::SeqCst);
++
++    // 2. Try to get the cached audio. If not in cache, fall back to speak_text.
++    let cache_arc = state.cache.clone();
++    let cached_audio = {
++        let cache = cache_arc.lock().await;
++        cache.get(&text).cloned()
++    };
++
++    let audio = match cached_audio {
++        Some(a) => {
++            tracing::info!("tts: cache hit for '{}'", text);
++            a
++        }
++        None => {
++            // Cache miss — ensure engine is loaded, then synthesize on the fly.
++            // This is the slow path (~200-1700ms) but it's correct.
++            tracing::info!("tts: cache miss for '{}', synthesizing on demand", text);
++            let engine_arc = state.engine.clone();
++            ensure_engine_loaded(&engine_arc, &cache_arc).await?;
++
++            const KOKORO_INTERNAL_SPEED_SCALE: f32 = 0.65;
++            let engine_spd = (1.15_f32 / KOKORO_INTERNAL_SPEED_SCALE).clamp(0.5, 3.0);
++            let text_clone = text.clone();
++            let ea = engine_arc.clone();
++            tokio::task::spawn_blocking(move || {
++                let mut lock = ea.blocking_lock();
++                if let Some(engine) = lock.as_mut() {
++                    engine.synthesize_with_options(&text_clone, Some("af_sky"), engine_spd, 1.0, Some("en"))
++                        .map_err(|e| format!("TTS synthesis error: {}", e))
++                } else {
++                    Err("TTS Engine not initialized".to_string())
++                }
++            })
++            .await
++            .map_err(|e| format!("TTS task panicked: {}", e))??
++        }
++    };
++
++    // Check if stop was requested during synthesis
++    if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
++        tracing::info!("tts: stop requested before cached playback, skipping");
++        meeting.set_tts_playing(false);
++        return Ok(());
++    }
++
++    // 3. Read TTS volume setting
++    let tts_volume_pct = read_tts_volume(&app);
++    let volume_changed = if tts_volume_pct > 0 {
++        let target = tts_volume_pct as f32 / 100.0;
++        crate::volume::save_and_set_volume(target)
++    } else {
++        false
++    };
++
++    // 4. Emit tts:audio-started event so the frontend can sync animations.
++    let _ = app.emit("tts:audio-started", &text);
++
++    // 5. Play audio from cached samples
++    let play_result = tokio::task::spawn_blocking(move || {
++        match OutputStream::try_default() {
++            Ok((_stream, handle)) => {
++                match Sink::try_new(&handle) {
++                    Ok(sink) => {
++                        let source = SamplesBuffer::new(1, 24000, audio);
++                        sink.append(source);
++                        while !sink.empty() {
++                            if TTS_GENERATION.load(Ordering::SeqCst) > my_generation {
++                                sink.stop();
++                                tracing::info!("tts: cached playback stopped by user (barge-in)");
++                                return Ok(());
++                            }
++                            std::thread::sleep(std::time::Duration::from_millis(20));
++                        }
++                        tracing::info!("tts: cached audio playback completed");
++                        Ok(())
++                    }
++                    Err(e) => {
++                        tracing::error!("tts: failed to create audio sink: {}", e);
++                        Err(format!("Failed to create audio sink: {}", e))
++                    }
++                }
++            }
++            Err(e) => {
++                tracing::error!("tts: failed to open audio output: {}", e);
++                Err(format!("Failed to get audio output stream: {}", e))
++            }
++        }
++    })
++    .await
++    .unwrap_or_else(|_| {
++        tracing::error!("tts: cached audio thread panicked");
++        Err("Audio thread panicked".to_string())
++    });
++
++    // 6. Restore volume
++    if volume_changed {
++        crate::volume::restore_volume();
++    }
++
++    // 7. Grace period
++    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
++    meeting.set_tts_playing(false);
++
++    play_result
++}
++
++/// Read the TTS volume setting from settings.json.
++/// Returns 0-100. 0 means "disabled" (don't adjust system volume).
++fn read_tts_volume(app: &tauri::AppHandle) -> u8 {
++    use tauri::Manager;
++    let dir = match app.path().app_data_dir() {
++        Ok(d) => d,
++        Err(_) => return 75, // default
++    };
++    let path = dir.join("settings.json");
++    if !path.exists() {
++        return 75; // default
++    }
++    let content = match std::fs::read_to_string(&path) {
++        Ok(c) => c,
++        Err(_) => return 75,
++    };
++    // Parse just the tts_volume field — don't deserialize the whole struct
++    // to avoid coupling to the NexusSettings struct in the tts module.
++    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
++        if let Some(vol) = json.get("ttsVolume").and_then(|v| v.as_u64()) {
++            return vol as u8;
++        }
++        // Also check snake_case in case of older format
++        if let Some(vol) = json.get("tts_volume").and_then(|v| v.as_u64()) {
++            return vol as u8;
++        }
++    }
++    75 // default
++}
+-- 
+2.52.0.windows.1
+

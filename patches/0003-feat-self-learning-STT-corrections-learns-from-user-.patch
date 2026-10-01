@@ -1,0 +1,751 @@
+From c4e5049881a372dbd3856592860aa97c0582100e Mon Sep 17 00:00:00 2001
+From: Chitkul Lakshya <chitkullakshya@gmail.com>
+Date: Thu, 3 Sep 2026 16:53:09 +0530
+Subject: [PATCH 3/7] =?UTF-8?q?feat:=20self-learning=20STT=20corrections?=
+ =?UTF-8?q?=20=E2=80=94=20learns=20from=20user=20repetition?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds a self-learning correction system that detects when the user repeats
+a misheard command and learns the correction automatically. Zero RAM cost.
+
+Rust side (stt_learning.rs — new file):
+- SttLearningState: tracks pending failures + learned corrections
+- log_failed_transcript: called when parser can't handle STT output
+- log_successful_transcript: compares with recent failure, learns diff
+- get_learned_corrections: returns auto-apply corrections to frontend
+- Storage: %APPDATA%/com.nexus.assistant/learned_corrections.json
+- Learning rules:
+  * Only learn when 1-2 words differ at same positions
+  * Require 3 consistent corrections before auto-applying
+  * Only learn within 30-second window (user repeated quickly)
+  * Skip words < 3 chars or Levenshtein distance > 3
+  * Context-aware: stores word-before for position-specific corrections
+- 11 unit tests (word_diff, levenshtein, edge cases)
+
+Frontend side (recorder.ts):
+- loadLearnedCorrections(): loads auto-apply corrections at startup
+- logFailedTranscript/logSuccessfulTranscript: IPC calls to Rust
+- correctSttTranscript(): applies learned corrections after hardcoded ones
+- Both capture paths (finishCapture + finishCaptureFromVad) log
+  failures and successes
+
+Tests: 104 Rust tests pass (93 existing + 11 new), 10 offline command
+tests pass, 808 frontend modules build.
+
+RAM cost: ~1-10 KB (in-memory HashMap + JSON file)
+
+Generated with [Devin](https://devin.ai)
+
+Co-Authored-By: Devin <158243242+devin-ai-integration[bot]@users.noreply.github.com>
+---
+ frontend/src/audio/recorder.ts |  79 +++++
+ src-tauri/src/lib.rs           |   9 +
+ src-tauri/src/stt_learning.rs  | 521 +++++++++++++++++++++++++++++++++
+ 3 files changed, 609 insertions(+)
+ create mode 100644 src-tauri/src/stt_learning.rs
+
+diff --git a/frontend/src/audio/recorder.ts b/frontend/src/audio/recorder.ts
+index 22fee6e..6d61f2f 100644
+--- a/frontend/src/audio/recorder.ts
++++ b/frontend/src/audio/recorder.ts
+@@ -13,6 +13,58 @@ import { transcribeAudio } from "./stt";
+ import { speak, speakCached } from "./ttsPlayer";
+ import { parseIntent, type Intent } from "../intent/parser";
+ 
++// ─── Self-Learning STT Corrections ──────────────────────────────────
++// Learned corrections are loaded from the Rust side at startup and applied
++// in correctSttTranscript() alongside the hardcoded corrections.
++// Corrections are learned when the user repeats a misheard command —
++// see stt_learning.rs for the learning logic.
++
++interface LearnedCorrection {
++  from: string;
++  to: string;
++  context_before: string;
++  count: number;
++  auto_apply: boolean;
++}
++
++let learnedCorrections: LearnedCorrection[] = [];
++
++/** Load auto-apply corrections from the Rust side at startup. */
++async function loadLearnedCorrections(): Promise<void> {
++  try {
++    const { invoke } = await import("@tauri-apps/api/core");
++    learnedCorrections = await invoke<LearnedCorrection[]>("get_learned_corrections");
++    if (learnedCorrections.length > 0) {
++      console.log(`[NEXUS] loaded ${learnedCorrections.length} learned STT corrections`);
++    }
++  } catch {
++    // Outside Tauri or no corrections yet — fine
++  }
++}
++
++/** Log a failed transcript to the Rust learning system. */
++async function logFailedTranscript(transcript: string): Promise<void> {
++  try {
++    const { invoke } = await import("@tauri-apps/api/core");
++    await invoke("log_failed_transcript", { transcript });
++  } catch {
++    // Outside Tauri — fine
++  }
++}
++
++/** Log a successful transcript to the Rust learning system. */
++async function logSuccessfulTranscript(transcript: string): Promise<void> {
++  try {
++    const { invoke } = await import("@tauri-apps/api/core");
++    await invoke("log_successful_transcript", { transcript });
++  } catch {
++    // Outside Tauri — fine
++  }
++}
++
++// Load corrections at module init (fire and forget)
++void loadLearnedCorrections();
++
+ /**
+  * Parse a transcript using the Rust-side enhanced intent parser.
+  *
+@@ -239,6 +291,27 @@ function correctSttTranscript(transcript: string): string {
+     }
+   }
+ 
++  // Apply learned corrections (from user repetition — self-learning).
++  // These are context-aware: only replace a word if the word before it
++  // matches the learned context.
++  if (learnedCorrections.length > 0) {
++    const words = t.split(/\s+/);
++    for (let i = 0; i < words.length; i++) {
++      const contextBefore = i > 0 ? words[i - 1].toLowerCase() : "";
++      const word = words[i].toLowerCase();
++      for (const correction of learnedCorrections) {
++        if (correction.auto_apply && word === correction.from.toLowerCase()) {
++          if (correction.context_before === "" || contextBefore === correction.context_before.toLowerCase()) {
++            words[i] = correction.to;
++            logFixes.push(`learned:${correction.from}→${correction.to}`);
++            break; // Only apply one correction per word
++          }
++        }
++      }
++    }
++    t = words.join(" ");
++  }
++
+   if (logFixes.length > 0 || t !== transcript) {
+     console.log(`[NEXUS] STT correction: "${transcript}" → "${t}"`);
+   }
+@@ -633,6 +706,7 @@ export async function finishCapture(): Promise<void> {
+     // Invalid command — say "Didn't understand that sir" and hide orb.
+     // No "On it sir", no loading indicator, no backend call.
+     console.log("[NEXUS] invalid command (quick parse):", quickIntent.action);
++    void logFailedTranscript(transcript);
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("Didn't understand that, sir.");
+     void speakCached("Didn't understand that sir").then(() => {
+@@ -662,6 +736,7 @@ export async function finishCapture(): Promise<void> {
+     // (emitted by Rust right before audio playback begins).
+     // Fallback: if the event doesn't fire within 300ms, hide + show loading.
+     console.log("[NEXUS] valid long-running query — acking with cached TTS");
++    void logSuccessfulTranscript(transcript);
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("On it sir.");
+     setLocalAckGiven(); // prevent server ack from double-speaking
+@@ -740,6 +815,7 @@ export async function finishCapture(): Promise<void> {
+     return;
+   } else if (intent.action !== "unknown") {
+     // Known local command — execute it directly.
++    void logSuccessfulTranscript(transcript);
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("Ok sir.");
+     void speakCached("Ok sir");
+@@ -968,6 +1044,7 @@ async function _finishCaptureFromVadInner(
+     // Invalid command — say "Didn't understand that sir" and hide orb.
+     // No "On it sir", no loading indicator, no backend call.
+     console.log("[NEXUS] invalid command (quick parse):", quickIntent.action);
++    void logFailedTranscript(transcript);
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("Didn't understand that, sir.");
+     void speakCached("Didn't understand that sir").then(() => {
+@@ -997,6 +1074,7 @@ async function _finishCaptureFromVadInner(
+     // (emitted by Rust right before audio playback begins).
+     // Fallback: if the event doesn't fire within 300ms, hide + show loading.
+     console.log("[NEXUS] valid long-running query — acking with cached TTS");
++    void logSuccessfulTranscript(transcript);
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("On it sir.");
+     setLocalAckGiven(); // prevent server ack from double-speaking
+@@ -1075,6 +1153,7 @@ async function _finishCaptureFromVadInner(
+     return;
+   } else if (intent.action !== "unknown") {
+     // Known local command — execute it directly.
++    void logSuccessfulTranscript(transcript);
+     useAssistant.getState().setState("speaking");
+     useAssistant.getState().addAssistantMessage("Ok sir.");
+     void speakCached("Ok sir");
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 2774e6d..d06c17f 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -28,6 +28,7 @@ mod nlu_client;
+ mod lazy_nlu;
+ mod lazy_stt;
+ mod stt;
++mod stt_learning;
+ mod tts;
+ // voice_profile: speaker embedding via sherpa-onnx — only needed with wakeword-sherpa.
+ // Verification is not yet wired into wakeword_oww (see AGENTS.md known limitations).
+@@ -399,6 +400,11 @@ pub fn run() {
+             // Piper TTS is lazy-loaded on first speak_text call (saves ~80 MB at idle).
+             // See tts::ensure_engine_loaded().
+ 
++            // ─── STT Self-Learning State ──────────────────────────────
++            // Learns corrections from user repetition. ~1-10 KB RAM.
++            // See stt_learning module.
++            app.manage(stt_learning::SttLearningState::new());
++
+             // ─── Architect cancellation registry ──────────────────────
+             // Keyed by channel.id() — allows the frontend to cancel an
+             // in-progress architecture analysis via cancel_architect_analysis.
+@@ -695,6 +701,9 @@ pub fn run() {
+             tts::speak_text,
+             tts::speak_cached,
+             tts::stop_tts,
++            stt_learning::log_failed_transcript,
++            stt_learning::log_successful_transcript,
++            stt_learning::get_learned_corrections,
+             diagnostics::nexus_diagnostics,
+             command_executor::execute_command,
+             intent_parser::parse_transcript,
+diff --git a/src-tauri/src/stt_learning.rs b/src-tauri/src/stt_learning.rs
+new file mode 100644
+index 0000000..a2e0757
+--- /dev/null
++++ b/src-tauri/src/stt_learning.rs
+@@ -0,0 +1,521 @@
++//! Self-learning STT correction system.
++//!
++//! When STT mishears a word and the parser fails, the user typically repeats
++//! the command with the correct word. This module detects that pattern and
++//! learns the correction automatically.
++//!
++//! Flow:
++//!   1. STT produces transcript → parser fails → log_failed_transcript()
++//!   2. User repeats → STT produces correct transcript → parser succeeds
++//!   3. log_successful_transcript() compares with recent failure
++//!   4. If 1-2 words differ at the same positions → learn the correction
++//!   5. After 3 consistent corrections → auto_apply = true
++//!   6. Frontend loads auto_apply corrections at startup and applies them
++//!
++//! Storage: %APPDATA%/com.nexus.assistant/learned_corrections.json
++//! RAM cost: ~1-10 KB (in-memory HashMap)
++
++use serde::{Deserialize, Serialize};
++use std::collections::HashMap;
++use std::sync::Arc;
++use std::time::{Instant, SystemTime, UNIX_EPOCH};
++use tokio::sync::Mutex;
++
++/// Number of consistent corrections required before auto-applying.
++const LEARN_THRESHOLD: u32 = 3;
++
++/// Time window (seconds) within which a success is considered a correction
++/// of a recent failure. If the user waits too long, they probably said
++/// something unrelated.
++const CORRECTION_WINDOW_SECS: u64 = 30;
++
++/// Maximum number of differing word positions for a correction to be learned.
++/// If too many words differ, the user probably said something completely
++/// different, not a correction.
++const MAX_DIFF_POSITIONS: usize = 2;
++
++/// A single learned correction entry.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct LearnedCorrection {
++    /// The misheard word (what STT produced).
++    pub from: String,
++    /// The correct word (what the user actually said).
++    pub to: String,
++    /// The word immediately before the corrected word, for context.
++    /// Empty string if the corrected word was at the start.
++    pub context_before: String,
++    /// Number of times this correction has been observed.
++    pub count: u32,
++    /// Whether this correction should be auto-applied.
++    /// Set to true after `LEARN_THRESHOLD` consistent observations.
++    pub auto_apply: bool,
++    /// Unix timestamp of first observation.
++    pub first_seen: u64,
++    /// Unix timestamp of most recent observation.
++    pub last_seen: u64,
++}
++
++/// The JSON file structure.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++struct CorrectionFile {
++    corrections: Vec<LearnedCorrection>,
++}
++
++impl Default for CorrectionFile {
++    fn default() -> Self {
++        Self {
++            corrections: Vec::new(),
++        }
++    }
++}
++
++/// In-memory state for the learning system.
++pub struct SttLearningState {
++    /// The most recent failed transcript + timestamp.
++    /// Used to compare with the next successful transcript.
++    pending_failure: Arc<Mutex<Option<PendingFailure>>>,
++    /// All learned corrections, keyed by "context_before|from" for fast lookup.
++    corrections: Arc<Mutex<HashMap<String, LearnedCorrection>>>,
++    /// Path to the JSON file.
++    file_path: std::path::PathBuf,
++}
++
++#[derive(Debug, Clone)]
++struct PendingFailure {
++    transcript: String,
++    timestamp: Instant,
++}
++
++impl SttLearningState {
++    pub fn new() -> Self {
++        let file_path = get_corrections_file_path();
++
++        // Load existing corrections from file
++        let corrections = load_corrections(&file_path);
++        let corrections_map = corrections
++            .corrections
++            .into_iter()
++            .map(|c| (make_key(&c.context_before, &c.from), c))
++            .collect::<HashMap<_, _>>();
++
++        tracing::info!(
++            "stt_learning: loaded {} corrections from {}",
++            corrections_map.len(),
++            file_path.display()
++        );
++
++        Self {
++            pending_failure: Arc::new(Mutex::new(None)),
++            corrections: Arc::new(Mutex::new(corrections_map)),
++            file_path,
++        }
++    }
++
++    /// Log a failed transcript. Called when the parser can't handle the STT output.
++    pub async fn log_failure(&self, transcript: &str) {
++        let mut pending = self.pending_failure.lock().await;
++        *pending = Some(PendingFailure {
++            transcript: transcript.to_lowercase(),
++            timestamp: Instant::now(),
++        });
++        tracing::info!("stt_learning: logged failure: \"{}\"", transcript);
++    }
++
++    /// Log a successful transcript. Called when the parser succeeds.
++    /// If there's a recent failure, compares the two and learns any corrections.
++    pub async fn log_success(&self, transcript: &str) {
++        let pending = {
++            let mut pending_guard = self.pending_failure.lock().await;
++            pending_guard.take()
++        };
++
++        let Some(failure) = pending else {
++            // No recent failure — nothing to learn
++            return;
++        };
++
++        // Check time window
++        if failure.timestamp.elapsed().as_secs() > CORRECTION_WINDOW_SECS {
++            tracing::debug!("stt_learning: success outside correction window, ignoring");
++            return;
++        }
++
++        let success_text = transcript.to_lowercase();
++
++        // Diff the two transcripts
++        let diffs = word_diff(&failure.transcript, &success_text);
++
++        if diffs.is_empty() {
++            // No differences — the failure was probably a parser issue, not STT
++            return;
++        }
++
++        if diffs.len() > MAX_DIFF_POSITIONS {
++            tracing::debug!(
++                "stt_learning: {} positions differ (max {}), not a correction",
++                diffs.len(),
++                MAX_DIFF_POSITIONS
++            );
++            return;
++        }
++
++        // Learn each differing word pair
++        let mut learned = Vec::new();
++        for diff in &diffs {
++            let context_before = diff.context_before.clone();
++            let from = diff.from_word.clone();
++            let to = diff.to_word.clone();
++
++            // Skip if both words are identical (shouldn't happen, but guard)
++            if from == to {
++                continue;
++            }
++
++            // Skip very short words (1-2 chars) — likely noise
++            if from.len() < 3 || to.len() < 3 {
++                continue;
++            }
++
++            // Skip if the words are too different (Levenshtein > 3)
++            let dist = levenshtein(&from, &to);
++            if dist > 3 {
++                tracing::debug!(
++                    "stt_learning: \"{}\" → \"{}\" distance {} too large, skipping",
++                    from,
++                    to,
++                    dist
++                );
++                continue;
++            }
++
++            let key = make_key(&context_before, &from);
++            let mut corrections = self.corrections.lock().await;
++            let entry = corrections.entry(key).or_insert(LearnedCorrection {
++                from: from.clone(),
++                to: to.clone(),
++                context_before: context_before.clone(),
++                count: 0,
++                auto_apply: false,
++                first_seen: now_unix(),
++                last_seen: now_unix(),
++            });
++
++            entry.count += 1;
++            entry.last_seen = now_unix();
++
++            if entry.count >= LEARN_THRESHOLD && !entry.auto_apply {
++                entry.auto_apply = true;
++                tracing::info!(
++                    "stt_learning: correction \"{}\" → \"{}\" (context: \"{}\") now auto-apply (count={})",
++                    entry.from,
++                    entry.to,
++                    entry.context_before,
++                    entry.count
++                );
++            } else {
++                tracing::info!(
++                    "stt_learning: observed \"{}\" → \"{}\" (context: \"{}\") count={}/{}",
++                    entry.from,
++                    entry.to,
++                    entry.context_before,
++                    entry.count,
++                    LEARN_THRESHOLD
++                );
++            }
++
++            learned.push(entry.clone());
++        }
++
++        // Save to file if we learned anything
++        if !learned.is_empty() {
++            self.save_to_file().await;
++        }
++    }
++
++    /// Get all corrections that are ready for auto-apply.
++    pub async fn get_auto_apply_corrections(&self) -> Vec<LearnedCorrection> {
++        let corrections = self.corrections.lock().await;
++        corrections
++            .values()
++            .filter(|c| c.auto_apply)
++            .cloned()
++            .collect()
++    }
++
++    /// Save corrections to the JSON file.
++    async fn save_to_file(&self) {
++        let corrections = self.corrections.lock().await;
++        let file_data = CorrectionFile {
++            corrections: corrections.values().cloned().collect(),
++        };
++
++        // Ensure parent dir exists
++        if let Some(parent) = self.file_path.parent() {
++            if !parent.exists() {
++                if let Err(e) = std::fs::create_dir_all(parent) {
++                    tracing::warn!("stt_learning: failed to create dir: {}", e);
++                    return;
++                }
++            }
++        }
++
++        match serde_json::to_string_pretty(&file_data) {
++            Ok(json) => {
++                if let Err(e) = std::fs::write(&self.file_path, json) {
++                    tracing::warn!("stt_learning: failed to write file: {}", e);
++                }
++            }
++            Err(e) => {
++                tracing::warn!("stt_learning: failed to serialize: {}", e);
++            }
++        }
++    }
++}
++
++/// A single word-level difference between two transcripts.
++#[derive(Debug)]
++struct WordDiff {
++    /// Word before the differing position (context). Empty if position 0.
++    context_before: String,
++    /// The word in the failed transcript.
++    from_word: String,
++    /// The word in the successful transcript.
++    to_word: String,
++}
++
++/// Compare two transcripts word-by-word and find positions where they differ.
++/// Only returns diffs where the words are at the same position in both transcripts.
++fn word_diff(failed: &str, succeeded: &str) -> Vec<WordDiff> {
++    let failed_words: Vec<&str> = failed.split_whitespace().collect();
++    let succeeded_words: Vec<&str> = succeeded.split_whitespace().collect();
++
++    // If word counts differ by more than 1, it's probably not a simple correction
++    if failed_words.len().abs_diff(succeeded_words.len()) > 1 {
++        return Vec::new();
++    }
++
++    let mut diffs = Vec::new();
++    let max_len = failed_words.len().max(succeeded_words.len());
++
++    for i in 0..max_len {
++        let f_word = failed_words.get(i).copied().unwrap_or("");
++        let s_word = succeeded_words.get(i).copied().unwrap_or("");
++
++        if f_word != s_word && !f_word.is_empty() && !s_word.is_empty() {
++            let context_before = if i > 0 {
++                failed_words.get(i - 1).copied().unwrap_or("").to_string()
++            } else {
++                String::new()
++            };
++
++            diffs.push(WordDiff {
++                context_before,
++                from_word: f_word.to_string(),
++                to_word: s_word.to_string(),
++            });
++        }
++    }
++
++    diffs
++}
++
++/// Compute Levenshtein edit distance between two strings.
++fn levenshtein(a: &str, b: &str) -> usize {
++    let a_chars: Vec<char> = a.chars().collect();
++    let b_chars: Vec<char> = b.chars().collect();
++    let a_len = a_chars.len();
++    let b_len = b_chars.len();
++
++    if a_len == 0 {
++        return b_len;
++    }
++    if b_len == 0 {
++        return a_len;
++    }
++
++    let mut prev: Vec<usize> = (0..=b_len).collect();
++    let mut curr: Vec<usize> = vec![0; b_len + 1];
++
++    for i in 1..=a_len {
++        curr[0] = i;
++        for j in 1..=b_len {
++            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
++            curr[j] = (prev[j] + 1)
++                .min(curr[j - 1] + 1)
++                .min(prev[j - 1] + cost);
++        }
++        std::mem::swap(&mut prev, &mut curr);
++    }
++
++    prev[b_len]
++}
++
++/// Create a lookup key from context + from word.
++fn make_key(context: &str, from: &str) -> String {
++    format!("{}|{}", context, from)
++}
++
++/// Get the current Unix timestamp in seconds.
++fn now_unix() -> u64 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_secs()
++}
++
++/// Get the path to the learned corrections JSON file.
++fn get_corrections_file_path() -> std::path::PathBuf {
++    let data_dir = dirs_next::data_dir().unwrap_or_else(|| {
++        std::path::PathBuf::from(".")
++    });
++    data_dir
++        .join("com.nexus.assistant")
++        .join("learned_corrections.json")
++}
++
++/// Load corrections from the JSON file.
++fn load_corrections(path: &std::path::Path) -> CorrectionFile {
++    if !path.exists() {
++        return CorrectionFile::default();
++    }
++
++    match std::fs::read_to_string(path) {
++        Ok(content) => {
++            match serde_json::from_str::<CorrectionFile>(&content) {
++                Ok(file) => file,
++                Err(e) => {
++                    tracing::warn!("stt_learning: failed to parse {}: {}", path.display(), e);
++                    CorrectionFile::default()
++                }
++            }
++        }
++        Err(e) => {
++            tracing::warn!("stt_learning: failed to read {}: {}", path.display(), e);
++            CorrectionFile::default()
++        }
++    }
++}
++
++// ─── Tauri IPC commands ──────────────────────────────────────────────
++
++/// IPC: Log a failed transcript (parser couldn't handle it).
++#[tauri::command]
++pub async fn log_failed_transcript(
++    transcript: String,
++    state: tauri::State<'_, SttLearningState>,
++) -> Result<(), String> {
++    state.log_failure(&transcript).await;
++    Ok(())
++}
++
++/// IPC: Log a successful transcript (parser handled it).
++/// Compares with any recent failure and learns corrections.
++#[tauri::command]
++pub async fn log_successful_transcript(
++    transcript: String,
++    state: tauri::State<'_, SttLearningState>,
++) -> Result<(), String> {
++    state.log_success(&transcript).await;
++    Ok(())
++}
++
++/// IPC: Get all corrections that are ready for auto-apply.
++/// The frontend calls this at startup and applies them in correctSttTranscript().
++#[tauri::command]
++pub async fn get_learned_corrections(
++    state: tauri::State<'_, SttLearningState>,
++) -> Result<Vec<LearnedCorrection>, String> {
++    Ok(state.get_auto_apply_corrections().await)
++}
++
++// ─── Tests ───────────────────────────────────────────────────────────
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_word_diff_single_word() {
++        let diffs = word_diff("analyse pr 254 in zink", "analyse pr 254 in zync");
++        assert_eq!(diffs.len(), 1);
++        assert_eq!(diffs[0].from_word, "zink");
++        assert_eq!(diffs[0].to_word, "zync");
++        assert_eq!(diffs[0].context_before, "in");
++    }
++
++    #[test]
++    fn test_word_diff_no_diff() {
++        let diffs = word_diff("open chrome", "open chrome");
++        assert!(diffs.is_empty());
++    }
++
++    #[test]
++    fn test_word_diff_completely_different() {
++        let diffs = word_diff("open chrome", "close firefox");
++        assert_eq!(diffs.len(), 2);
++    }
++
++    #[test]
++    fn test_word_diff_too_many_diffs() {
++        // Lengths differ by 1, all 3 positions differ → 3 diffs > MAX_DIFF_POSITIONS (2)
++        let diffs = word_diff("open chrome browser", "close firefox now");
++        assert!(diffs.len() > MAX_DIFF_POSITIONS);
++    }
++
++    #[test]
++    fn test_word_diff_different_lengths() {
++        let diffs = word_diff("open the chrome", "open chrome");
++        // Lengths differ by 1 — should still find diffs
++        // "the" vs "chrome" at position 1, "" vs "chrome" at position 2
++        // Actually: pos 0: open==open, pos 1: the vs chrome (diff), pos 2: chrome vs "" (skip, empty)
++        assert_eq!(diffs.len(), 1);
++        assert_eq!(diffs[0].from_word, "the");
++        assert_eq!(diffs[0].to_word, "chrome");
++    }
++
++    #[test]
++    fn test_levenshtein() {
++        assert_eq!(levenshtein("zink", "zync"), 2); // i→y + k→c
++        assert_eq!(levenshtein("cervix", "servx"), 2); // c→s + delete i
++        assert_eq!(levenshtein("hello", "hello"), 0);
++        assert_eq!(levenshtein("abc", "xyz"), 3);
++        assert_eq!(levenshtein("zinc", "zync"), 1); // i→y only
++    }
++
++    #[test]
++    fn test_levenshtein_edge() {
++        assert_eq!(levenshtein("", "abc"), 3);
++        assert_eq!(levenshtein("abc", ""), 3);
++        assert_eq!(levenshtein("", ""), 0);
++    }
++
++    #[test]
++    fn test_make_key() {
++        assert_eq!(make_key("in", "zink"), "in|zink");
++        assert_eq!(make_key("", "zink"), "|zink");
++    }
++
++    #[test]
++    fn test_correction_file_default() {
++        let f = CorrectionFile::default();
++        assert!(f.corrections.is_empty());
++    }
++
++    #[test]
++    fn test_word_diff_context_at_start() {
++        let diffs = word_diff("zink 254", "zync 254");
++        assert_eq!(diffs.len(), 1);
++        assert_eq!(diffs[0].context_before, ""); // First word, no context
++        assert_eq!(diffs[0].from_word, "zink");
++        assert_eq!(diffs[0].to_word, "zync");
++    }
++
++    #[test]
++    fn test_word_diff_preserves_order() {
++        let diffs = word_diff("analyse pr 254 in zink now", "analyse pr 254 in zync now");
++        assert_eq!(diffs.len(), 1);
++        assert_eq!(diffs[0].from_word, "zink");
++        assert_eq!(diffs[0].to_word, "zync");
++        assert_eq!(diffs[0].context_before, "in");
++    }
++}
+-- 
+2.52.0.windows.1
+

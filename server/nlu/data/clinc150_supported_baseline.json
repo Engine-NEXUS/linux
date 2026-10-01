@@ -1,0 +1,27 @@
+{
+  "benchmark": "server/nlu/data/evaluation/clinc150_supported_mappings.jsonl",
+  "examples": 5,
+  "review_status": "approved_nexus_capability_v1",
+  "confidence_gate": 0.85,
+  "raw_accuracy": 0.8,
+  "gated_accuracy": 0.6,
+  "gated_failure_count": 2,
+  "predicted_intents": {
+    "browser_search": 4,
+    "search": 1
+  },
+  "highest_confidence_failures": [
+    {
+      "text": "look up student loan offers on google",
+      "expected": "browser_search",
+      "predicted": "search",
+      "confidence": 0.4604
+    },
+    {
+      "text": "google \"odell beckham free agency\"",
+      "expected": "browser_search",
+      "predicted": "browser_search",
+      "confidence": 0.1925
+    }
+  ]
+}

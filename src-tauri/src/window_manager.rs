@@ -15,6 +15,21 @@ pub fn position_orb<R: Runtime>(_win: &WebviewWindow<R>) -> Result<(), String> {
     Ok(())
 }
 
+/// IPC: `invoke('set_orb_position', { horizontalPct, verticalPct, size })`.
+/// Linux/Wayland no-op: the compositor forbids client positioning, so the
+/// fullscreen stage never moves — the orb roams via frontend transform.
+/// Kept as a command so the settings slider + lib.rs handler compile;
+/// accepts and ignores the values.
+#[tauri::command]
+pub fn set_orb_position<R: Runtime>(
+    _app: AppHandle<R>,
+    _horizontal_pct: f64,
+    _vertical_pct: f64,
+    _size: u32,
+) -> Result<(), String> {
+    Ok(())
+}
+
 /// Configure window as a non-activating floating overlay (does not steal keyboard focus from active apps)
 pub fn configure_non_activating_overlay<R: Runtime>(win: &WebviewWindow<R>) -> Result<(), String> {
     let _ = position_orb(win);

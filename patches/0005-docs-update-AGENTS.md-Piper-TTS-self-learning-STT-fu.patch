@@ -1,0 +1,169 @@
+From 8d41c0e57be0de1fbe6e39f841b7d7b549e1ea88 Mon Sep 17 00:00:00 2001
+From: Chitkul Lakshya <chitkullakshya@gmail.com>
+Date: Thu, 3 Sep 2026 17:02:14 +0530
+Subject: [PATCH 5/7] =?UTF-8?q?docs:=20update=20AGENTS.md=20=E2=80=94=20Pi?=
+ =?UTF-8?q?per=20TTS,=20self-learning=20STT,=20fuzzy=20matching,=20RAM=20t?=
+ =?UTF-8?q?able?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ AGENTS.md | 102 +++++++++++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 82 insertions(+), 20 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index f72a32b..42ef391 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -43,33 +43,50 @@ it adds 10-15s delay on the next command (cold model load). The monitor
+ thread runs for future use but is a no-op. Peak STT RAM during active
+ transcription is ~340 MB.
+ 
+-**Lazy Kokoro TTS (2026-09-01).** Kokoro is no longer loaded at boot.
+-`speak_text` calls `ensure_engine_loaded()` on first use — loads in ~1.7s
+-(one-time), then stays loaded. Saves ~350 MB at idle. See `tts.rs`.
++**Lazy Piper TTS (2026-09-02).** Piper replaces Kokoro. Piper is no longer
++loaded at boot. `speak_text` calls `ensure_engine_loaded()` on first use —
++loads in ~85ms (one-time), then stays loaded. Saves ~80 MB at idle vs
++Kokoro's 350 MB. Model: `en_US-amy-medium` (~63 MB, 22050 Hz, MOS 4.0-4.3).
++Auto-downloads from HuggingFace on first speak (one-time). See `tts.rs`.
++
++**Self-Learning STT Corrections (2026-09-02).** When STT mishears a word
++and the parser fails, the user repeats the command. The system detects
++this pattern and learns the correction automatically. After 3 consistent
++corrections, the correction is auto-applied. Storage:
++`%APPDATA%/com.nexus.assistant/learned_corrections.json`. See
++`stt_learning.rs`. RAM cost: ~1-10 KB.
++
++**Fuzzy Repo Matching (2026-09-02).** When a PR command's repo name
++doesn't exactly match a known repo, the parser tries Levenshtein fuzzy
++matching against `KNOWN_REPOS` (nexus, ultron, servx, zync, ledger-ai,
++nexus-agent). Threshold: 2 for short repos (≤6 chars), 3 for longer.
++Fuzzy matches return confidence 0.8 and source "fuzzy". See
++`intent_parser.rs::fuzzy_match_repo_name()`.
+ 
+ **WebView2 low-memory mode (2026-09-01).** The orb window sets
+ `MemoryUsageTargetLevel::Low` via `ICoreWebView2_23::SetMemoryUsageTargetLevel`
+ at creation time. WebView2 drops cached data and swaps to disk. Saves ~40 MB.
+ See `mic_permissions.rs::set_low_memory_mode()`.
+ 
+-**Idle RAM (2026-09-01): ~104 MB** (before first transcription) or
++**Idle RAM (2026-09-02): ~104 MB** (before first transcription) or
+ **~232 MB** (after first transcription, STT model loaded).
+ 
+ | Component | Before first transcription | After first transcription |
+ |---|---|---|
+-| nexus.exe (Rust + wake word, NO Kokoro) | 47.8 MB | 47.8 MB |
++| nexus.exe (Rust + wake word, NO Piper) | 47.8 MB | 47.8 MB |
+ | WebView2 (orb, low-mem mode) | 35.8 MB | 35.8 MB |
+ | STT Python (model not yet loaded) | 20.6 MB | 128.6 MB |
+ | **TOTAL idle** | **104.2 MB** | **232.2 MB** |
+ 
+-After first TTS speak, Kokoro loads and stays loaded: **+350 MB → ~582 MB**.
+-This is the active state, not idle.
++After first TTS speak, Piper loads and stays loaded: **+80 MB → ~293 MB**.
++This is the active state, not idle. (Was ~582 MB with Kokoro.)
+ 
+ **Worker test suite:** `npm test` in `server/worker/` runs 23 vitest
+ tests covering quota, cache keys, search question detection, and dedup.
+ 
+-**Rust test suite:** `cargo test --test offline_commands` runs 10 tests
+-for close_app and whatsapp_chat parsing.
++**Rust test suite:** `cargo test --lib` runs 113 tests (intent parsing,
++STT learning, fuzzy matching, PR patterns). `cargo test --test
++offline_commands` runs 10 tests for close_app and whatsapp_chat parsing.
+ 
+ ## STT Architecture — faster-whisper Python Sidecar (2026-08-31)
+ 
+@@ -417,6 +434,12 @@ Phase 1 now uses **Approach C (hybrid)** for a 3-4s first response:
+    **Never blocks first paint.** If the Worker/LLM fails, the heuristic
+    diagram remains (graceful degradation).
+ 
++**Update (2026-09-02):** Phase 1 enrichment is now **sequential** (inline)
++via `enrich_phase1_inline()` in `architect.rs`. The architecture window
++opens ONLY after AI enrichment completes — no generic labels are shown
++first. Total time: ~3-5s. See
++[Feature 33](docs/features/33-architecture-mapper-voice-loading-flow.md).
++
+ | Component | File | What changed |
+ |-----------|------|--------------|
+ | Rust parallel fetch | `src-tauri/src/architect.rs` | `analyze_repo_phase1` uses `tokio::join!` + `HEAD` ref |
+@@ -426,6 +449,41 @@ Phase 1 now uses **Approach C (hybrid)** for a 3-4s first response:
+ | Frontend store | `frontend/src/architect/architectStore.ts` | New `enrichPhase1` action + `sample_file_paths` field |
+ | Frontend app | `frontend/src/architect/ArchitectApp.tsx` | Calls `enrich_phase1` after paint + listens for enriched event |
+ 
++## Architecture Mapper — Voice Loading Flow (2026-09-02)
++
++When the user says "open architecture mapper", NEXUS now follows the same
++loading-indicator pattern as the sidebar/worker flow:
++
++1. **Immediately** speaks "On it sir" (fire-and-forget TTS)
++2. **Immediately** hides the orb + shows `loading.json` at top-right corner
++3. Runs repository detection + Phase 1 + AI enrichment in the background
++4. Opens the architecture window only after all analysis is complete
++5. Hides the loading indicator + speaks "Here is the architecture, sir."
++
++**Key fix:** The loading indicator is shown **immediately** — it does NOT
++wait for TTS to finish. The old code used `speak().then(() =>
++showLoadingIndicator())` which delayed the indicator by ~1.7s (Kokoro
++load time) or never showed it if the state check failed.
++
++**File:** `frontend/src/audio/recorder.ts` — both `open_architect` branches
++updated to use fire-and-forget pattern. See
++[Feature 33](docs/features/33-architecture-mapper-voice-loading-flow.md).
++
++## Architecture Mapper — Layout Redesign (2026-09-02)
++
++The architecture mapper window was redesigned:
++
++- **3 view tabs** in the header: Files, Hotspots (N), Cycles (N)
++- **Full-width map** — no floating sidebar overlay
++- **2-row bottom section:**
++  - Row 1 (110px): File Inspector (file path, risk, dependents/dependencies,
++    impact analysis, imported by, imports)
++  - Row 2 (fills): Analytics list (changes based on selected view tab)
++- Removed: stat pills, floating `ArchitectSidebar` overlay, 2-column layout
++
++**File:** `frontend/src/architect/ArchitectApp.tsx`, `frontend/src/architect/architect.css`
++See [Feature 34](docs/features/34-architecture-mapper-layout-redesign.md).
++
+ ## Building
+ 
+ **Always build the desktop app with the Tauri CLI:**
+@@ -478,17 +536,21 @@ Bad: `http://localhost:5173/...` → rebuild with `--features custom-protocol`.
+ 
+ ## Frontend windows
+ 
+-Every window declared in `src-tauri/tauri.conf.json` must have a matching
+-rollup input in `frontend/vite.config.ts`, otherwise its HTML file is absent
+-from `dist/` and the window fails to load in release builds (dev mode hides
+-this — the Vite server serves any HTML file on demand).
+-
+-| tauri.conf.json window | HTML            | vite input |
+-| ---------------------- | --------------- | ---------- |
+-| `main`                 | `index.html`    | `main`     |
+-| `setup`                | `setup.html`    | `setup`    |
+-| `settings`             | `settings.html` | `settings` |
+-| `sidebar`              | `sidebar.html`  | `sidebar`  |
++`src-tauri/tauri.conf.json` has `"windows": []` — all windows are created
++on-demand by `src-tauri/src/dyn_windows.rs` to save RAM. Every window must
++have a matching rollup input in `frontend/vite.config.ts`, otherwise its
++HTML file is absent from `dist/` and the window fails to load in release
++builds (dev mode hides this — the Vite server serves any HTML file on
++demand).
++
++| dyn_windows window | HTML                | vite input  |
++| ------------------ | ------------------- | ----------- |
++| `main`             | `index.html`        | `main`      |
++| `setup`            | `setup.html`        | `setup`     |
++| `settings`         | `settings.html`     | `settings`  |
++| `sidebar`          | `sidebar.html`      | `sidebar`   |
++| `architect`        | `architect.html`    | `architect` |
++| `loading`          | `loading.html`      | `loading`   |
+ 
+ ## Local ports
+ 
+-- 
+2.52.0.windows.1
+

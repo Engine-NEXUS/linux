@@ -4,7 +4,7 @@
  * Or: npx jest src/__tests__/research.test.ts
  */
 
-import { isSearchQuestion, buildSearchSynthesisPrompt, isMathQuery, isAcademicQuery } from "../research";
+import { isSearchQuestion, buildSearchSynthesisPrompt, isMathQuery, isAcademicQuery, extractSearchEntity } from "../research";
 import { dedupeSources } from "../clean";
 
 describe("isSearchQuestion", () => {
@@ -120,5 +120,43 @@ describe("isAcademicQuery", () => {
     expect(isAcademicQuery("what is cloudflare")).toBe(false);
     expect(isAcademicQuery("close chrome")).toBe(false);
     expect(isAcademicQuery("research on cloudflare")).toBe(false);
+  });
+});
+
+describe("extractSearchEntity", () => {
+  test("strips 'what is' prefix", () => {
+    expect(extractSearchEntity("what is Rust")).toBe("Rust");
+    expect(extractSearchEntity("what is the capital of France")).toBe("capital of France");
+    expect(extractSearchEntity("what are black holes")).toBe("black holes");
+  });
+
+  test("strips 'who is/was' prefix", () => {
+    expect(extractSearchEntity("who is Einstein")).toBe("Einstein");
+    expect(extractSearchEntity("who was Albert Einstein")).toBe("Albert Einstein");
+  });
+
+  test("strips 'where/when/why/how' prefix", () => {
+    expect(extractSearchEntity("where is Tokyo")).toBe("Tokyo");
+    expect(extractSearchEntity("how does photosynthesis work")).toBe("photosynthesis work");
+  });
+
+  test("strips command prefixes", () => {
+    expect(extractSearchEntity("tell me about quantum computing")).toBe("quantum computing");
+    expect(extractSearchEntity("explain quantum entanglement")).toBe("quantum entanglement");
+    expect(extractSearchEntity("define artificial intelligence")).toBe("artificial intelligence");
+    expect(extractSearchEntity("search for rust async patterns")).toBe("rust async patterns");
+  });
+
+  test("strips leading articles and trailing punctuation", () => {
+    expect(extractSearchEntity("what is the Rust")).toBe("Rust");
+    expect(extractSearchEntity("what is Rust?")).toBe("Rust");
+    expect(extractSearchEntity("what is Rust.")).toBe("Rust");
+  });
+
+  test("handles degenerate input without crashing", () => {
+    // "what is" has no entity after the question word — returns what remains
+    expect(extractSearchEntity("what is")).toBe("is");
+    // Empty string falls back to empty
+    expect(extractSearchEntity("")).toBe("");
   });
 });

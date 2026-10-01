@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod window_manager;
+#[cfg(not(target_os = "linux"))]
 mod hotkey;
 // wakeword-oww (default): openWakeWord via tract-onnx (pure Rust, no C++ deps)
 #[cfg(feature = "wakeword-oww")]
@@ -15,6 +16,9 @@ mod wakeword_oww;
 mod wakeword {
     pub use crate::wakeword_oww::*;
 }
+// Phase D: Speaker verification module (voice profile enrollment + cosine similarity)
+pub mod voice_profile;
+pub mod acoustic_profile;
 mod network;
 mod tray;
 pub mod commands;
@@ -23,17 +27,50 @@ mod app_registry;
 pub mod intent_parser;
 mod nlu_client;
 mod lazy_nlu;
+mod admin_config;
+#[cfg(feature = "admin-brain")]
+mod brain_client;
+#[cfg(feature = "admin-brain")]
+mod brain_monitor;
+#[cfg(feature = "admin-brain")]
+mod lazy_brain;
 mod lazy_stt;
 mod stt;
+pub mod stt_groq;
 mod stt_learning;
 mod tts;
-// Verification is not yet wired into wakeword_oww (see AGENTS.md known limitations).
+pub mod tts_edge;
+pub mod tts_piper;
+mod tts_network;
+#[cfg(test)]
+mod tts_bench;
+mod pipeline_bench;
+mod volume;
+// Phase D: Speaker verification is now wired via voice_profile module.
+// The OWW engine uses the existing embedding_model.onnx for speaker embeddings.
 mod meeting_detect;
 mod mic_permissions;
 mod mpris;
 mod architect;
+mod browser_url;
+mod symbol_extractor;
 mod dyn_windows;
 mod diagnostics;
+pub mod orchestrator;
+pub mod github_cmd;
+pub mod live;
+pub mod router;
+pub mod mcp_client;
+pub mod auth_vault;
+pub mod ghostwriter;
+pub mod screen;
+pub mod vision;
+pub mod pointer;
+pub mod ocr;
+mod lazy_ocr;
+pub mod telegram;
+pub mod command_center;
+pub mod nlu_update;
 #[cfg(target_os = "windows")]
 mod dwm_corners;
 #[cfg(target_os = "windows")]
@@ -152,12 +189,91 @@ fn cleanup_webview2_profile() {
     }
 }
 
+/// Set the espeak-ng data path environment variables BEFORE any code
+/// triggers espeak initialization. The espeak-rs crate checks
+/// `PIPER_ESPEAKNG_DATA_DIRECTORY` and the C espeak-ng library checks
+/// `ESPEAK_DATA_PATH`. Both must point to the directory that *contains*
+/// the `espeak-ng-data/` folder.
+///
+/// In a bundled app, espeak-ng-data is at `exe_dir/resources/espeak-ng-data/`.
+/// In dev mode, it's at `src-tauri/resources/espeak-ng-data/` (via cwd).
+///
+/// This MUST be called before Kokoro/Piper lazy-init because espeak-rs
+/// uses a `OnceLock` — if initialization fails once, all subsequent
+/// calls return the cached error forever.
+fn setup_espeak_data_path() {
+    // Don't override if the user already set it
+    if std::env::var("PIPER_ESPEAKNG_DATA_DIRECTORY").is_ok() {
+        return;
+    }
+
+    // 1. Check exe_dir/resources/ (bundled app or Tauri dev with resources)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let res_dir = exe_dir.join("resources");
+            if res_dir.join("espeak-ng-data").exists() {
+                std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", &res_dir);
+                // Also set ESPEAK_DATA_PATH for the C library's own fallback
+                std::env::set_var("ESPEAK_DATA_PATH", &res_dir);
+                tracing::info!(
+                    "espeak: data path set to {} (from exe_dir/resources)",
+                    res_dir.display()
+                );
+                return;
+            }
+        }
+    }
+
+    // 2. Check cwd/resources/ (dev mode: running from src-tauri/)
+    if let Ok(cwd) = std::env::current_dir() {
+        let res_dir = cwd.join("resources");
+        if res_dir.join("espeak-ng-data").exists() {
+            std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", &res_dir);
+            std::env::set_var("ESPEAK_DATA_PATH", &res_dir);
+            tracing::info!(
+                "espeak: data path set to {} (from cwd/resources)",
+                res_dir.display()
+            );
+            return;
+        }
+    }
+
+    // 3. Check cwd/espeak-ng-data/ (running from within the data dir)
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join("espeak-ng-data").exists() {
+            std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", &cwd);
+            std::env::set_var("ESPEAK_DATA_PATH", &cwd);
+            tracing::info!(
+                "espeak: data path set to {} (from cwd)",
+                cwd.display()
+            );
+            return;
+        }
+    }
+
+    tracing::warn!(
+        "espeak: could not locate espeak-ng-data directory. \
+         Piper/Kokoro TTS fallback may fail with 'phontab: No such file or directory'."
+    );
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,nexus=debug")))
         .with_target(false)
         .init();
+
+    // ─── espeak-ng data path ───────────────────────────────────────────
+    // espeak-rs-sys compiles in a build-time path to espeak-ng-data that
+    // points to target/release/build/espeak-rs-sys-*/out/share/. In a
+    // deployed app that directory doesn't exist. The espeak-rs crate
+    // checks PIPER_ESPEAKNG_DATA_DIRECTORY (and the C library checks
+    // ESPEAK_DATA_PATH) before falling back to the compiled-in path.
+    // We must set these BEFORE any code triggers espeak initialization
+    // (Kokoro/Piper lazy load, ONNX model load, etc.) because espeak-rs
+    // uses a OnceLock — if init fails once, all subsequent calls fail.
+    setup_espeak_data_path();
 
     // ─── WebView2 stale profile cleanup ───────────────────────────────
     //
@@ -187,6 +303,14 @@ pub fn run() {
             // Handle deep-link redirects on Windows/Linux (passed as CLI arg)
             if let Some(url) = args.iter().find(|a| a.starts_with("nexus://")) {
                 tracing::info!("single-instance: deep-link callback: {}", url);
+                if url == "nexus://settings" {
+                    // Open settings sidebar via deep link
+                    let app_clone = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = crate::commands::show_settings_sidebar(app_clone).await;
+                    });
+                    return;
+                }
                 let _ = app.emit("deep-link://oauth-callback", url.clone());
                 // OAuth callback — just emit the event and return.
                 // Do NOT try to show/wake the main window here; the WebView2
@@ -214,10 +338,11 @@ pub fn run() {
                     let _ = win.set_focus();
                 }
             } else if is_settings {
-                if let Ok(win) = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::settings()) {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // Open the settings sidebar (liquid-glass, 720x1000)
+                let app_clone = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = crate::commands::show_settings_sidebar(app_clone).await;
+                });
             } else {
                 // Only wake the main window if we are NOT in the middle of setup
                 let setup_active = app.get_webview_window("setup").is_some();
@@ -231,19 +356,22 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_store::Builder::default().build());
-
-    #[cfg(not(target_os = "linux"))]
-    let mut builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
-
-    builder
+        .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_positioner::init())
-        .setup(|app| {
+        .plugin(tauri_plugin_positioner::init());
+
+    // global-shortcut plugin is not available on Linux
+    #[cfg(not(target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    }
+
+    builder.setup(|app| {
+        // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
             // macOS: hide from the Dock and Cmd+Tab switcher (accessory/background app).
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -384,16 +512,20 @@ pub fn run() {
             app.manage(meeting_state.clone());
 
             // ─── STT / TTS Local Engine State ──────────────────────────
-            let stt_state = stt::SttState { _placeholder: std::sync::Arc::new(tokio::sync::Mutex::new(())) };
+            let stt_state = stt::SttState::new();
             app.manage(stt_state);
 
-            let tts_engine_arc = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-            let tts_cache_arc = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-            let tts_sample_rate_arc = std::sync::Arc::new(tokio::sync::Mutex::new(22050u32));
-            let tts_state = tts::TtsState { engine: tts_engine_arc.clone(), cache: tts_cache_arc.clone(), sample_rate: tts_sample_rate_arc.clone() };
+            // ─── Architect Cancellation Registry ──────────────────────
+            // Required by analyze_repo_deep and cancel_architect_analysis.
+            // Without this, Phase 2 deep scan invoke fails silently.
+            app.manage(architect::ArchitectCancels::new());
+
+            let tts_state = tts::TtsState::new();
+            let prewarm_cache = tts_state.cache.clone();
             app.manage(tts_state);
-            // Piper TTS is lazy-loaded on first speak_text call (saves ~80 MB at idle).
-            // See tts::ensure_engine_loaded().
+            // Phase 2 TTS: edge-tts (cloud) primary, Piper (local) fallback.
+            // No local engine to pre-warm — edge-tts is cloud (0 MB RAM).
+            // Only the cached ack phrases are pre-synthesized at boot.
 
             // ─── STT Self-Learning State ──────────────────────────────
             app.manage(stt_learning::SttLearningState::new());
@@ -483,12 +615,52 @@ pub fn run() {
             // Pre-index installed apps for instant launch (background thread).
             app_registry::init();
 
-            // NLU pre-warm is deferred — it will be started lazily on the first
-            // unparseable command via lazy_nlu::ensure_nlu_running(). This saves
-            // 50-100 MB RAM at idle. The deterministic parser handles most
-            // commands without NLU.
+            // Start the foreground window tracker for architect repo detection.
+            // This caches the last non-NEXUS foreground window title so that
+            // `get_active_repo_url()` can detect the user's browser/GitHub
+            // app even after the NEXUS orb steals focus during STT.
+            architect::start_foreground_tracker();
 
-            // Global hotkey → wake event.
+            // ─── Pre-warm TTS + STT + NLU at startup (Phase 1) ──────────
+            // Eliminates ~31.7s of cold-start latency on the first voice command.
+            //
+            // RAM cost: +600 MB idle (TTS ~350 MB + STT ~150 MB + NLU ~100 MB)
+            // Latency saved: ~31.7s on first command (TTS 5.7s + STT 8s + NLU 18s)
+            //
+            // Priority order: TTS first (needed for "On it sir" ack),
+            // then STT (needed for transcription), then NLU (needed for
+            // ambiguous commands — deterministic parser handles most).
+            //
+            // TTS pre-warm: pre-synthesize ack phrases using edge-tts (cloud).
+            // This generates the 5 cached phrases ("On it sir", etc.) so
+            // speak_cached() plays in <5ms. No local engine to load —
+            // edge-tts is cloud (0 MB RAM). Falls back to Piper if offline.
+            let prewarm_cache2 = prewarm_cache.clone();
+            tauri::async_runtime::spawn(async move {
+                tracing::info!("tts: startup cache pre-generation starting...");
+                let voice = "en-US-AvaNeural".to_string(); // default; user can change in settings
+                tts::pregenerate_cache(&prewarm_cache2, &voice).await;
+                tracing::info!("tts: startup cache pre-generation complete — ack phrases ready");
+            });
+
+            // Start TTS network monitor — checks Edge TTS availability every 60s
+            // and unloads Piper after 10 minutes of stable network.
+            tts_network::start_network_monitor();
+
+            // STT pre-warm removed in Phase 2.
+            // Primary STT is now Groq cloud (0 MB RAM, ~247ms latency).
+            // Local faster-whisper starts lazily only as a fallback when
+            // Groq is unavailable (no key, network error, rate limit).
+            // This saves ~150 MB idle RAM.
+
+            // NLU pre-warm removed in Phase 2.
+            // The deterministic Rust parser handles 90-95% of commands
+            // in <5ms with only 2 MB RAM. The BERT-Mini Python sidecar
+            // starts lazily only when an ambiguous command is encountered.
+            // This saves ~100 MB idle RAM.
+
+            // Global hotkey → wake event (not available on Linux).
+            #[cfg(not(target_os = "linux"))]
             hotkey::init(app.handle())?;
 
             // Wake-word engine — runs on a DEDICATED OS THREAD, not tokio.
@@ -512,7 +684,7 @@ pub fn run() {
 
             // Network bridge (HTTP) sends transcripts to the Cloudflare Worker.
             // No sidecar, no server, no WebSocket — fully serverless.
-            // Worker URL is hardcoded in commands::WORKER_URL.
+            // The Worker URL is baked into the installer via NEXUS_SERVER_URL.
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -521,9 +693,37 @@ pub fn run() {
                 }
             });
 
+            // Telegram remote (owner-only, ₹0 phone control). Starts only
+            // when a bot token is in the vault AND telegramChatId is set —
+            // otherwise logs once and stays off.
+            crate::telegram::spawn_bridge(app.handle().clone());
+
+            // 9Router provider health probe — checks free-tier model menus
+            // (Groq/Gemini/Cerebras IDs die silently; Sept 2026 llama 404).
+            // Non-blocking, logs warnings only. Zero inference cost.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                crate::router::probe_provider_health(&handle).await;
+            });
+
             // Start STT idle monitor — kills the Python STT sidecar after 5 min
             // of inactivity to reclaim ~340 MB RAM.
             crate::lazy_stt::start_idle_monitor();
+
+            // Pre-warm local STT ~20s after boot (background, non-blocking) so
+            // the first voice command answers with zero cold-start delay.
+            // No-op for Groq cloud users (saves RAM).
+            if let Ok(dir) = app.path().app_data_dir() {
+                crate::lazy_stt::spawn_prewarm(dir);
+            }
+
+            // NLU sidecar is on-demand fallback only (never pre-warmed at boot
+            // to enforce strict <150MB RAM limit in online mode).
+
+            // Vault idle monitor: watches credential expiry while the user
+            // is away (90s cadence, edge-triggered). Alerts land in the log
+            // + `vault:changed` event; the Connections tab refreshes itself.
+            crate::auth_vault::spawn_monitor(app.handle().clone());
 
             // Listen for deep-link events (macOS emits these; Windows/Linux use single-instance).
             let handle = app.handle().clone();
@@ -532,48 +732,45 @@ pub fn run() {
                     let url_str = url.as_str();
                     if url_str.starts_with("nexus://oauth/") {
                         let _ = handle.emit("deep-link://oauth-callback", url_str);
+                    } else if url_str == "nexus://settings" {
+                        // Deep link to open settings sidebar
+                        let app_clone = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = crate::commands::show_settings_sidebar(app_clone).await;
+                        });
                     }
                 }
             });
 
             // Check if this is first launch (no config file yet).
-            // Auto-generate a unique user ID and device ID (UUID v4) against
-            // the hardcoded commands::WORKER_URL. The user never has to
+            // Auto-generate a unique user ID and device ID (UUID v4) and use
+            // the server URL baked into the installer. The user never has to
             // manually enter these — they're system-generated.
+            //
+            // The server URL is determined at build time:
+            //   - Default: ws://127.0.0.1:41098/ws (local dev / same-machine sidecar)
+            //   - Installer override: set NEXUS_SERVER_URL env var before building
+            //     the installer to bake in the user's remote server URL.
             let store_path = app.path().app_data_dir().ok();
             let mut should_open_setup = std::env::args().any(|arg| arg == "--setup" || arg == "-s");
             if let Some(dir) = store_path {
                 let config_path = dir.join("nexus-config.json");
-                // Repair stale configs: an old build (or failed setup) may have
-                // written the example URL or empty identity. Rewrite those
-                // fields against the hardcoded WORKER_URL + fresh UUIDs.
-                let existing: Option<serde_json::Value> = std::fs::read_to_string(&config_path)
-                    .ok()
-                    .and_then(|c| serde_json::from_str(&c).ok());
-                let saved_url = existing.as_ref().and_then(|j| j["serverUrl"].as_str()).unwrap_or("");
-                let saved_uid = existing.as_ref().and_then(|j| j["userId"].as_str()).unwrap_or("");
-                let saved_did = existing.as_ref().and_then(|j| j["deviceId"].as_str()).unwrap_or("");
-                let stale_url = saved_url.is_empty() || saved_url.contains("example");
-                if !config_path.exists() || stale_url || saved_uid.is_empty() || saved_did.is_empty() {
-                    let fresh = !config_path.exists();
-                    if fresh {
-                        should_open_setup = true;
-                    }
-                    let server_url = crate::commands::WORKER_URL;
-                    let user_id = if saved_uid.is_empty() { format!("user_{}", network::uuid_v4()) } else { saved_uid.to_string() };
-                    let device_id = if saved_did.is_empty() { format!("device_{}", network::uuid_v4()) } else { saved_did.to_string() };
-                    let url = if stale_url { server_url } else { saved_url };
+                if !config_path.exists() {
+                    should_open_setup = true;
+                    let user_id = format!("user_{}", network::uuid_v4());
+                    let device_id = format!("device_{}", network::uuid_v4());
+                    let server_url = option_env!("NEXUS_SERVER_URL")
+                        .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
                     let default_config = serde_json::json!({
-                        "serverUrl": url,
+                        "serverUrl": server_url,
                         "userId": user_id,
                         "deviceId": device_id,
                     });
                     let _ = std::fs::create_dir_all(&dir);
                     let _ = std::fs::write(&config_path, default_config.to_string());
                     tracing::info!(
-                        "config {} at {:?} — user={}, device={}, server={}",
-                        if fresh { "auto-created" } else { "repaired" },
-                        config_path, user_id, device_id, url
+                        "auto-created config at {:?} — user={}, device={}, server={}",
+                        config_path, user_id, device_id, server_url
                     );
                 }
             }
@@ -587,7 +784,8 @@ pub fn run() {
                 let config_path = dir.join("nexus-config.json");
                 if let Ok(content) = std::fs::read_to_string(&config_path) {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        let default_url = crate::commands::WORKER_URL;
+                        let default_url = option_env!("NEXUS_SERVER_URL")
+                            .unwrap_or("https://nexus-worker.chitkullakshya.workers.dev");
                         let url = json["serverUrl"].as_str().unwrap_or(default_url);
                         let url = if url.is_empty() { default_url } else { url };
                         let uid = json["userId"].as_str().unwrap_or("");
@@ -598,6 +796,18 @@ pub fn run() {
                     }
                 }
             }
+
+            // NLU model update check — family devices pull admin-trained
+            // BERT-Mini updates from the Worker (R2 + KV manifest).
+            // Runs in background; session was just auto-opened above.
+            // No-op if the Worker has no manifest or R2 is unconfigured.
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // Small delay: let the app finish first-paint before a
+                // potential ~35 MB model download saturates the connection.
+                tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                nlu_update::spawn_update_check(update_handle);
+            });
 
             if should_open_setup {
                 // Hide the orb during setup — it should not steal focus or
@@ -623,13 +833,16 @@ pub fn run() {
                         let _ = main_win.hide();
                     }
                 }
-                // Linux DE keybind target (`nexus --wake`, Super+Space): cold
-                // start must show AND wake, else orb sits idle. Second-instance
-                // --wake already wakes via single-instance callback above.
+                // Linux DE keybind target (`nexus --wake`,
+                // Ctrl+Super+Space): cold start must show AND wake, else orb
+                // sits idle. Second-instance --wake already wakes via
+                // single-instance callback above.
                 // ponytail: ceiling = show+wake. Upgrade = portal
                 // GlobalShortcuts (ashpd) when COSMIC/GNOME support settles.
                 //
-                // First-run hotkey: best-effort gsettings bind of Super+Space.
+                // First-run hotkey: best-effort gsettings bind of
+                // Ctrl+Super+Space (Super+Space owned by launcher /
+                // switch-input-source; Ctrl+Space owned by IME).
                 // Never fails startup; COSMIC without gsettings schema falls
                 // back to the manual Settings > Keyboard path.
                 #[cfg(target_os = "linux")]
@@ -672,8 +885,10 @@ pub fn run() {
                                 .args(["set", slot, "name", "NEXUS Wake"]).status();
                             let _ = std::process::Command::new("gsettings")
                                 .args(["set", slot, "command", &format!("{exe} --wake")]).status();
+                            // Ctrl+Super+Space: Super+Space is owned by the
+                            // launcher / switch-input-source on COSMIC+GNOME.
                             let _ = std::process::Command::new("gsettings")
-                                .args(["set", slot, "binding", "<Super>space"]).status();
+                                .args(["set", slot, "binding", "<Primary><Super>space"]).status();
                         });
                 }
                 if std::env::args().any(|arg| arg == "--wake") {
@@ -695,19 +910,12 @@ pub fn run() {
                 let (worker_url, user_id) = match network::get_session_info() {
                     Some((url, uid, _)) => (url, uid),
                     None => {
-                        // Try reading from config file (platform-aware:
-                        // APPDATA on Windows, ~/.local/share on Linux).
+                        // Try reading from config file
                         let config_path = std::env::var("APPDATA")
                             .ok()
                             .map(|d| std::path::Path::new(&d)
                                 .join("com.nexus.assistant")
-                                .join("nexus-config.json"))
-                            .or_else(|| {
-                                std::env::var("HOME").ok().map(|h| {
-                                    std::path::Path::new(&h)
-                                        .join(".local/share/com.nexus.assistant/nexus-config.json")
-                                })
-                            });
+                                .join("nexus-config.json"));
                         match config_path.and_then(|p| std::fs::read_to_string(p).ok()) {
                             Some(content) => {
                                 let server_url = extract_json_string(&content, "serverUrl")
@@ -729,10 +937,26 @@ pub fn run() {
             window_manager::set_click_through,
             window_manager::show_overlay,
             window_manager::hide_overlay,
+            window_manager::set_orb_position,
+            pointer::hide_pointer,
             network::open_session,
             network::send_transcript,
             network::cancel_session,
             network::close_session,
+            orchestrator::orchestrator_process,
+            orchestrator::orchestrator_cancel,
+            orchestrator::orchestrator_done,
+            orchestrator::orchestrator_status,
+            orchestrator::orchestrator_show_loading,
+            orchestrator::orchestrator_hide_loading,
+            orchestrator::orchestrator_github_execute,
+            orchestrator::orchestrator_github_clear_token,
+            orchestrator::            orchestrator_mcp_confirm,
+            mcp_client::mcp_status,
+            mcp_client::mcp_connect_state,
+            auth_vault::vault_status,
+            auth_vault::vault_set_token,
+            auth_vault::vault_clear_token,
             commands::open_setup_window,
             commands::close_setup_window,
             commands::save_server_config,
@@ -745,6 +969,8 @@ pub fn run() {
             commands::close_settings_window,
             commands::get_settings,
             commands::save_settings,
+            commands::list_tts_voices,
+            commands::get_pending_settings_backdrop,
             commands::set_autostart,
             commands::is_autostart_enabled,
             commands::check_mic_permission,
@@ -754,15 +980,26 @@ pub fn run() {
             commands::show_sidebar,
             commands::show_sidebar_with_content,
             commands::show_sidebar_with_analysis,
+            commands::show_sidebar_with_confirmation,
             commands::hide_sidebar,
             commands::get_pending_sidebar_content,
+            commands::show_loading_indicator,
+            commands::hide_loading_indicator,
+            commands::show_pr_list_sidebar,
+            commands::hide_pr_list_sidebar,
+            commands::get_pending_pr_list,
+            commands::show_settings_sidebar,
+            commands::hide_settings_sidebar,
             commands::pause_wakeword,
             commands::resume_wakeword,
+            commands::mic_self_test,
+            commands::start_stt_capture,
             stt::transcribe_audio,
             stt::stt_status,
             tts::speak_text,
             tts::speak_cached,
             tts::stop_tts,
+            tts::preview_voice,
             stt_learning::log_failed_transcript,
             stt_learning::log_successful_transcript,
             stt_learning::get_learned_corrections,
@@ -771,12 +1008,33 @@ pub fn run() {
             intent_parser::parse_transcript,
             architect::get_active_repo_url,
             architect::open_architect_window,
+            architect::open_architect_with_auto_detect,
             architect::get_pending_architect_repo,
+            architect::cancel_architect_analysis,
             architect::analyze_repo_phase1,
             architect::analyze_repo_deep,
             architect::query_impact,
             architect::enrich_phase1,
             architect::analyze_repo_fast,
+            // Live mode commands
+            live::live_type_text,
+            live::live_press_key,
+            live::live_press_hotkey,
+            live::live_whatsapp_open,
+            live::live_whatsapp_search,
+            live::live_whatsapp_send,
+            live::live_whatsapp_type_message,
+            live::live_browser_new_tab,
+            live::live_browser_navigate,
+            live::live_browser_search,
+            live::live_open_site,
+            live::live_focus_app,
+            live::live_cancel,
+            live::live_get_state,
+            // Phase D: OWW voice profile commands (speaker verification)
+            commands::get_voice_profile_status,
+            commands::enroll_voice,
+            commands::delete_voice_profile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NEXUS application");

@@ -75,17 +75,13 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
                 }
             }
             "settings" => {
-                // Open the dedicated settings window (created on-demand)
-                match crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::settings()) {
-                    Ok(w) => {
-                        let _ = w.show();
-                        let _ = w.set_focus();
+                // Open the settings sidebar (liquid-glass, 720x1000, always-on-top)
+                let app_clone = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = crate::commands::show_settings_sidebar(app_clone).await {
+                        tracing::warn!("tray: failed to open settings sidebar: {e}");
                     }
-                    Err(e) => {
-                        tracing::warn!("tray: failed to create settings window: {e}");
-                        let _ = app.emit("assistant:settings", ());
-                    }
-                }
+                });
             }
             "autostart" => {
                 // Toggle the autostart check menu item

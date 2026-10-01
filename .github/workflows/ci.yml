@@ -30,6 +30,9 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Run frontend tests
+        run: npm test
+
   rust-check-linux:
     runs-on: ubuntu-latest
     steps:
@@ -49,6 +52,10 @@ jobs:
       - name: Cargo check (mock-wake)
         working-directory: src-tauri
         run: cargo check --features mock-wake
+
+      - name: Cargo test (lib)
+        working-directory: src-tauri
+        run: cargo test --lib -- --test-threads=1
 
   python-check:
     runs-on: ubuntu-latest
@@ -74,3 +81,11 @@ jobs:
       - name: Check NLU train script parses
         working-directory: server/nlu
         run: python -c "import ast; ast.parse(open('train.py').read()); print('train.py parses OK')"
+
+      # NOTE (2026-09-27): the legacy sidecar (server/sidecar/) and n8n
+      # blueprints (server/n8n/) were removed with the serverless migration
+      # (Worker + lazy Python sidecars). Their parse/validate steps are
+      # intentionally gone — do not re-add without restoring the dirs.
+
+      - name: Validate NLU Data Foundation
+        run: python server/nlu/data_foundation.py validate

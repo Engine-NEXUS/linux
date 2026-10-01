@@ -1,0 +1,791 @@
+{
+  "schema_version": 1,
+  "source": "nexus_synthetic_phase6",
+  "review_status": "approved_for_candidate_training",
+  "policy": "Targeted examples using same core words as frozen test but with different prepositions or suffixes. Additional OOS examples for whatsapp_search false positives.",
+  "total_examples": 110,
+  "unique_families": 49,
+  "intent_counts": {
+    "get_pr": 45,
+    "unknown": 35,
+    "remove_org_member": 15,
+    "rerun_workflow": 15
+  },
+  "examples": [
+    {
+      "text": "get pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pull request 7 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pull request 15 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pull request 88 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pull request 3 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pull request 42 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pull request 7 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pull request 15 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pull request 88 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pull request 3 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "show pull request 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show pull request 7 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "show pull request 15 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "show pull request 88 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "show pull request 3 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "show pull request 42 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show pull request 7 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "show pull request 15 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "show pull request 88 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "show pull request 3 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pr 42 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pr 7 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pr 15 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pr 88 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pr 3 from {repo}",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pr 42 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pr 7 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pr 15 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pr 88 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pr 3 from the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pull request 42 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pull request 7 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pull request 15 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "show pull request 88 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "show pull request 3 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "get pr 42 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "get pr 7 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "get pr 15 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "get pr 88 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "get pr 3 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "show pull request 42 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "42"
+      }
+    },
+    {
+      "text": "show pull request 7 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "7"
+      }
+    },
+    {
+      "text": "show pull request 15 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "15"
+      }
+    },
+    {
+      "text": "show pull request 88 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "88"
+      }
+    },
+    {
+      "text": "show pull request 3 in the {repo} repository",
+      "intent": "get_pr",
+      "slots": {
+        "repo": "octo/tools",
+        "pr_number": "3"
+      }
+    },
+    {
+      "text": "remove sarah from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "sarah"
+      }
+    },
+    {
+      "text": "remove mike from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "mike"
+      }
+    },
+    {
+      "text": "remove laura from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "laura"
+      }
+    },
+    {
+      "text": "remove tom from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "tom"
+      }
+    },
+    {
+      "text": "remove jenny from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "jenny"
+      }
+    },
+    {
+      "text": "remove frank from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "frank"
+      }
+    },
+    {
+      "text": "remove grace from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "grace"
+      }
+    },
+    {
+      "text": "remove alex from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "alex"
+      }
+    },
+    {
+      "text": "remove nina from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "nina"
+      }
+    },
+    {
+      "text": "remove owen from the {org} organization",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "owen"
+      }
+    },
+    {
+      "text": "remove sarah from the {org} org",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "sarah"
+      }
+    },
+    {
+      "text": "remove mike from the {org} org",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "mike"
+      }
+    },
+    {
+      "text": "remove laura from the {org} org",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "laura"
+      }
+    },
+    {
+      "text": "remove tom from the {org} org",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "tom"
+      }
+    },
+    {
+      "text": "remove jenny from the {org} org",
+      "intent": "remove_org_member",
+      "slots": {
+        "org": "devhub",
+        "username": "jenny"
+      }
+    },
+    {
+      "text": "retry workflow 789 from {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "retry workflow 456 from {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "retry workflow 123 from {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "retry workflow 999 from {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "999"
+      }
+    },
+    {
+      "text": "retry workflow 1001 from {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "1001"
+      }
+    },
+    {
+      "text": "retry workflow 789 from the {repo} repository",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "retry workflow 456 from the {repo} repository",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "retry workflow 123 from the {repo} repository",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "retry workflow 999 from the {repo} repository",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "999"
+      }
+    },
+    {
+      "text": "retry workflow 1001 from the {repo} repository",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "1001"
+      }
+    },
+    {
+      "text": "retry the workflow 789 in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "789"
+      }
+    },
+    {
+      "text": "retry the workflow 456 in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "456"
+      }
+    },
+    {
+      "text": "retry the workflow 123 in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "123"
+      }
+    },
+    {
+      "text": "retry the workflow 999 in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "999"
+      }
+    },
+    {
+      "text": "retry the workflow 1001 in {repo}",
+      "intent": "rerun_workflow",
+      "slots": {
+        "repo": "octo/tools",
+        "workflow_id": "1001"
+      }
+    },
+    {
+      "text": "find my wallet",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find my car keys",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find a good restaurant nearby",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find the nearest gas station",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find my lost dog",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find a dentist in my area",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find the best pizza place",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find my phone",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find a cheap flight to london",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find the remote control",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find a good book to read",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find my glasses",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find a parking spot",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find the tv remote",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "find a new apartment",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is jane goodall",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is the president of france",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is the author of hamlet",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is the richest person in the world",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is the ceo of apple",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is the main character in the book",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is the best soccer player",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is the director of that movie",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is the painter of the mona lisa",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "who is the founder of microsoft",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what is the boiling point of water",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how deep is the ocean",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how do clouds form",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what is gravity",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how do earthquakes happen",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what causes rain",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how do volcanoes erupt",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what is photosynthesis",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "how do batteries work",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "what is the capital of mongolia",
+      "intent": "unknown",
+      "slots": {}
+    }
+  ]
+}

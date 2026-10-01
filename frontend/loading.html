@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NEXUS Loading</title>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        background: transparent !important;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #root {
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #lottie-container {
+        width: 60px;
+        height: 60px;
+      }
+      #lottie-container svg {
+        width: 100% !important;
+        height: 100% !important;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="lottie-container"></div>
+    </div>
+    <script type="module">
+      import lottie from "lottie-web";
+
+      fetch("./loading.json")
+        .then((res) => res.json())
+        .then((data) => {
+          lottie.loadAnimation({
+            container: document.getElementById("lottie-container"),
+            renderer: "svg",
+            loop: true,
+            autoplay: true,
+            animationData: data,
+          });
+        })
+        .catch((err) => console.error("Loading: failed to load lottie:", err));
+    </script>
+  </body>
+</html>

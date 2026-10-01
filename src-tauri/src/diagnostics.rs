@@ -2,7 +2,7 @@
 //!
 //! Services checked:
 //!   1. STT (faster-whisper tiny.en on port 39217 — lazy-started)
-//!   2. TTS (in-process Kokoro engine readiness)
+//!   2. TTS (Piper amy-medium, lazy-loaded)
 //!   3. Cloudflare Worker (HTTP GET to /health)
 //!   4. GitHub OAuth (via Worker /oauth/status)
 //!   5. Google OAuth (via Worker /oauth/status)
@@ -132,23 +132,25 @@ fn get_last_latency() -> Option<u64> {
     LAST_LATENCY.with(|l| l.get())
 }
 
-/// Check if the local STT engine is ready.
+/// Check if the STT engine is ready.
+/// Phase 2: Groq cloud STT is primary (0 MB RAM, ~247ms).
+/// Local faster-whisper on port 39217 is the fallback (lazy-started).
 fn check_stt() -> ServiceStatus {
-    // Check if the faster-whisper STT server is reachable on port 39217
+    // Check if the local faster-whisper fallback STT server is reachable
     match http_get("http://127.0.0.1:39217/health", 3000) {
         Ok((status, _body)) if status >= 200 && status < 400 => {
             ServiceStatus {
-                name: "STT (faster-whisper tiny.en)".into(),
+                name: "STT (Groq cloud + local fallback)".into(),
                 connected: true,
-                detail: "STT server ready on port 39217".into(),
+                detail: "Groq primary + faster-whisper fallback ready on port 39217".into(),
                 latency_ms: get_last_latency(),
             }
         }
         _ => {
             ServiceStatus {
-                name: "STT (faster-whisper tiny.en)".into(),
-                connected: true, // Not an error — lazy-started on first wake
-                detail: "STT server lazy-starts on first wake (port 39217)".into(),
+                name: "STT (Groq cloud + local fallback)".into(),
+                connected: true, // Not an error — Groq is cloud, local is lazy
+                detail: "Groq cloud primary — local fallback lazy-starts on first wake".into(),
                 latency_ms: Some(0),
             }
         }
@@ -209,8 +211,31 @@ fn check_worker(worker_url: &str) -> ServiceStatus {
 }
 
 /// Check GitHub and Google OAuth status via the Worker.
-fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus) {
-    if worker_url.is_empty() || user_id.is_empty() {
+/// Whether the /oauth/status body marks a provider expired.
+/// Shape: {"providers": {"google": {"connected": true, "expired": true}}}.
+/// Scans only inside that provider's block so one provider's flag can't
+/// leak into the other's status.
+fn provider_expired(body: &str, provider: &str) -> bool {
+    let key = format!("\"{provider}\"");
+    let start = match body.find(key.as_str()) {
+        Some(i) => i + key.len(),
+        None => return false,
+    };
+    let rest = &body[start..];
+    // End of this provider's block: next provider key or end of object.
+    let mut end = rest.len();
+    for other in ["\"github\"", "\"google\""] {
+        if other != key.as_str() {
+            if let Some(i) = rest.find(other) {
+                end = end.min(i);
+            }
+        }
+    }
+    let block = &rest[..end];
+    block.contains("\"expired\":true") || block.contains("\"expired\": true")
+}
+
+fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus) {    if worker_url.is_empty() || user_id.is_empty() {
         return (
             ServiceStatus {
                 name: "GitHub".into(),
@@ -244,11 +269,18 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
             let google_connected = body.contains("\"google\"")
                 && (body.contains("\"connected\":true")
                     || body.contains("\"connected\": true"));
+            // The server reports per-provider "expired" (expired AND no
+            // refresh token = reconnect needed). A revoked token previously
+            // showed as plain "connected" — read the flag per provider.
+            let google_expired = provider_expired(&body, "google");
+            let github_expired = provider_expired(&body, "github");
 
             let github = ServiceStatus {
                 name: "GitHub".into(),
-                connected: github_connected,
-                detail: if github_connected {
+                connected: github_connected && !github_expired,
+                detail: if github_expired {
+                    "GitHub token expired — reconnect in setup".into()
+                } else if github_connected {
                     "GitHub OAuth connected".into()
                 } else {
                     "GitHub OAuth not connected — run setup wizard".into()
@@ -258,8 +290,10 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
 
             let google = ServiceStatus {
                 name: "Google".into(),
-                connected: google_connected,
-                detail: if google_connected {
+                connected: google_connected && !google_expired,
+                detail: if google_expired {
+                    "Google token expired — reconnect in setup".into()
+                } else if google_connected {
                     "Google OAuth connected".into()
                 } else {
                     "Google OAuth not connected — run setup wizard".into()
@@ -290,13 +324,35 @@ fn check_oauth(worker_url: &str, user_id: &str) -> (ServiceStatus, ServiceStatus
 }
 
 /// Check TTS configuration.
-/// Kokoro is lazy-loaded on first speak_text call, so at boot it's "ready (lazy)"
-/// — the engine will load in ~1.7s on first TTS request.
+/// Phase 2: edge-tts (cloud) primary, Piper (local) fallback.
+/// Uses the cached network state from tts_network (updated every 60s).
 fn check_tts() -> ServiceStatus {
+    let network_up = crate::tts_network::is_network_up();
+    let piper_loaded = crate::tts_network::is_piper_loaded();
+
+    let (connected, detail) = if network_up {
+        if piper_loaded {
+            (
+                true,
+                "Edge TTS (cloud) active — Piper loaded but will unload after 10 min stable network".to_string(),
+            )
+        } else {
+            (
+                true,
+                "Edge TTS (cloud) active — Piper standby (unloaded, 0 MB RAM)".to_string(),
+            )
+        }
+    } else {
+        (
+            false,
+            "Network down — Piper (local) fallback active (~80 MB RAM)".to_string(),
+        )
+    };
+
     ServiceStatus {
-        name: "TTS (Kokoro 82M)".into(),
-        connected: true,
-        detail: "Lazy-loaded — ready on first speak (~1.7s load, af_sky, am_adam, bf_emma)".into(),
+        name: "TTS (edge-tts cloud + Piper fallback)".into(),
+        connected,
+        detail,
         latency_ms: Some(0),
     }
 }
@@ -401,4 +457,23 @@ pub fn nexus_diagnostics(
 
     let report = run_diagnostics(&worker_url, &user_id);
     serde_json::to_value(&report).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_expired_scoped_per_provider() {
+        let body = r#"{"user_id":"u","providers":{"google":{"connected":true,"expired":true},"github":{"connected":true,"expired":false}}}"#;
+        assert!(provider_expired(body, "google"));
+        assert!(!provider_expired(body, "github"));
+    }
+
+    #[test]
+    fn test_provider_expired_absent_means_healthy() {
+        let body = r#"{"user_id":"u","providers":{"google":{"connected":true}}}"#;
+        assert!(!provider_expired(body, "google"));
+        assert!(!provider_expired(body, "unknown"));
+    }
 }

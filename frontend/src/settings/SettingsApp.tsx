@@ -32,11 +32,18 @@ interface Settings {
   deviceId: string;
   ttsVoice: string;
   speechRate: number;
+  ttsVolume?: number;
+  ttsProvider?: string;
+  elevenlabsApiKey?: string;
+  fishAudioApiKey?: string;
+  googleCloudApiKey?: string;
+  groqApiKey?: string;
+  edgeTtsVoice?: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: true,
-  hotkey: "Super+Space",
+  hotkey: "Ctrl+Super+Space",
   autoHideDelay: 8,
   wakeWordEnabled: true,
   wakePhrase: "NEXUS",
@@ -48,8 +55,12 @@ const DEFAULT_SETTINGS: Settings = {
   serverUrl: "",
   userId: "local-user",
   deviceId: "local-device",
-  ttsVoice: "af_sky",
+  ttsVoice: "en_US-amy-medium",
   speechRate: 1.15,
+  ttsVolume: 75,
+  ttsProvider: "kokoro",
+  groqApiKey: "",
+  edgeTtsVoice: "en-US-AvaNeural",
 };
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
@@ -202,9 +213,9 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Global hotkey</span>
-            <span className="nx-row-hint">Super+Space — DE keybind to nexus --wake (fixed)</span>
+            <span className="nx-row-hint">Ctrl+Super+Space — DE keybind to nexus --wake (fixed)</span>
           </div>
-          <input className="nx-input" value={settings.hotkey} disabled readOnly />
+          <input className="nx-input" value={settings.hotkey} onChange={(e) => update("hotkey", e.target.value)} />
         </div>
         <div className="nx-row">
           <div className="nx-row-label">
@@ -269,28 +280,36 @@ function AudioTab({ settings, update }: { settings: Settings; update: <K extends
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Assistant Voice</span>
-            <span className="nx-row-hint">Curated AI persona voice for spoken answers</span>
+            <span className="nx-row-hint">Cloud TTS (Edge TTS) — free, 0 MB RAM. Falls back to Piper (local) when network is down.</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <select
               className="nx-select"
-              value={settings.ttsVoice}
-              onChange={(e) => update("ttsVoice", e.target.value)}
+              value={settings.edgeTtsVoice || "en-US-AvaNeural"}
+              onChange={(e) => {
+                update("edgeTtsVoice", e.target.value);
+                update("ttsVoice", e.target.value);
+              }}
             >
               {CURATED_VOICES.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.name} ({v.accent})
                 </option>
               ))}
-              <option value="default">System Default (Local)</option>
+              <option value="en-US-EmmaMultilingualNeural">Emma (Female, professional)</option>
+              <option value="en-US-DavisNeural">Davis (Male, calm)</option>
+              <option value="en-US-JennyNeural">Jenny (Female, friendly)</option>
+              <option value="en-US-AriaNeural">Aria (Female, expressive)</option>
+              <option value="en-US-AndrewNeural">Andrew (Male, warm)</option>
+              <option value="en-US-BrandonNeural">Brandon (Male, casual)</option>
             </select>
             <button
               type="button"
               className="nx-btn"
               style={{ padding: "6px 12px", fontSize: "var(--nx-text-xs)" }}
-              onClick={() => handlePreview(settings.ttsVoice)}
+              onClick={() => handlePreview(settings.edgeTtsVoice || "en-US-AvaNeural")}
             >
-              {playingVoice === settings.ttsVoice ? "⏹ Stop" : "▶ Play Sample"}
+              {playingVoice === (settings.edgeTtsVoice || "en-US-AvaNeural") ? "⏹ Stop" : "▶ Play Sample"}
             </button>
           </div>
         </div>
@@ -308,6 +327,24 @@ function AudioTab({ settings, update }: { settings: Settings; update: <K extends
             step={0.1}
             value={settings.speechRate}
             onChange={(e) => update("speechRate", parseFloat(e.target.value))}
+          />
+        </div>
+
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">TTS Volume</span>
+            <span className="nx-row-hint">
+              NEXUS sets system volume to {(settings.ttsVolume ?? 75)}% while speaking, then restores it
+            </span>
+          </div>
+          <input
+            type="range"
+            className="nx-slider"
+            min={0}
+            max={100}
+            step={5}
+            value={settings.ttsVolume ?? 75}
+            onChange={(e) => update("ttsVolume", parseInt(e.target.value))}
           />
         </div>
       </section>
@@ -428,14 +465,14 @@ function BackendTab({ settings, update, connected }: { settings: Settings; updat
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Server URL</span>
-            <span className="nx-row-hint">Fixed backend (hardcoded, not configurable)</span>
+            <span className="nx-row-hint">Your n8n + Ollama backend server address</span>
           </div>
           <input
             type="url"
             className="nx-input"
+            placeholder="https://your-server.com:41098"
             value={settings.serverUrl}
-            disabled
-            readOnly
+            onChange={(e) => update("serverUrl", e.target.value)}
           />
         </div>
         <div className="nx-row">
@@ -477,6 +514,66 @@ function BackendTab({ settings, update, connected }: { settings: Settings; updat
           <button className="nx-btn" onClick={() => invoke("open_setup_window").catch(() => {})}>
             Manage →
           </button>
+        </div>
+      </section>
+
+      <section className="nx-section">
+        <div className="nx-section-title">Cloud STT (Groq)</div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Groq API Key</span>
+            <span className="nx-row-hint">Free at console.groq.com — 2,000 commands/day, forever free</span>
+          </div>
+          <input
+            type="password"
+            className="nx-input"
+            placeholder="gsk_..."
+            value={settings.groqApiKey || ""}
+            onChange={(e) => update("groqApiKey", e.target.value)}
+          />
+        </div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Don't have a key?</span>
+            <span className="nx-row-hint">Sign up free at console.groq.com (Google/GitHub login, no credit card)</span>
+          </div>
+          <button className="nx-btn" onClick={() => window.open("https://console.groq.com/keys", "_blank")}>
+            Get Free Key →
+          </button>
+        </div>
+      </section>
+
+      <section className="nx-section">
+        <div className="nx-section-title">TTS Engine Status</div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Primary Engine</span>
+            <span className="nx-row-hint">Edge TTS (Microsoft Neural, cloud, free)</span>
+          </div>
+          <span className="nx-status-indicator">
+            <span className="nx-status-dot nx-status-dot--ok" />
+            Active
+          </span>
+        </div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Fallback Engine</span>
+            <span className="nx-row-hint">Piper (local ONNX, ~80 MB RAM) — used when network is down, unloaded after 10 min recovery</span>
+          </div>
+          <span className="nx-status-indicator">
+            <span className="nx-status-dot nx-status-dot--ok" />
+            Standby
+          </span>
+        </div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Cost</span>
+            <span className="nx-row-hint">Free forever — no API key, no account, no limit</span>
+          </div>
+          <span className="nx-status-indicator">
+            <span className="nx-status-dot nx-status-dot--ok" />
+            Free
+          </span>
         </div>
       </section>
     </>

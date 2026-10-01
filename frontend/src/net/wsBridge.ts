@@ -186,6 +186,13 @@ export function setLocalAckGiven(): void {
   localAckGiven = true;
 }
 
+/** Check if a local ack has already been given for this query.
+ *  Used by orchestrator.ts to suppress duplicate ack from the Rust
+ *  orchestrator's Ack event. */
+export function isLocalAckGiven(): boolean {
+  return localAckGiven;
+}
+
 /** Reset the local ack flag — called when a new query starts or when
  *  the result arrives. Also resets the analysis-announced guard. */
 function resetLocalAck(): void {
@@ -208,6 +215,8 @@ export function setLongRunningInFlight(transcript: string, onResult: LongRunning
     longRunningInFlight = false;
     lastSentTranscript = "";
     longRunningResultCb = null;
+    // Hide the loading overlay on timeout — the user shouldn't see it forever.
+    useAssistant.getState().setLoadingVisible(false);
   }, 60_000);
 }
 
@@ -230,8 +239,11 @@ let longRunningInFlight = false;
 let lastSentTranscript = "";
 let longRunningTimeout: ReturnType<typeof setTimeout> | null = null;
 
-/** Called by wsBridge when a result arrives — clears in-flight + fires callback. */
-function clearLongRunningInFlight(): void {
+/** Called by wsBridge when a result arrives — clears in-flight + fires callback.
+ *  Also called by orchestrator.ts when an orchestrator event (result/done/error)
+ *  arrives, so the long-running in-flight flag is cleared regardless of which
+ *  path handled the request. */
+export function clearLongRunningInFlight(): void {
   if (longRunningTimeout) {
     clearTimeout(longRunningTimeout);
     longRunningTimeout = null;
@@ -441,11 +453,10 @@ async function handle(ev: ServerEvent): Promise<void> {
     case "result":
       // Final result text from the Worker.
       try {
-        // Hide the loading indicator immediately (non-blocking). The
-        // destroy is dispatched to a thread pool (async Rust command)
-        // so it won't block the result handler or the main thread.
+        // Hide the loading overlay immediately — the result is here.
+        useAssistant.getState().setLoadingVisible(false);
         // We add a small delay before showing the sidebar/orb to give
-        // the OS compositor time to remove the loading window from the
+        // the OS compositor time to remove the loading overlay from the
         // screen, ensuring the loading animation is gone before the
         // response appears — no visual overlap or divergence.
         await new Promise((r) => setTimeout(r, 120));
@@ -487,15 +498,18 @@ async function handle(ev: ServerEvent): Promise<void> {
           if (isArchitectQuery && isTauri()) {
             // Detect the active GitHub repo from the foreground window and
             // pass it to the architect window so it auto-starts analysis.
-            // Rust stores the repo in a pending static; the architect frontend
-            // fetches it on mount via get_pending_architect_repo (race-free).
+            // We use open_architect_with_auto_detect which runs Phase 1 + AI
+            // enrichment in the background BEFORE opening the window, so the
+            // user sees the completed map immediately (no "Waiting for repository...").
             void (async () => {
               try {
-                const active = await tauriInvoke<{ owner: string; repo: string } | null>("get_active_repo_url");
-                const owner = active?.owner;
-                const repo = active?.repo;
-                await tauriInvoke("open_architect_window", owner && repo ? { owner, repo } : {});
+                // open_architect_with_auto_detect handles repo detection,
+                // Phase 1 analysis, AI enrichment, and window opening — all
+                // in one call. The loading indicator stays visible until
+                // the map is ready.
+                await tauriInvoke("open_architect_with_auto_detect");
               } catch {
+                // Fallback: open without auto-detect
                 void tauriInvoke("open_architect_window");
               }
             })();
@@ -584,11 +598,13 @@ async function handle(ev: ServerEvent): Promise<void> {
       // "done" from Rust is now only emitted on error/cancel paths.
       // Normal flow: the "result" handler above emits done after TTS.
       clearLongRunningInFlight();
+      useAssistant.getState().setLoadingVisible(false);
       sessionOpen = false;
       store.reset();
       break;
     case "error":
       clearLongRunningInFlight();
+      useAssistant.getState().setLoadingVisible(false);
       sessionOpen = false;
       console.error("server error:", ev.message);
       if (ev.message) store.addAssistantMessage(`Error: ${ev.message}`);

@@ -40,7 +40,7 @@ fi
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
   if command -v apt-get &> /dev/null; then
     MISSING_PKGS=()
-    for pkg in libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev; do
+    for pkg in libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev libasound2-dev libssl-dev portaudio19-dev; do
       if ! dpkg -s "$pkg" &> /dev/null; then
         MISSING_PKGS+=("$pkg")
       fi
@@ -73,7 +73,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
 [Desktop Entry]
 Name=NEXUS
 Comment=Floating Desktop AI Assistant
-Exec=$SCRIPT_DIR/src-tauri/target/release/nexus
+Exec=env GDK_BACKEND=x11 $SCRIPT_DIR/src-tauri/target/release/nexus
 Icon=$SCRIPT_DIR/src-tauri/icons/128x128.png
 Terminal=false
 Type=Application
@@ -89,7 +89,7 @@ echo -e "${GREEN}✓ NEXUS is installed and ready!${NC}"
 "$SCRIPT_DIR/scripts/register-hotkey.sh" "$SCRIPT_DIR/src-tauri/target/release/nexus" || true
 
 echo -e "• Binary: ~/.local/bin/nexus"
-echo -e "• Global Hotkey: Super+Space (DE keybind → nexus --wake)"
+echo -e "• Global Hotkey: Ctrl+Super+Space (DE keybind → nexus --wake)"
 echo -e "• Wake Word: \"NEXUS\""
 echo -e "${GREEN}═════════════════════════════════════════════════════════════${NC}"
 echo ""

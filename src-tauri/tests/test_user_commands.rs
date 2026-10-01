@@ -3,6 +3,7 @@
 
 use nexus_lib::intent_parser::{parse_deterministic, ParsedIntent, ParseResult};
 
+#[allow(dead_code)]
 fn get_result(input: &str) -> String {
     match parse_deterministic(input) {
         Some(r) => format!("{:?}", r.intent),
