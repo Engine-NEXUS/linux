@@ -108,14 +108,69 @@ mod windows_impl {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 mod unix_impl {
-    /// On Unix, focus is managed by the window manager.
-    /// For now, we just return true (no-op).
-    /// A future implementation could use xdotool or wmctrl.
+    /// Focus a window by partial title match.
+    ///
+    /// Implemented for real on X11/XWayland via EWMH (`wmctrl -a`), which any
+    /// client may invoke. The previous implementation was:
+    ///
+    /// ```ignore
+    /// pub fn focus_app_by_title(_: &str) -> bool { tracing::warn!("…"); true }
+    /// ```
+    ///
+    /// i.e. it warned and then returned `true`, so callers and TTS reported
+    /// success for an action that had not happened.
+    ///
+    /// Native Wayland returns `false`: EWMH does not exist there, `Shell.Eval`
+    /// has been disabled since GNOME 41, and there is no get-active-window
+    /// portal. The compositor tier (GNOME shell extension / KWin scripting) is
+    /// the real answer, per `docs/features/research/21-…` §3.
+    pub fn focus_app_by_title(partial_title: &str) -> bool {
+        if partial_title.trim().is_empty() {
+            return false;
+        }
+        if !crate::session::has_x11_input() {
+            tracing::warn!(
+                "live: cannot focus {:?} — {}",
+                partial_title,
+                crate::session::diagnostic_line()
+            );
+            return false;
+        }
+        for cmd in [
+            vec!["-a", partial_title],
+            vec!["-r", partial_title],
+            vec!["-a", partial_title], // retry after refresh
+        ] {
+            match std::process::Command::new("wmctrl").args(&cmd).output() {
+                Ok(out) if out.status.success() => {
+                    tracing::debug!("live: wmctrl {} ok", cmd.join(" "));
+                    return true;
+                }
+                Ok(out) => tracing::debug!(
+                    "live: wmctrl {} failed ({})",
+                    cmd.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(e) => tracing::debug!("live: wmctrl spawn failed: {e}"),
+            }
+        }
+        tracing::warn!("live: no window matched {:?}", partial_title);
+        false
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+mod unix_impl {
+    /// No window-management mechanism on this platform.
+    ///
+    /// Returns `false` rather than `true`. A caller that is told the truth can
+    /// fall back or explain; a caller told `true` will claim success for a no-op,
+    /// which is how "Ok sir" came to be printed after nothing happened.
     pub fn focus_app_by_title(_partial_title: &str) -> bool {
         tracing::warn!("live: window focus not implemented on this platform");
-        true
+        false
     }
 }
 

@@ -503,8 +503,7 @@ pub fn try_focus_existing(entry: &AppEntry) -> bool {
                 w.title,
                 w.pid
             );
-            focus_window(w.hwnd);
-            return true;
+            return focus_window(w.hwnd);
         }
     }
 
@@ -519,8 +518,7 @@ pub fn try_focus_existing(entry: &AppEntry) -> bool {
                 w.process_name,
                 w.pid
             );
-            focus_window(w.hwnd);
-            return true;
+            return focus_window(w.hwnd);
         }
     }
 
@@ -534,8 +532,7 @@ pub fn try_focus_existing(entry: &AppEntry) -> bool {
                 w.title,
                 w.pid
             );
-            focus_window(w.hwnd);
-            return true;
+            return focus_window(w.hwnd);
         }
     }
 
@@ -545,7 +542,37 @@ pub fn try_focus_existing(entry: &AppEntry) -> bool {
 /// Focus a window: restore if minimized, bring to foreground.
 /// Uses AttachThreadInput trick to bypass Windows' focus-stealing prevention
 /// (NEXUS is a background process, so SetForegroundWindow would normally be rejected).
-fn focus_window(hwnd_val: isize) {
+/// Focus a window by (partial) title on Linux/X11.
+///
+/// Separate from [`focus_window`] because that one takes a native handle from
+/// the `wmctrl`-populated cache, whereas callers here only have a display name.
+/// Both go through EWMH; the title form is what `command_executor` needs when it
+/// has detected a running process but not its window id.
+#[cfg(target_os = "linux")]
+pub fn focus_by_title(partial_title: &str) -> bool {
+    if partial_title.trim().is_empty() || !crate::session::has_x11_input() {
+        return false;
+    }
+    match std::process::Command::new("wmctrl")
+        .args(["-a", partial_title])
+        .status()
+    {
+        Ok(st) => st.success(),
+        Err(e) => {
+            tracing::debug!("focus_by_title: wmctrl unavailable: {e}");
+            false
+        }
+    }
+}
+
+/// Focus a window, returning whether it actually happened.
+///
+/// Returns `bool` rather than `()` because the previous signature made
+/// "did nothing" indistinguishable from "succeeded": `try_focus_existing`
+/// returned `true` unconditionally on every platform, so on Linux the app told
+/// the user "Ok sir" after a no-op. `docs/features/research/22-…` §6 rates this
+/// defect #2 (correctness and trust).
+fn focus_window(hwnd_val: isize) -> bool {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::HWND;
@@ -584,11 +611,50 @@ fn focus_window(hwnd_val: isize) {
 
             tracing::debug!("focused window hwnd={}", hwnd_val);
         }
+        true
     }
 
-    #[cfg(not(target_os = "windows"))]
+    // Linux/X11 (including XWayland): EWMH lets any client raise and focus a
+    // window, so this genuinely works. `xdotool windowactivate` is preferred over
+    // `wmctrl -i -a` because it also restores a minimised window, matching the
+    // Windows arm's restore-if-minimised behaviour.
+    #[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
+    {
+        if !crate::session::has_x11_input() {
+            tracing::warn!(
+                "focus_window: {} — EWMH unavailable, not attempting",
+                crate::session::diagnostic_line()
+            );
+            return false;
+        }
+        let hwnd = hwnd_val.to_string();
+        for cmd in [vec!["windowactivate", "--sync", &hwnd], vec!["windowraise", &hwnd]] {
+            match std::process::Command::new("xdotool").args(&cmd).output() {
+                Ok(out) if out.status.success() => {
+                    tracing::debug!("focus_window: xdotool {} ok", cmd[0]);
+                    return true;
+                }
+                Ok(out) => tracing::debug!(
+                    "focus_window: xdotool {} failed ({})",
+                    cmd[0],
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                Err(e) => tracing::debug!("focus_window: xdotool {} spawn failed: {e}", cmd[0]),
+            }
+        }
+        false
+    }
+
+    #[cfg(all(target_os = "linux", feature = "mock-wake"))]
     {
         let _ = hwnd_val;
+        false
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = hwnd_val;
+        false
     }
 }
 
