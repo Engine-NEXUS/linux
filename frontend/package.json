@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@ricky0123/vad-web": "^0.0.30",
+    "@ricky0123/vad-web": "0.0.31",
     "@tauri-apps/api": "^2.1.0",
     "@tauri-apps/plugin-autostart": "^2.0.0",
     "@tauri-apps/plugin-deep-link": "^2.0.0",
