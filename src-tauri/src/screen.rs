@@ -263,36 +263,47 @@ pub use win::{click_element, find_by_name, list_actionables};
 /// Chrome legitimately miss here and are the CDP tier's job.
 #[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
 pub fn find_by_name(query: &str) -> Option<UiElement> {
-    use std::time::Duration;
-
     if query.trim().is_empty() {
         return None;
     }
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    // Bounded: the HTTP client carries its own timeout, and a locate must not
-    // become the slowest thing in the request.
-    let _ = Duration::from_secs(3);
-    let node = rt.block_on(crate::atspi::find(query, None, None)).ok()??;
-    let b = node.bounds?;
-    if !b.is_real() {
-        // Unlaid-out element: the toolkit has no position yet, so there is
-        // nothing to point at. Report a miss rather than a sentinel coordinate.
-        tracing::debug!("atspi: {query:?} found but has no real geometry");
-        return None;
+    // Cascade: AT-SPI first (exact, and the only tier that gives geometry for
+    // GTK/Qt), then CDP for Chromium/Electron, which AT-SPI sees as a 1-node
+    // skeleton against VS Code's real 1026. Only a genuine semantic miss falls
+    // through to the pixel tier — see `Resolution::should_try_pixels`.
+    match crate::semantic::resolve(query, None) {
+        crate::semantic::Resolution::Found(hit) => {
+            let Some(b) = hit.bounds else {
+                // A CDP hit carries no geometry: the AX tree is semantic, not
+                // spatial. There is nothing to point at, so report a miss rather
+                // than a fabricated coordinate — the caller will fall through to
+                // OCR/VLM, which can at least give a position.
+                tracing::debug!(
+                    "semantic: {query:?} found via {} but it has no geometry",
+                    hit.tier.as_str()
+                );
+                return None;
+            };
+            if !b.is_real() {
+                tracing::debug!("semantic: {query:?} found but has unlaid-out bounds");
+                return None;
+            }
+            Some(UiElement {
+                name: hit.name,
+                // The role is the Linux equivalent of the Windows UIA control
+                // type, so downstream filtering on `kind` keeps working.
+                kind: hit.role,
+                x: b.x,
+                y: b.y,
+                w: b.w,
+                h: b.h,
+            })
+        }
+        crate::semantic::Resolution::NotFound => None,
+        crate::semantic::Resolution::NoTierAvailable { detail } => {
+            tracing::debug!("semantic: no tier available ({detail})");
+            None
+        }
     }
-    Some(UiElement {
-        name: node.name,
-        // The AT-SPI role is the Linux equivalent of the Windows UIA control
-        // type, so downstream filtering that keys on `kind` keeps working.
-        kind: node.role,
-        x: b.x,
-        y: b.y,
-        w: b.w,
-        h: b.h,
-    })
 }
 
 /// macOS has no wired tree yet; the stub keeps the caller shape and falls through.
