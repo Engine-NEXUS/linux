@@ -747,8 +747,11 @@ fn browser_key(keys: &str, label: &str) -> Result<CommandResult, String> {
     }
     #[cfg(target_os = "linux")]
     {
-        // wtype speaks Wayland virtual-keyboard; xdotool = X11-only fallback.
-        // keys here = "ctrl+t" style; wtype needs "-M ctrl -k t -m ctrl".
+        // Backend order depends on the session. `wtype` speaks
+        // wlr-virtual-keyboard, which does NOT exist on GNOME — so on native
+        // Wayland the honest answer is usually `xdotool` under XWayland, and if
+        // that is unavailable the action must fail rather than pretend.
+        let x11_ok = crate::session::has_x11_input();
         let wtype_args: Option<Vec<String>> = match keys {
             "ctrl+t" => Some(vec!["-M".into(), "ctrl".into(), "-k".into(), "t".into(), "-m".into(), "ctrl".into()]),
             "ctrl+w" => Some(vec!["-M".into(), "ctrl".into(), "-k".into(), "w".into(), "-m".into(), "ctrl".into()]),
@@ -756,14 +759,50 @@ fn browser_key(keys: &str, label: &str) -> Result<CommandResult, String> {
             "alt+left" => Some(vec!["-M".into(), "alt".into(), "-k".into(), "Left".into(), "-m".into(), "alt".into()]),
             _ => None,
         };
-        match wtype_args {
-            Some(args) => {
-                let _ = Command::new("wtype").args(&args).spawn()
-                    .or_else(|_| Command::new("xdotool").args(["key", keys]).spawn());
+
+        // Wait for each attempt and inspect the exit status. The previous code
+        // called `.spawn()`, threw the Result away, and then returned
+        // `success: true` unconditionally — so a missing binary, a non-GNOME
+        // compositor, or a rejected keypress all produced a cheerful "… sir"
+        // after nothing had happened. `docs/features/research/22-…` §6 rates this
+        // defect #5 (diagnosability); its real cost is that it is silent.
+        let mut attempts: Vec<(&str, Vec<String>)> = Vec::new();
+        if let Some(args) = wtype_args {
+            attempts.push(("wtype", args));
+        }
+        if x11_ok {
+            attempts.push(("xdotool", vec!["key".into(), keys.into()]));
+        }
+
+        let mut last_err = String::new();
+        let mut delivered = false;
+        for (bin, args) in attempts {
+            match Command::new(bin).args(&args).status() {
+                Ok(st) if st.success() => {
+                    tracing::info!("browser key delivered via {bin} {}", args.join(" "));
+                    delivered = true;
+                    break;
+                }
+                Ok(st) => {
+                    last_err = format!("{bin} exited {}", st);
+                    tracing::debug!("browser key: {bin} failed: {last_err}");
+                }
+                Err(e) => {
+                    last_err = format!("{bin} not usable: {e}");
+                    tracing::debug!("browser key: {bin} unavailable: {e}");
+                }
             }
-            None => {
-                let _ = Command::new("xdotool").args(["key", keys]).spawn();
-            }
+        }
+
+        if !delivered {
+            tracing::warn!("browser key FAILED for {keys}: {last_err}");
+            return Ok(CommandResult {
+                success: false,
+                message: format!(
+                    "I couldn't send that key, sir — {}.",
+                    last_err
+                ),
+            });
         }
     }
     tracing::info!("browser key: {} ({})", keys, label);
@@ -920,11 +959,25 @@ fn check_running_and_focus(target: &str, display_name: &str) -> Option<CommandRe
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    let _ = Command::new("wmctrl").args(["-a", display_name]).spawn();
-                    return Some(CommandResult {
-                        success: true,
-                        message: format!("{} is already open, sir.", display_name),
-                    });
+                    // The app *is* running, but "is running" is not "is focused".
+                    // Spawning `wmctrl` and discarding the Result claimed success
+                    // for an action that on native Wayland does nothing, because
+                    // EWMH is absent there. Now we wait and report the truth, and
+                    // fall back to `None` so the caller launches a fresh instance
+                    // rather than reporting a focus that never happened.
+                    let focused = crate::app_registry::focus_by_title(display_name);
+                    return if focused {
+                        Some(CommandResult {
+                            success: true,
+                            message: format!("{} is already open, sir.", display_name),
+                        })
+                    } else {
+                        tracing::debug!(
+                            "focus of already-running {:?} failed; falling through to launch",
+                            display_name
+                        );
+                        None
+                    };
                 }
                 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
                 {

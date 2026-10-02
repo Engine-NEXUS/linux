@@ -20,6 +20,35 @@ use enigo::{
 use std::thread;
 use std::time::Duration;
 
+/// Build an `Enigo` handle, failing with an actionable message.
+///
+/// `Cargo.toml` declares `enigo = "0.5"` with no features, so only the `x11rb`
+/// backend is compiled. On native Wayland there is no `$DISPLAY` and
+/// `Enigo::new` cannot connect. Rather than the bare `enigo init: ...` string
+/// that produced, the error now names the session type and the real remedy,
+/// because "couldn't type" with no explanation is the failure mode that made
+/// this look like a working feature.
+///
+/// Longer-term fix is the semantic tiers in
+/// `docs/features/research/20-…`: `AT-SPI EditableText` and CDP
+/// `Runtime.evaluate` both set field contents with no input synthesis at all,
+/// which sidesteps the Wayland input lockdown rather than fighting it.
+fn init_enigo() -> Result<enigo::Enigo, String> {
+    if !crate::session::has_x11_input() {
+        tracing::warn!(
+            "live: keyboard synthesis attempted on a session without XTEST — {}",
+            crate::session::diagnostic_line()
+        );
+    }
+    Enigo::new(&Settings::default()).map_err(|e| {
+        format!(
+            "keyboard input unavailable: {e} ({}). On Wayland this needs the \
+             semantic input path or libei via the RemoteDesktop portal.",
+            crate::session::kind().input_capability()
+        )
+    })
+}
+
 /// Type text into the currently focused input field.
 ///
 /// For short text (< 50 chars), uses enigo's `text()` which simulates
@@ -27,8 +56,7 @@ use std::time::Duration;
 /// (Ctrl+V) to avoid autocomplete corruption and improve speed.
 pub fn type_text(text: &str) -> Result<(), String> {
     tracing::info!("live: typing {} chars", text.len());
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("enigo init: {e}"))?;
+    let mut enigo = init_enigo()?;
 
     if text.len() > 50 {
         // Use clipboard paste for longer text (OpenDex pattern)
@@ -60,8 +88,7 @@ fn paste_text(text: &str) -> Result<(), String> {
     thread::sleep(Duration::from_millis(50));
 
     // Press Ctrl+V (or Cmd+V on macOS)
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("enigo init: {e}"))?;
+    let mut enigo = init_enigo()?;
 
     let modifier = if cfg!(target_os = "macos") {
         Key::Meta
@@ -92,8 +119,7 @@ fn paste_text(text: &str) -> Result<(), String> {
 /// Press a single key (e.g., "enter", "escape", "tab").
 pub fn press_key(key: &str) -> Result<(), String> {
     tracing::info!("live: pressing key: {key}");
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("enigo init: {e}"))?;
+    let mut enigo = init_enigo()?;
 
     let k = parse_key(key).ok_or_else(|| format!("unknown key: {key}"))?;
     enigo
@@ -113,8 +139,7 @@ pub fn press_hotkey(keys: &[&str]) -> Result<(), String> {
 
     tracing::info!("live: pressing hotkey: {:?}", keys);
 
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("enigo init: {e}"))?;
+    let mut enigo = init_enigo()?;
 
     // Parse all keys
     let parsed: Vec<Key> = keys
