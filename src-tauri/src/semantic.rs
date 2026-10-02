@@ -21,6 +21,7 @@
 
 use crate::atspi::AtspiNode;
 use crate::cdp::CdpNode;
+use crate::policy::Decision;
 
 /// An element resolved by one of the semantic tiers.
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +84,19 @@ impl Resolution {
     }
 }
 
+/// The observed foreground `(application, window title)`.
+///
+/// `None` when the bus cannot say — which on this platform is common, and which
+/// the policy layer treats as "unknown", not as "safe".
+pub fn observed_window() -> Option<(String, String)> {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+    let fg = rt.block_on(crate::atspi::focused()).ok()?;
+    match fg {
+        crate::atspi::Foreground::Known { app, title } => Some((app, title)),
+        crate::atspi::Foreground::Unknown { .. } => None,
+    }
+}
+
 fn from_atspi(n: AtspiNode) -> Option<SemanticHit> {
     Some(SemanticHit {
         name: n.name,
@@ -126,6 +140,33 @@ pub fn resolve(name: &str, role: Option<&str>) -> Resolution {
 fn resolve_in(rt: &tokio::runtime::Runtime, name: &str, role: Option<&str>) -> Resolution {
     let mut asked_any = false;
     let mut last_err: Option<String> = None;
+
+    // ── Policy gate ──────────────────────────────────────────────────────
+    // Every semantic operation passes here first. The identity checked is the
+    // OBSERVED one (from the accessibility bus), never the name the model
+    // supplied — a prompt injection can rename its target, but it cannot change
+    // what GNOME reports the focused window to be. See `policy` for why.
+    let observed = observed_window();
+    let window_sensitive = observed
+        .as_ref()
+        .and_then(|(a, t)| crate::policy::classify_window(a, t));
+    match crate::policy::decide(
+        crate::policy::Op::LocateGeometry,
+        observed.is_some(),
+        window_sensitive,
+        None,
+    ) {
+        d if d.may_proceed_unattended() => {}
+        Decision::Confirm { reason } => {
+            tracing::info!("semantic: {name:?} needs confirmation — {reason}");
+            return Resolution::NotFound;
+        }
+        Decision::Deny { reason } => {
+            tracing::warn!("semantic: refused {name:?} — {reason}");
+            return Resolution::NotFound;
+        }
+        _ => {}
+    }
 
     // ── Tier 1: AT-SPI ────────────────────────────────────────────────────
     match rt.block_on(crate::atspi::find(name, None, role)) {
