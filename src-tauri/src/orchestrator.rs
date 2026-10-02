@@ -1495,8 +1495,7 @@ async fn dispatch_to_worker<R: Runtime>(
         request_id
     );
 
-    let resp = client
-        .post(&worker_url)
+    let resp = crate::device_auth::apply_to(client.post(&worker_url))
         .json(&payload)
         .send()
         .await

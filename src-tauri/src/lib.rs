@@ -62,6 +62,8 @@ pub mod live;
 pub mod router;
 pub mod mcp_client;
 pub mod auth_vault;
+pub mod device_auth;
+pub mod worker_proxy;
 pub mod ghostwriter;
 pub mod screen;
 pub mod vision;
@@ -792,6 +794,43 @@ pub fn run() {
                         let did = json["deviceId"].as_str().unwrap_or("");
                         if !uid.is_empty() {
                             network::open_session_from_config(url, uid, did);
+
+                            // Security (2026-10-02): register this device so the
+                            // Worker can authenticate it. Every non-public
+                            // Worker route is deny-by-default, so this must
+                            // succeed before any token fetch or intent POST.
+                            //
+                            // Runs in a background thread: registration is a
+                            // network round trip and must not delay first paint.
+                            // Failures are non-fatal — the Worker will answer
+                            // 401 and every error message says to re-check the
+                            // connection, which is the correct signal.
+                            let reg_url = url.to_string();
+                            let reg_uid = uid.to_string();
+                            let reg_did = did.to_string();
+                            tauri::async_runtime::spawn(async move {
+                                match device_auth::ensure_registered(
+                                    &reg_url,
+                                    &reg_uid,
+                                    &reg_did,
+                                    "NEXUS",
+                                    std::env::consts::OS,
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        tracing::info!(
+                                            "startup: device registered with worker"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "startup: device registration failed: {e} — \
+                                             Worker calls will return 401 until this resolves"
+                                        );
+                                    }
+                                }
+                            });
                         }
                     }
                 }
@@ -961,6 +1000,7 @@ pub fn run() {
             commands::close_setup_window,
             commands::save_server_config,
             commands::get_server_config,
+            worker_proxy::worker_request,
             commands::meeting_active,
             commands::is_nexus_paused,
             commands::meeting_status,

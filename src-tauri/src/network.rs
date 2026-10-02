@@ -229,8 +229,7 @@ pub async fn send_transcript<R: Runtime>(
 
     eprintln!("[NEXUS] sending transcript to worker: url={} text={}", worker_url, text.chars().take(80).collect::<String>());
 
-    let resp = client
-        .post(&worker_url)
+    let resp = crate::device_auth::apply_to(client.post(&worker_url))
         .json(&payload)
         .send()
         .await

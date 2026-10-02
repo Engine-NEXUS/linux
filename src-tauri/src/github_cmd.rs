@@ -62,12 +62,13 @@ impl CachedToken {
 /// The Worker handles refresh logic internally — we just get a valid token.
 async fn fetch_token_from_worker(
     worker_url: &str,
-    user_id: &str,
+    _user_id: &str,
 ) -> Result<String, String> {
+    // Security (2026-10-02): no `user_id` query parameter. The Worker derives
+    // the account from the authenticated device credential.
     let url = format!(
-        "{}/oauth/github-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
+        "{}/oauth/github-token",
+        worker_url.trim_end_matches('/')
     );
     tracing::info!("github_cmd: fetching token from worker: {}", url);
 
@@ -76,14 +77,19 @@ async fn fetch_token_from_worker(
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
-    let resp = client
-        .get(&url)
+    let resp = crate::device_auth::apply_to(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("token fetch: {e}"))?;
 
     if resp.status() == 404 {
         return Err("GitHub not connected. Please connect GitHub in the NEXUS setup.".into());
+    }
+    if resp.status() == 401 || resp.status() == 403 {
+        return Err(
+            "Device not authorized with the Worker. Reconnect NEXUS or check settings."
+                .into(),
+        );
     }
     if !resp.status().is_success() {
         let status = resp.status();

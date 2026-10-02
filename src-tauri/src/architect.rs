@@ -1197,6 +1197,30 @@ pub fn cancel_architect_analysis(
 /// IPC: Phase 1 fast architectural analysis. Accepts a Tauri Channel for
 /// progressive status updates (ordered, scoped to this invocation).
 /// The final result is returned as the command's return value.
+
+/// Resolve a GitHub token on the Rust side when the caller did not supply one.
+///
+/// Security (2026-10-02): the Architect WebView used to fetch a live OAuth token
+/// from `/oauth/github-token?user_id=…` itself, purely to hand it straight back
+/// to these commands. That put a credential in the renderer for no benefit. The
+/// frontend now passes nothing, and the token is resolved here, where the
+/// Worker's device credential is already available.
+///
+/// A `None` result is not an error: it just means the repo must be public.
+async fn resolve_github_token(github_token: Option<String>) -> Option<String> {
+    if let Some(tok) = github_token.filter(|t| !t.trim().is_empty()) {
+        return Some(tok);
+    }
+    let (worker_url, user_id, _device_id) = crate::network::get_session_info()?;
+    match crate::github_cmd::get_github_token(&worker_url, &user_id).await {
+        Ok(tok) => Some(tok),
+        Err(e) => {
+            tracing::info!("architect: no GitHub token available ({e}) — public repos only");
+            None
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn analyze_repo_phase1<R: Runtime>(
     app: AppHandle<R>,
@@ -1208,6 +1232,7 @@ pub async fn analyze_repo_phase1<R: Runtime>(
 ) -> Result<Phase1Response, String> {
     let cancel = cancels.add(on_progress.id());
     let channel_id = on_progress.id();
+    let github_token = resolve_github_token(github_token).await;
     let result = analyze_repo_phase1_inner(app, owner, repo, github_token, Some(on_progress), cancel).await;
     cancels.remove(channel_id);
     result
@@ -1410,8 +1435,7 @@ async fn do_enrich_phase1(
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
-    let resp = client
-        .post(&worker_url)
+    let resp = crate::device_auth::apply_to(client.post(&worker_url))
         .json(&payload)
         .send()
         .await
@@ -1727,6 +1751,7 @@ pub async fn analyze_repo_deep<R: Runtime>(
 ) -> Result<Phase2Response, String> {
     let cancel = cancels.add(on_progress.id());
     let channel_id = on_progress.id();
+    let github_token = resolve_github_token(github_token).await;
     let result = analyze_repo_deep_inner(app, owner, repo, github_token, Some(on_progress), cancel).await;
     cancels.remove(channel_id);
     result

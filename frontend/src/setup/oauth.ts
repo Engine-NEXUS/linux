@@ -16,11 +16,34 @@
  */
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
 
 // The Worker base URL. In production this comes from the saved config.
 // The setup page sets this from the server config.
 let workerBaseUrl = "";
+
+/**
+ * Perform an allowlisted Worker request through Rust.
+ *
+ * Security (2026-10-02): these calls used to be direct `fetch`es from the
+ * WebView. The Worker is now deny-by-default and authenticates by a device
+ * credential held in Rust's OS keyring, so the renderer must not make them
+ * itself — and must never receive the credential in order to do so. Rust
+ * attaches it and returns only the response body.
+ */
+async function workerCall(
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  opts: { query?: string; body?: unknown } = {},
+): Promise<any> {
+  return await invoke<any>("worker_request", {
+    method,
+    path,
+    query: opts.query ?? null,
+    body: opts.body ?? null,
+  });
+}
 
 export function setSidecarBaseUrl(url: string): void {
   // Strip trailing slash.
@@ -91,17 +114,18 @@ export async function connectOAuth(
   const codeChallenge = await generateCodeChallenge(codeVerifier);
 
   // 1. Ask Worker for the authorization URL.
-  console.log(`[OAuth] Fetching auth URL from ${workerBaseUrl}/oauth/auth-url?provider=${provider}&user_id=${encodeURIComponent(userId)}&code_challenge=${codeChallenge}`);
-  const authUrlResp = await fetch(
-    `${workerBaseUrl}/oauth/auth-url?provider=${provider}&user_id=${encodeURIComponent(userId)}&code_challenge=${codeChallenge}`,
-  );
-  if (!authUrlResp.ok) {
-    const err = await authUrlResp.json().catch(() => ({}));
-    const msg = err.error || `Failed to get OAuth URL (${authUrlResp.status})`;
+  console.log(`[OAuth] Requesting auth URL for provider=${provider} (via Rust proxy)`);
+  // Security (2026-10-02): via Rust so the device credential stays out of the
+  // renderer. No user_id — the Worker derives the account from the device.
+  const authUrlData = await workerCall("GET", "/oauth/auth-url", {
+    query: `provider=${encodeURIComponent(provider)}&code_challenge=${encodeURIComponent(codeChallenge)}`,
+  });
+  if (!authUrlData?.url) {
+    const msg = authUrlData?.error || "Failed to get OAuth URL";
     console.error(`[OAuth] auth-url failed: ${msg}`);
     throw new Error(msg);
   }
-  const { url } = await authUrlResp.json();
+  const { url } = authUrlData;
   console.log(`[OAuth] Got auth URL: ${url.substring(0, 80)}...`);
 
   // 2. Open the system browser for the user to log in.
@@ -225,22 +249,20 @@ async function handleOAuthRedirect(rawUrl: string): Promise<void> {
 
     if (code) {
       // Exchange code if direct redirect was used
-      const resp = await fetch(`${workerBaseUrl}/oauth/exchange`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const resp = await workerCall("POST", "/oauth/exchange", {
+        body: {
           provider: pending.provider,
           code,
           code_verifier: pending.codeVerifier,
           redirect_uri: `${workerBaseUrl}/oauth/callback`,
-          user_id: pending.userId,
+          // user_id is no longer sent — the Worker binds the state to the
+          // authenticated device (security fix, 2026-10-02).
           state: url.searchParams.get("state"),
-        }),
+        },
       });
 
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        throw new Error(err.error || `Exchange failed (${resp.status})`);
+      if (resp?.error) {
+        throw new Error(String(resp.error));
       }
 
       pending.resolve(true);
@@ -258,36 +280,27 @@ async function handleOAuthRedirect(rawUrl: string): Promise<void> {
 
 /** Store an API key for a third-party service (Claude, Devin, etc.). */
 export async function addApiKey(userId: string, provider: string, apiKey: string): Promise<void> {
-  if (!workerBaseUrl) throw new Error("Server URL not configured");
-  const resp = await fetch(`${workerBaseUrl}/apikeys/add`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: userId, provider, api_key: apiKey }),
+  void userId; // Worker derives the account from the device credential.
+  await workerCall("POST", "/apikeys/add", {
+    body: { provider, api_key: apiKey },
   });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error(err.error || `Failed to store API key (${resp.status})`);
-  }
 }
 
 /** Remove a stored API key. */
 export async function removeApiKey(userId: string, provider: string): Promise<void> {
-  if (!workerBaseUrl) throw new Error("Server URL not configured");
-  const resp = await fetch(`${workerBaseUrl}/apikeys/remove`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: userId, provider }),
-  });
-  if (!resp.ok) throw new Error(`Failed to remove API key (${resp.status})`);
+  void userId;
+  await workerCall("DELETE", "/apikeys/remove", { body: { provider } });
 }
 
 /** List which API key providers are stored (does NOT return the keys). */
 export async function listApiKeys(userId: string): Promise<string[]> {
-  if (!workerBaseUrl) return [];
-  const resp = await fetch(`${workerBaseUrl}/apikeys/list?user_id=${encodeURIComponent(userId)}`);
-  if (!resp.ok) return [];
-  const data = await resp.json();
-  return data.providers || [];
+  void userId;
+  try {
+    const data = await workerCall("GET", "/apikeys/list");
+    return data?.providers || [];
+  } catch {
+    return [];
+  }
 }
 
 // ---- OAuth status ----
@@ -300,22 +313,19 @@ export interface OAuthStatus {
 
 /** Check which OAuth providers are connected for a user. */
 export async function getOAuthStatus(userId: string): Promise<Record<string, OAuthStatus>> {
-  if (!workerBaseUrl) return {};
-  const resp = await fetch(`${workerBaseUrl}/oauth/status?user_id=${encodeURIComponent(userId)}`);
-  if (!resp.ok) return {};
-  const data = await resp.json();
-  return data.providers || {};
+  void userId;
+  try {
+    const data = await workerCall("GET", "/oauth/status");
+    return data?.providers || {};
+  } catch {
+    return {};
+  }
 }
 
 /** Disconnect an OAuth provider. */
 export async function disconnectOAuth(userId: string, provider: string): Promise<void> {
-  if (!workerBaseUrl) throw new Error("Server URL not configured");
-  const resp = await fetch(`${workerBaseUrl}/oauth/disconnect`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: userId, provider }),
-  });
-  if (!resp.ok) throw new Error(`Failed to disconnect (${resp.status})`);
+  void userId;
+  await workerCall("DELETE", "/oauth/disconnect", { body: { provider } });
 }
 
 /** Open a URL in the system browser. */

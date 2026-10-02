@@ -38,6 +38,10 @@ import {
   selectAnalysisModel, selectSearchModel, selectSummaryModel,
   truncateContext, FLASH_CONTEXT_LIMIT_CHARS,
 } from "./models";
+import {
+  authenticateDevice, consumeOAuthState, createOAuthState, registerDevice,
+  PUBLIC_ROUTES,
+} from "./auth";
 
 // ---- Types ----
 
@@ -1838,19 +1842,55 @@ export default {
     const json = (data: unknown, status = 200) =>
       new Response(JSON.stringify(data), {
         status,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        // SECURITY (2026-10-02): was `Access-Control-Allow-Origin: "*"`, which
+        // let any origin read these responses. The Worker is called from a Tauri
+        // WebView (an opaque-ish origin) and by `curl`, neither of which needs a
+        // permissive CORS policy. Reflecting the request origin and requiring
+        // the device credential is the correct pairing: CORS is not
+        // authentication, but `*` was advertising that we had none.
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": request.headers.get("Origin") || "null",
+          "Vary": "Origin",
+        },
       });
 
     // ---- CORS preflight ----
     if (method === "OPTIONS") {
       return new Response(null, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Origin": request.headers.get("Origin") || "null",
+          "Vary": "Origin",
           "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Nexus-Device-Token",
+          "Access-Control-Max-Age": "600",
         },
       });
     }
+
+    // ---- Authentication gate (deny by default) ----
+    //
+    // SECURITY (2026-10-02): before this, only 1 of 19 routes was gated, and
+    // the three routes that return live OAuth access tokens were not gated at
+    // all. Anything not on the public allowlist now requires a valid device
+    // credential. `/models/nlu/publish` is admin-token gated further down and
+    // is deliberately reached before this check.
+    //
+    // `authUserId` is the ONLY user identity any handler below is allowed to
+    // trust. A `user_id` query parameter or body field is a routing hint, never
+    // an authorization input — that was the root cause of the token leak.
+    let authUserId: string | null = null;
+    const routeKey = `${method} ${path}`;
+    if (!PUBLIC_ROUTES.has(routeKey)) {
+      const auth = await authenticateDevice(request, env, json);
+      if ("error" in auth) return auth.error;
+      authUserId = auth.device.user_id;
+    }
+    /** Handlers call this instead of reading `user_id` off the request. */
+    const requireAuthUserId = (): string | Response => {
+      if (!authUserId) return json({ error: "unauthorized" }, 401);
+      return authUserId;
+    };
 
     // ---- Health ----
     if (path === "/health" && method === "GET") {
@@ -1864,7 +1904,9 @@ export default {
 
     // ---- OAuth: get auth URL ----
     if (path === "/oauth/auth-url" && method === "GET") {
-      return handleAuthUrl(url, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleAuthUrl(url, env, json, userId);
     }
 
     // ---- OAuth: browser callback (for testing — exchanges code automatically) ----
@@ -1874,18 +1916,28 @@ export default {
 
     // ---- OAuth: exchange code for tokens ----
     if (path === "/oauth/exchange" && method === "POST") {
-      return handleOAuthExchange(request, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleOAuthExchange(request, env, json, userId);
     }
 
     // ---- OAuth: status ----
     if (path === "/oauth/status" && method === "GET") {
-      return handleOAuthStatus(url, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleOAuthStatus(userId, env, json);
     }
 
     // ---- OAuth: get github token (for architect) ----
+    //
+    // SECURITY (2026-10-02): these three endpoints used to key purely on
+    // `?user_id=`, returning a live access token to anyone who supplied a string.
+    // The user is now taken from the authenticated device. `user_id` is no
+    // longer read from the query at all — a device can only ever mint a token
+    // for the account it registered as.
     if (path === "/oauth/github-token" && method === "GET") {
-      const userId = url.searchParams.get("user_id") || "";
-      if (!userId) return json({ error: "user_id required" }, 400);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
       const token = await getValidGithubToken(env, userId);
       if (!token) return json({ error: "GitHub not connected" }, 404);
       return json({ token });
@@ -1894,8 +1946,8 @@ export default {
     // ---- OAuth: get google token (for MCP vault: Gmail/Calendar/
     // Contacts/Drive/Sheets/Meet — one union consent, refreshed here) ----
     if (path === "/oauth/google-token" && method === "GET") {
-      const userId = url.searchParams.get("user_id") || "";
-      if (!userId) return json({ error: "user_id required" }, 400);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
       const token = await getValidGoogleToken(env, userId);
       if (!token) return json({ error: "Google not connected" }, 404);
       return json({ token });
@@ -1903,8 +1955,8 @@ export default {
 
     // ---- OAuth: get swiggy token (for MCP vault — silently refreshed) ----
     if (path === "/oauth/swiggy-token" && method === "GET") {
-      const userId = url.searchParams.get("user_id") || "";
-      if (!userId) return json({ error: "user_id required" }, 400);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
       const token = await getValidSwiggyToken(env, userId);
       if (!token) return json({ error: "Swiggy not connected" }, 404);
       return json({ token });
@@ -1912,22 +1964,30 @@ export default {
 
     // ---- OAuth: disconnect ----
     if (path === "/oauth/disconnect" && method === "DELETE") {
-      return handleOAuthDisconnect(request, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleOAuthDisconnect(request, env, json, userId);
     }
 
     // ---- API keys: add ----
     if (path === "/apikeys/add" && method === "POST") {
-      return handleAddApiKey(request, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleAddApiKey(request, env, json, userId);
     }
 
     // ---- API keys: remove ----
     if (path === "/apikeys/remove" && method === "DELETE") {
-      return handleRemoveApiKey(request, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleRemoveApiKey(request, env, json, userId);
     }
 
     // ---- API keys: list ----
     if (path === "/apikeys/list" && method === "GET") {
-      return handleListApiKeys(url, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleListApiKeys(env, json, userId);
     }
 
     // ---- Config check ----
@@ -2043,14 +2103,31 @@ async function handleRegister(
   if (!userId || !deviceId) return json({ error: "user_id and device_id required" }, 400);
 
   const now = Date.now() / 1000;
-  await env.DB.prepare(
-    "INSERT OR REPLACE INTO user_devices (user_id, device_id, device_name, os, device_token, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-  ).bind(userId, deviceId, body.device_name || "", body.os || "", body.device_token || null, now).run();
+
+  // SECURITY (2026-10-02): this previously stored a client-supplied
+  // `device_token` verbatim in a column nothing ever read. Registration now
+  // mints a bearer token server-side, returns it exactly once, and persists only
+  // its SHA-256. Re-registering rotates the credential.
+  //
+  // This route is intentionally public (it is the bootstrap), which is safe
+  // because it can only ever write a hash of a caller-chosen token for a
+  // caller-chosen device_id. It grants no access to anything.
+  const deviceToken = await registerDevice(
+    env,
+    userId,
+    deviceId,
+    body.device_name || null,
+    body.os || null,
+    now,
+  );
 
   return json({
     ok: true,
     user_id: userId,
     device_id: deviceId,
+    // Returned once, at registration only. The client must persist this; the
+    // Worker will never disclose it again.
+    device_token: deviceToken,
     server_config: {
       worker_url: new URL(request.url).origin,
       ws_url: "",  // no WebSocket — HTTP only
@@ -2068,15 +2145,22 @@ async function handleAuthUrl(
   url: URL,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  authUserId: string,
 ): Promise<Response> {
   const provider = (url.searchParams.get("provider") || "").toLowerCase();
-  const userId = url.searchParams.get("user_id") || "";
+  if (!provider) return json({ error: "provider required" }, 400);
+  // SECURITY (2026-10-02): the user comes from the authenticated device, never
+  // from the query string.
+  const userId = authUserId;
   const codeChallenge = url.searchParams.get("code_challenge") || "";
   const workerOrigin = url.origin;
   const callbackUrl = `${workerOrigin}/oauth/callback`;
 
-  // State format: provider:userId
-  const state = `${provider}:${userId}`;
+  // SECURITY (2026-10-02): `state` was the literal "provider:userId" — not
+  // random (so not a CSRF token) and it published the user_id in the provider
+  // redirect URL. It is now 32 random bytes, stored hashed, single-use, TTL'd,
+  // and bound server-side to this user/provider pair.
+  const state = await createOAuthState(env, userId, provider, Date.now() / 1000);
 
   if (provider === "google") {
     if (!env.GOOGLE_CLIENT_ID) return json({ error: "Google OAuth not configured" }, 500);
@@ -2209,16 +2293,28 @@ async function handleOAuthBrowserCallback(
   const workerOrigin = url.origin;
   const callbackUrl = `${workerOrigin}/oauth/callback`;
 
-  // Parse state: "provider:userId" or legacy "userId"
-  let provider = "";
-  let userId = state;
-  if (state.includes(":")) {
-    const parts = state.split(":");
-    provider = parts[0].toLowerCase();
-    userId = parts.slice(1).join(":");
-  } else {
-    provider = (url.searchParams.get("scope")?.includes("google") || url.searchParams.get("scope")?.includes("calendar")) ? "google" : "github";
+  // SECURITY (2026-10-02): `state` is no longer parsed for identity. It is an
+  // opaque single-use value; redeeming it returns the bound user and provider.
+  // Parsing "provider:userId" out of the query string was both non-random (so
+  // not a CSRF defence) and a user_id disclosure channel.
+  const redeemed = state ? await consumeOAuthState(env, state, Date.now() / 1000) : null;
+
+  if (!redeemed) {
+    // Unknown, expired, or already-used state. Refuse rather than guess — this
+    // is the CSRF boundary for the whole OAuth flow.
+    const providerGuess = (url.searchParams.get("scope") || "").includes("google")
+      ? "google"
+      : "Service";
+    const message = error
+      ? `Authorization error: ${error}`
+      : "This sign-in link is invalid or has expired. Please start the connection again from NEXUS.";
+    return new Response(renderOAuthHtml(providerGuess, false, message, ""), {
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
   }
+
+  const provider = redeemed.provider.toLowerCase();
+  const userId = redeemed.user_id;
 
   if (error) {
     return new Response(renderOAuthHtml(provider || "Service", false, `Authorization error: ${error}`, userId), {
@@ -2386,6 +2482,7 @@ async function handleOAuthExchange(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  authUserId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
@@ -2393,11 +2490,33 @@ async function handleOAuthExchange(
   const provider = (body.provider || "").toLowerCase();
   const code = body.code || "";
   const codeVerifier = body.code_verifier || "";
-  const userId = body.user_id || "";
   const workerOrigin = new URL(request.url).origin;
   const redirectUri = body.redirect_uri || `${workerOrigin}/oauth/callback`;
 
-  if (!provider || !code || !userId) return json({ error: "missing required fields" }, 400);
+  // Security (2026-10-02): the account comes from the authenticated device,
+  // never from `body.user_id`. Previously a caller could exchange a code for any
+  // user_id they named.
+  const userId = authUserId;
+
+  if (!provider || !code) return json({ error: "missing required fields" }, 400);
+
+  // This is the deep-link leg of the OAuth flow (provider -> nexus:// callback ->
+  // renderer -> here). The browser-redirect leg validates `state` in
+  // handleOAuthBrowserCallback instead. Both must redeem it, or neither does.
+  const state = body.state || "";
+  const redeemed = state
+    ? await consumeOAuthState(env, state, Date.now() / 1000)
+    : null;
+  if (!redeemed) {
+    return json(
+      { error: "invalid or expired OAuth state — restart the connection from NEXUS" },
+      400,
+    );
+  }
+  // The state was minted for one provider; refuse to redeem it for another.
+  if (redeemed.provider.toLowerCase() !== provider) {
+    return json({ error: "OAuth state/provider mismatch" }, 400);
+  }
 
   try {
     let tokens: any;
@@ -2499,12 +2618,10 @@ async function handleOAuthExchange(
 // ---- OAuth status handler ----
 
 async function handleOAuthStatus(
-  url: URL,
+  userId: string,
   env: Env,
   json: (d: unknown, s?: number) => Response,
 ): Promise<Response> {
-  const userId = url.searchParams.get("user_id") || "";
-  if (!userId) return json({ error: "user_id required" }, 400);
 
   const connected: Record<string, any> = {};
   const now = Date.now() / 1000;
@@ -2537,12 +2654,14 @@ async function handleOAuthDisconnect(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  authUserId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-  const userId = body.user_id || "";
+  // Security (2026-10-02): a device can only disconnect its own account.
+  const userId = authUserId;
   const provider = body.provider || "";
-  if (!userId || !provider) return json({ error: "user_id and provider required" }, 400);
+  if (!provider) return json({ error: "provider required" }, 400);
 
   await env.DB.prepare(
     "DELETE FROM oauth_tokens WHERE user_id = ? AND provider = ?"
@@ -2557,13 +2676,15 @@ async function handleAddApiKey(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  authUserId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-  const userId = body.user_id || "";
+  // Security (2026-10-02): account comes from the authenticated device.
+  const userId = authUserId;
   const provider = body.provider || "";
   const apiKey = body.api_key || "";
-  if (!userId || !provider || !apiKey) return json({ error: "missing required fields" }, 400);
+  if (!provider || !apiKey) return json({ error: "missing required fields" }, 400);
 
   // Simple obfuscation (not real encryption in Worker — D1 is already encrypted at rest)
   const encrypted = btoa(apiKey);
@@ -2579,22 +2700,24 @@ async function handleRemoveApiKey(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  authUserId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+  // Security (2026-10-02): a device cannot delete another account's keys.
   await env.DB.prepare(
     "DELETE FROM api_keys WHERE user_id = ? AND provider = ?"
-  ).bind(body.user_id || "", body.provider || "").run();
+  ).bind(authUserId, body.provider || "").run();
   return json({ ok: true, removed: body.provider });
 }
 
 async function handleListApiKeys(
-  url: URL,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  authUserId: string,
 ): Promise<Response> {
-  const userId = url.searchParams.get("user_id") || "";
-  if (!userId) return json({ error: "user_id required" }, 400);
+  // Security (2026-10-02): no user_id query parameter.
+  const userId = authUserId;
   const result = await env.DB.prepare(
     "SELECT provider FROM api_keys WHERE user_id = ?"
   ).bind(userId).all();

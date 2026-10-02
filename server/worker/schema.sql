@@ -26,13 +26,25 @@ CREATE TABLE IF NOT EXISTS api_keys (
   PRIMARY KEY (user_id, provider)
 );
 
--- Device registration
+-- Device registration.
+--
+-- SECURITY (2026-10-02): the plaintext `device_token` column was never written
+-- by any client and never read by any code path — a control that did nothing.
+-- It is replaced by a SHA-256 hash plus expiry/revocation so that a leaked
+-- database row cannot be replayed as a credential, and so a device can be
+-- rotated without touching OAuth tokens.
+--
+-- The bearer credential is presented as `Authorization: Bearer <token>`.
+-- Only the hash is stored. Lookup is by hash, so the plaintext token never
+-- touches disk or the database.
 CREATE TABLE IF NOT EXISTS user_devices (
   user_id TEXT NOT NULL,
   device_id TEXT NOT NULL,
   device_name TEXT,
   os TEXT,
-  device_token TEXT,
+  device_token_hash TEXT,          -- hex SHA-256 of the bearer token (never the token)
+  device_token_expires_at REAL,    -- unix ts; NULL = no expiry
+  device_revoked_at REAL,          -- unix ts; NULL = active
   created_at REAL NOT NULL,
   PRIMARY KEY (user_id, device_id)
 );
@@ -41,6 +53,26 @@ CREATE TABLE IF NOT EXISTS user_devices (
 CREATE INDEX IF NOT EXISTS idx_oauth_user ON oauth_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_apikeys_user ON api_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_devices_user ON user_devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_devices_token ON user_devices(device_token_hash);
+
+-- OAuth CSRF state (2026-10-02).
+--
+-- SECURITY: `state` used to be the literal string "provider:userId". That was
+-- (a) not random, so it was not a CSRF token, and (b) published the user_id in
+-- the redirect URL, browser history, and any proxy logs — and user_id was the
+-- only thing protecting the OAuth token endpoints.
+--
+-- It is now 32 random bytes, stored here as a hash, single-use, with a TTL.
+CREATE TABLE IF NOT EXISTS oauth_states (
+  state_hash TEXT PRIMARY KEY,      -- hex SHA-256 of the state value
+  user_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  expires_at REAL NOT NULL,        -- created_at + 10 minutes
+  consumed_at REAL                 -- NULL until redeemed; redemption is one-shot
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_states_expiry ON oauth_states(expires_at);
 
 -- Per-user daily usage tracking (quota enforcement + cost control)
 CREATE TABLE IF NOT EXISTS usage_log (

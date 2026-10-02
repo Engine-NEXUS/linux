@@ -3500,6 +3500,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-typescript",
  "uiautomation",
+ "uuid",
  "walkdir",
  "webkit2gtk",
  "webrtc-vad",

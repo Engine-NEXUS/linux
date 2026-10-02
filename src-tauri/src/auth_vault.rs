@@ -157,24 +157,28 @@ pub fn token_status(service: &str) -> &'static str {
 /// the Worker refreshes on its end; we re-fetch when our copy is stale.
 async fn fetch_google_token_from_worker(
     worker_url: &str,
-    user_id: &str,
+    _user_id: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/google-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
+    // Security (2026-10-02): no `user_id` query parameter. The Worker derives
+    // the account from the authenticated device credential, so a device can
+    // only ever mint a token for the account it registered as.
+    let url = format!("{}/oauth/google-token", worker_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
-        .get(&url)
+    let resp = crate::device_auth::apply_to(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("google token fetch: {e}"))?;
     if resp.status() == 404 {
         return Err("Google not connected. Connect Google in setup.".into());
+    }
+    if resp.status() == 401 || resp.status() == 403 {
+        return Err(
+            "Device not authorized with the Worker. Reconnect NEXUS or check settings."
+                .into(),
+        );
     }
     if !resp.status().is_success() {
         return Err(format!("google token error {}", resp.status()));
@@ -203,24 +207,27 @@ pub async fn get_valid_google_token(
 /// server-side, same shape as Google) and cache it in the vault.
 async fn fetch_swiggy_token_from_worker(
     worker_url: &str,
-    user_id: &str,
+    _user_id: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/swiggy-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
+    // Security (2026-10-02): see get_valid_google_token — user identity comes
+    // from the device credential, not the query string.
+    let url = format!("{}/oauth/swiggy-token", worker_url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
-        .get(&url)
+    let resp = crate::device_auth::apply_to(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("swiggy token fetch: {e}"))?;
     if resp.status() == 404 {
         return Err("Swiggy not connected. Connect Swiggy in Settings, Connections tab.".into());
+    }
+    if resp.status() == 401 || resp.status() == 403 {
+        return Err(
+            "Device not authorized with the Worker. Reconnect NEXUS or check settings."
+                .into(),
+        );
     }
     if !resp.status().is_success() {
         return Err(format!("swiggy token error {}", resp.status()));

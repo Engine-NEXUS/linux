@@ -44,25 +44,17 @@ export function ArchitectApp() {
   const [inputRepo, setInputRepo] = useState("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Fetch GitHub OAuth token from the Worker (for private repo access)
-  const fetchGithubToken = useCallback(async (): Promise<string | null> => {
-    try {
-      const { getServerConfig } = await import("../net/wsBridge");
-      const config = await getServerConfig();
-      const resp = await fetch(`${config.url}/oauth/github-token?user_id=${encodeURIComponent(config.userId)}`);
-      if (resp.ok) {
-        const data = await resp.json();
-        return data.token || null;
-      }
-    } catch (err) {
-      console.warn("Failed to fetch GitHub token:", err);
-    }
-    return null;
-  }, []);
+  // Security (2026-10-02): the renderer no longer fetches a GitHub OAuth token.
+  // It used to call `/oauth/github-token?user_id=…` purely to pass the value
+  // straight back into the Tauri commands. That put a live credential in the
+  // WebView for no benefit, and the endpoint was unauthenticated. Rust now
+  // resolves the token internally (architect.rs::resolve_github_token) using the
+  // device credential, so private-repo access still works and the renderer never
+  // sees a token. Passing `githubToken: null` means "resolve it yourself".
 
   // Trigger Phase 2 deep dependency scan in background
   const triggerDeepScan = useCallback(
-    async (o: string, r: string, token: string | null) => {
+    async (o: string, r: string) => {
       console.log("[architect] triggerDeepScan called:", o, "/", r);
       setDeepScanning(true);
 
@@ -90,7 +82,6 @@ export function ArchitectApp() {
         const result = await invoke<Phase2Data>("analyze_repo_deep", {
           owner: o,
           repo: r,
-          githubToken: token,
           onProgress,
         });
         console.log("[architect] Phase 2 complete:", result.hotspots?.length, "hotspots,", result.circular_deps?.length, "cycles");
@@ -111,9 +102,6 @@ export function ArchitectApp() {
       setErrorMsg(null);
       setProgress("init", `Starting Phase 1 analysis for ${o}/${r}...`);
 
-      // Fetch GitHub token for private repo access
-      const token = await fetchGithubToken();
-
       const onProgress = new Channel<ArchitectProgress>();
       onProgress.onmessage = (msg) => {
         if (msg.type === "Detecting" || msg.type === "Indexing") {
@@ -130,7 +118,6 @@ export function ArchitectApp() {
         const result = await invoke<Phase1Data>("analyze_repo_phase1", {
           owner: o,
           repo: r,
-          githubToken: token,
           onProgress,
         });
         setPhase1Data(result);
@@ -140,14 +127,14 @@ export function ArchitectApp() {
         // No fire-and-forget enrich_phase1 call needed.
 
         // Auto start background Phase 2 deep scan
-        void triggerDeepScan(o, r, token);
+        void triggerDeepScan(o, r);
       } catch (err: any) {
         console.error("Phase 1 analysis failed:", err);
         setErrorMsg(typeof err === "string" ? err : err.message || "Failed to analyze repo");
         setLoading(false);
       }
     },
-    [setLoading, setProgress, setPhase1Data, triggerDeepScan, fetchGithubToken]
+    [setLoading, setProgress, setPhase1Data, triggerDeepScan]
   );
 
   // Submit manual input
@@ -221,7 +208,7 @@ export function ArchitectApp() {
           // Only start Phase 2 deep scan in the background.
           if (pending.owner && pending.repo) {
             console.log("[architect] starting Phase 2 deep scan for", pending.owner, "/", pending.repo);
-            void triggerDeepScan(pending.owner, pending.repo, null);
+            void triggerDeepScan(pending.owner, pending.repo);
           }
         } else if (pending.owner && pending.repo) {
           // No pre-computed data — start analysis normally
@@ -318,7 +305,7 @@ export function ArchitectApp() {
             <button
               type="button"
               className="architect-analyze-btn"
-              onClick={() => triggerDeepScan(phase1Data.owner, phase1Data.repo, null)}
+              onClick={() => triggerDeepScan(phase1Data.owner, phase1Data.repo)}
             >
               Run Deep Scan
             </button>
