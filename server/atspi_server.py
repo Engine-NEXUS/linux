@@ -108,25 +108,52 @@ def enable_accessibility() -> tuple[bool, str]:
     reported itself healthy. Screen readers flip this flag on when they attach
     (what `AtSpiSurface::open` does); a personal assistant has to do it itself.
 
+    Second gate, and it is per-engine: **Firefox only publishes its AT-SPI tree
+    when launched with `MOZ_ACCESSIBILITY_ATK2=1`.** Gecko implements ATK
+    properly and bridges it over D-Bus, so it *is* reachable through this tier —
+    but only with that variable set. It is the same class of problem as
+    Chromium's renderer bridge, with a different knob, and it is documented only
+    in Firefox's source tree.
+
+    This is reported rather than worked around, because the variable must be in
+    the browser's *environment* at launch and a running Firefox cannot be
+    changed retroactively. `launch_env_hints()` gives the caller what to launch
+    with; the honest remedy for an already-running Firefox is to restart it.
+
     Best-effort and non-fatal: if we cannot set it, the caller still works on
-    desktops that publish trees unconditionally.
+    desktops and toolkits that publish trees unconditionally.
     """
     if os.environ.get("ATSPI_NO_ENABLE"):
         return False, "disabled by ATSPI_NO_ENABLE"
-    if sys.platform.startswith("linux"):
-        try:
-            import subprocess as _sp
+    if not sys.platform.startswith("linux"):
+        return False, "not a Linux session; relying on the toolkit default"
+    try:
+        import subprocess as _sp
 
-            r = _sp.run(
-                ["gsettings", "set", "org.gnome.desktop.interface", "toolkit-accessibility", "true"],
-                capture_output=True, timeout=5,
-            )
-            if r.returncode == 0:
-                return True, "toolkit-accessibility enabled via gsettings"
-            return False, f"gsettings failed: {r.stderr.decode()[:120]}"
-        except Exception as e:
-            return False, f"{type(e).__name__}: {e}"
-    return False, "not a GNOME-style session; relying on the toolkit default"
+        r = _sp.run(
+            ["gsettings", "set", "org.gnome.desktop.interface", "toolkit-accessibility", "true"],
+            capture_output=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return True, "toolkit-accessibility enabled via gsettings"
+        return False, f"gsettings failed: {r.stderr.decode()[:120]}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+# Per-engine gates. Values are *environment variables* for the target process,
+# because that is how each engine is switched on. Keyed by engine, not by app:
+# Firefox is the Gecko engine, and so is Thunderbird, so one entry covers both.
+ENGINE_ENV_HINTS: dict = {
+    "gecko": {"MOZ_ACCESSIBILITY_ATK2": "1"},
+    "blink": {},   # needs a command-line flag, not an env var — see docs
+    "webkitgtk": {},
+}
+
+
+def launch_env_hints(engine: str) -> dict:
+    """Environment a given rendering engine needs before it publishes a tree."""
+    return dict(ENGINE_ENV_HINTS.get(engine.lower(), {}))
 
 
 def atspi() -> Any:
@@ -461,12 +488,18 @@ def searchable(app: Any) -> bool:
     if is_chromium(app):
         return False
     deadline = time.monotonic() + 0.4
-    for node in walk_cached(app, limit=150, deadline=deadline):
-        if node is app:
+    A = atspi()
+    if A is None:
+        return False
+    # Read during traversal: a retained proxy can be dead by the time it is
+    # inspected, which would classify a fully interactive app as empty.
+    for _node, _depth in iter_nodes(app, limit=200, deadline=deadline):
+        pass  # ensure traversal is possible at all
+    r = Resolver()
+    for snap in r.walk(app, limit=200):
+        if snap.node is app:
             continue
-        if action_names(node):
-            return True
-        if _safe(lambda n=node: n.get_editable_text_iface()) is not None:
+        if snap.actions or snap.editable:
             return True
     return False
 
@@ -485,6 +518,56 @@ def is_chromium(node: Any) -> bool:
         return True
     # Atspi 2.x exposes toolkit via a different accessor on some bindings.
     return "chromium" in str(_safe(lambda: node.get_name()) or "").lower() and False
+
+
+# ── Node snapshots ───────────────────────────────────────────────────────────
+#
+# A snapshot's properties are read DURING traversal, not afterwards.
+#
+# Retaining live `Accessible` proxies and reading them later is not safe on every
+# toolkit. Measured here on WebKitGTK: a walk that reads each node as it is
+# visited returns 21/21 live nodes, including the HTML <button> and <input>
+# inside the web view. The identical walk that collects proxies first and reads
+# them afterwards returns the same 21 nodes with every property raising
+# `AttributeError` — a silently empty tree that looks like a healthy answer.
+#
+# GTK tolerates the retain-then-read pattern, so this passed every GTK test and
+# would have shipped broken for WebKit apps. Snapshots make it correct for all
+# toolkits and remove the whole failure class.
+
+
+class NodeSnapshot:
+    """Immutable view of one accessible, captured while it was still live."""
+
+    __slots__ = ("role", "name", "bounds", "states", "actions", "editable", "node")
+
+    def __init__(self, node, A):
+        self.node = node
+        # These can still fail for a node that dies mid-traversal; each is
+        # captured independently so one bad property does not lose the node.
+        self.role = _safe(lambda: node.get_role_name(), "") or ""
+        self.name = _safe(lambda: node.get_name(), "") or ""
+        self.bounds = extents_of(node)
+        self.states = states_of(node)
+        self.actions = action_names(node)
+        self.editable = _safe(lambda: node.get_editable_text_iface()) is not None
+
+    @property
+    def actionable(self) -> bool:
+        return bool(self.actions) or self.editable
+
+    def as_dict(self) -> dict:
+        return {
+            "role": self.role,
+            "name": self.name,
+            "bounds": self.bounds,
+            "states": self.states,
+            "actions": self.actions,
+            "editable": self.editable,
+        }
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<NodeSnapshot {self.role} {self.name!r} actions={self.actions}>"
 
 
 # ── Resolution ───────────────────────────────────────────────────────────────
@@ -541,31 +624,48 @@ class Resolver:
         self.skipped: list[str] = []
 
     def walk(self, root: Any, limit: int = MAX_NODES) -> list:
-        """Fully materialised list of nodes, or [] on timeout.
+        """Fully drained walk, returning [`NodeSnapshot`] rather than proxies.
 
-        Materialising is not a style choice. Abandoning `iter_nodes` part-way
-        through (which a `next(...)`/`any(...)` over a generator does) leaves
-        GTK's ATK bridge with a half-populated child cache, and the *next* walk
-        of the same application then yields nodes whose `get_name()` returns
-        empty. This was reproducible: a first traversal found the target, and an
-        identical immediately-following traversal found nothing at all, with no
-        error raised anywhere. Every caller in this module therefore drains the
-        walk.
+        See the note on `NodeSnapshot`: properties are captured during traversal
+        because reading them from a retained proxy afterwards silently yields an
+        empty tree on some toolkits.
         """
-        out = walk_cached(root, limit=limit, deadline=self.deadline)
-        if len(out) >= limit:
-            self.timed_out = True
+        A = atspi()
+        if A is None:
+            return []
+        out: list = []
+        seen = 0
+        while seen < limit:
+            if self.deadline is not None and time.monotonic() > self.deadline:
+                self.timed_out = True
+                break
+            stack, node = [], None
+            # iter_nodes is a generator; drain it one node at a time.
+            if not hasattr(self, "_it"):
+                self._it = iter_nodes(root, limit=limit, deadline=self.deadline)
+            try:
+                node, _depth = next(self._it)
+            except StopIteration:
+                break
+            except SearchTimeout:
+                self.timed_out = True
+                break
+            if node is None:
+                continue
+            seen += 1
+            out.append(NodeSnapshot(node, A))
+        if hasattr(self, "_it"):
+            del self._it
         return out
 
     @staticmethod
-    def _named(nodes: list, name: str, role: str | None) -> Any | None:
-        for node in nodes:
-            if (_safe(lambda n=node: n.get_name(), "") or "") != name:
+    def _named(nodes: list, name: str, role: str | None):
+        for snap in nodes:
+            if snap.name != name:
                 continue
-            node_role = _safe(lambda n=node: n.get_role_name(), "") or ""
-            if role and node_role != role:
+            if role and snap.role != role:
                 continue
-            return node
+            return snap
         return None
 
     def find(self, name: str, role: str | None, app_name: str | None) -> Any | None:
@@ -583,7 +683,7 @@ class Resolver:
                     return None
                 hit = self._named(self.walk(root), name, role)
                 if hit is not None:
-                    return root, hit
+                    return root, hit.node
                 if self.timed_out:
                     break
             return None
@@ -593,7 +693,7 @@ class Resolver:
                 continue
             hit = self._named(self.walk(app, limit=1500), name, role)
             if hit is not None:
-                return app, hit
+                return app, hit.node
         return None
 
     def text_field(self, name: str | None, app_name: str | None) -> Any | None:
@@ -603,21 +703,20 @@ class Resolver:
                 root = app_named(app_name)
                 if root is None:
                     return None
-                for node in self.walk(root):
-                    nm = _safe(lambda n=node: n.get_name(), "") or ""
-                    if name and nm != name:
+                for snap in self.walk(root):
+                    if name and snap.name != name:
                         continue
-                    if self._is_field(node, roles):
-                        return root, node
+                    if snap.editable:
+                        return root, snap.node
                 if self.timed_out:
                     break
             return None
         for app in applications():
             if not searchable(app):
                 continue
-            for node in self.walk(app, limit=1500):
-                if self._is_field(node, roles) and (not name or (_safe(lambda n=node: n.get_name(), "") or "") == name):
-                    return app, node
+            for snap in self.walk(app, limit=1500):
+                if snap.role in roles and snap.editable and (not name or snap.name == name):
+                    return app, snap.node
         return None
 
     @staticmethod
