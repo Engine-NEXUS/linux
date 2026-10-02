@@ -693,6 +693,123 @@ def _windows_blocking() -> dict:
     return {"applications": out}
 
 
+@app.get("/focused")
+async def focused() -> JSONResponse:
+    """Identify the foreground window: its application and top-level title.
+
+    This is the endpoint that unblocks the privacy gate. `docs/features/research/22`
+    recorded that `exclusion_gate()` was inert on every non-Windows platform
+    because it depended on `foreground_title()`, which returned `None` — so
+    banking windows were screenshotted and OCR'd with the exclusion list fully
+    configured. The fix in the Rust layer was to fail closed, which means screen
+    vision refuses outright on native Wayland.
+
+    AT-SPI is the only portable way to answer this there: no compositor API
+    exists (`Shell.Eval` has been disabled since GNOME 41, and there is no
+    get-active-window portal).
+
+    Resolution order, cheapest first:
+      1. An application whose accessible carries STATE_ACTIVE.
+      2. A top-level frame containing a node with STATE_FOCUSED.
+      3. The focused frame of the only application that has one.
+
+    Returns `{"known": false, ...}` rather than a 404 when nothing can be
+    identified. The caller must treat that as "refuse", never as "no match" —
+    the same distinction ExclusionVerdict exists to preserve in Rust.
+
+    KNOWN LIMITATION, observed on this machine: not every session reports focus
+    through AT-SPI. In a nested or virtual display with no window manager
+    actually arbitrating focus, even an explicit
+    `Component.grab_focus()` leaves the frame's state set empty, and no
+    application carries STATE_ACTIVE — so this endpoint correctly answers
+    `known: false` and the privacy gate keeps failing closed. That is the safe
+    outcome, and it is why the Rust side treats `Unknown` as a refusal rather
+    than retrying or guessing. Verified on GNOME/Wayland: the endpoint answers
+    200 with a reason, and never invents a window.
+
+    Chromium/Electron apps are reported but flagged: over AT-SPI they expose only
+    a skeleton, so the title is the window title and nothing deeper is available
+    until the CDP tier lands.
+    """
+    if atspi() is None:
+        return _err("atspi unavailable", 503, reason=_atspi_error)
+
+    result = await run_in_threadpool(_focused_blocking)
+    return JSONResponse(result)
+
+
+def _focused_blocking() -> dict:
+    t0 = time.monotonic()
+    A = atspi()
+
+    def frame_of(app):
+        """The app's top-level frame accessible, or None."""
+        for node, _ in iter_nodes(app, limit=200):
+            role = _safe(lambda n=node: n.get_role_name(), "") or ""
+            if role in ("frame", "window", "dialog"):
+                return node
+        return None
+
+    def has_state(node, wanted: str) -> bool:
+        return wanted.lower() in states_of(node)
+
+    apps = applications()
+    best = None
+
+    # 1. STATE_ACTIVE on the application itself.
+    for app in apps:
+        if has_state(app, "ACTIVE"):
+            frame = frame_of(app)
+            best = (app, frame, "application STATE_ACTIVE")
+            break
+
+    # 2. A focused node somewhere under an application's frame.
+    if best is None:
+        for app in apps:
+            frame = frame_of(app)
+            if frame is None:
+                continue
+            deadline = time.monotonic() + 0.5
+            try:
+                for node, _ in iter_nodes(frame, limit=800, deadline=deadline):
+                    if has_state(node, "FOCUSED") and node is not frame:
+                        best = (app, frame, "descendant STATE_FOCUSED")
+                        break
+            except SearchTimeout:
+                pass
+            if best is not None:
+                break
+
+    # 3. Single foreground-ish application.
+    if best is None:
+        with_frames = []
+        for app in apps:
+            f = frame_of(app)
+            if f is not None and (extents_of(f) or {}).get("w", 0) > 0:
+                with_frames.append((app, f))
+        if len(with_frames) == 1:
+            best = (with_frames[0][0], with_frames[0][1], "only visible application")
+
+    if best is None:
+        return {
+            "known": False,
+            "reason": "no application reported an active or focused window",
+            "applications": len(apps),
+            "latency_ms": int((time.monotonic() - t0) * 1000),
+        }
+
+    app, frame, how = best
+    return {
+        "known": True,
+        "how": how,
+        "app": _safe(lambda a=app: a.get_name(), "") or "",
+        "title": _safe(lambda f=frame: f.get_name(), "") or "",
+        "bounds": extents_of(frame) if frame is not None else None,
+        "chromium_skeleton_risk": is_chromium(app),
+        "latency_ms": int((time.monotonic() - t0) * 1000),
+    }
+
+
 @app.get("/tree")
 async def tree(request: Request) -> JSONResponse:
     """Semantic tree for one application, or for everything if `app` is absent."""

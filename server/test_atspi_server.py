@@ -539,6 +539,26 @@ def test_single_traversal_sets_text(probe_app):
 # nobody re-adds the test and reads the flake as a new regression.
 
 
+def test_focused_identifies_or_says_it_cannot(client):
+    """/focused must answer either way, and never conflate "unknown" with "none".
+
+    The privacy gate depends on this distinction: the caller has to be able to
+    tell "the foreground is X and X is not excluded" from "I could not identify
+    the foreground", and the second must cause a refusal. A 404 here would be
+    read by the Rust side as a transport failure rather than an answer.
+    """
+    tc, _ = client
+    r = tc.get("/focused")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "known" in body
+    if body["known"]:
+        assert "app" in body and "title" in body
+        assert body.get("how"), "a positive answer must say how it resolved"
+    else:
+        assert body.get("reason"), "an unknown answer must give a reason"
+
+
 # ── HTTP surface, no live app required ──────────────────────────────────────
 
 
