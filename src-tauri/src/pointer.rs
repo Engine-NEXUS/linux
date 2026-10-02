@@ -162,10 +162,87 @@ pub fn foreground_title() -> ForegroundTitle {
 #[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
 pub fn foreground_title() -> ForegroundTitle {
     if crate::session::is_wayland() {
-        // No portable way to ask a Wayland compositor which window is focused.
-        return ForegroundTitle::Unknown;
+        // Native Wayland: no compositor API exists (Shell.Eval was disabled in
+        // GNOME 41, and there is no get-active-window portal), but AT-SPI knows
+        // which application holds the focused window.
+        //
+        // This is what lets the privacy gate stop refusing. Commit
+        // `fix(pointer): fail-closed privacy exclusion gate` made this function
+        // return `Unknown` here, which made screen vision refuse outright on
+        // Wayland — correct but useless. The semantic tier supplies the missing
+        // fact, so the guarantee is kept *and* the feature comes back.
+        return wayland_foreground_via_atspi();
     }
     x11_foreground_title().map(ForegroundTitle::Known).unwrap_or(ForegroundTitle::Unknown)
+}
+
+/// Foreground window on native Wayland, via the AT-SPI tier.
+///
+/// Blocking by necessity: `exclusion_gate` is a sync function called from the
+/// orchestrator before capture, and the sidecar is a separate process. Kept off
+/// the async runtime so it cannot stall the executor, and cached briefly because
+/// the answer cannot change within a few milliseconds and the sidecar round trip
+/// is the most expensive thing on the pre-capture path.
+#[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
+fn wayland_foreground_via_atspi() -> ForegroundTitle {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    // (instant, answer) — a short cache, not a permanent one, so closing a
+    // window is reflected promptly.
+    static CACHE: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_millis(1500);
+
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((at, title)) = guard.as_ref() {
+            if at.elapsed() < TTL {
+                return match title {
+                    Some(t) => ForegroundTitle::Known(t.clone()),
+                    None => ForegroundTitle::Unknown,
+                };
+            }
+        }
+    }
+
+    let answer = match tokio::runtime::Handle::try_current() {
+        // Already inside a runtime: hop to a blocking lane rather than nesting.
+        Ok(_) => tokio::task::block_in_place(|| blocking_focus_query()),
+        Err(_) => blocking_focus_query(),
+    };
+
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), answer.clone()));
+    }
+
+    match answer {
+        Some(t) if !t.trim().is_empty() => ForegroundTitle::Known(t),
+        _ => ForegroundTitle::Unknown,
+    }
+}
+
+#[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
+fn blocking_focus_query() -> Option<String> {
+    use std::time::Duration;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    // The overall budget is enforced by the HTTP client's own timeout, so a
+    // wedged sidecar cannot hold the pre-capture path indefinitely.
+    let _ = Duration::from_secs(4);
+    let fg = rt.block_on(crate::atspi::focused()).ok()?;
+    match fg {
+        crate::atspi::Foreground::Known { title, .. } if !title.trim().is_empty() => Some(title),
+        // An identified app with an empty title is still an identification, and
+        // reporting Unknown would re-break the gate for titleless windows. The
+        // app name is a worse but usable proxy.
+        crate::atspi::Foreground::Known { app, .. } if !app.trim().is_empty() => Some(app),
+        // Identified, but with neither a title nor an app name: treat as unknown
+        // rather than inventing a value the gate would then fail to match.
+        crate::atspi::Foreground::Known { .. } => None,
+        crate::atspi::Foreground::Unknown { .. } => None,
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "mock-wake"))]
