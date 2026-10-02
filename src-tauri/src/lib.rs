@@ -70,6 +70,7 @@ mod lazy_atspi;
 pub mod cdp;
 mod lazy_cdp;
 pub mod semantic;
+pub mod policy;
 pub mod ghostwriter;
 pub mod screen;
 pub mod vision;
