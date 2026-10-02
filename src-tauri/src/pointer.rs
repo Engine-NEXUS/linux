@@ -55,7 +55,7 @@ pub fn read_settings<R: Runtime>(app: &AppHandle<R>) -> PointerSettings {
 pub struct PointerContext {
     pub response_is_locate: bool,
     pub has_point: bool,
-    pub foreground_title: Option<String>,
+    pub foreground_title: ForegroundTitle,
     pub fullscreen_active: bool,
 }
 
@@ -81,9 +81,16 @@ pub fn decide(ctx: &PointerContext, settings: &PointerSettings) -> PointerDecisi
     if !ctx.response_is_locate || !ctx.has_point {
         return PointerDecision::Hide { reason: "not a locate response" };
     }
-    if let Some(title) = ctx.foreground_title.as_deref() {
-        if exclusion_hit(title, &settings.excluded_apps).is_some() {
-            return PointerDecision::Hide { reason: "foreground app is excluded" };
+    match &ctx.foreground_title {
+        ForegroundTitle::Known(title) => {
+            if exclusion_hit(title, &settings.excluded_apps).is_some() {
+                return PointerDecision::Hide { reason: "foreground app is excluded" };
+            }
+        }
+        // Unidentified is not "unexcluded". Drawing a pointer over a window we
+        // cannot vet leaks its layout to the screenshot behind it.
+        ForegroundTitle::Unknown => {
+            return PointerDecision::Hide { reason: "foreground window unidentified" };
         }
     }
     if settings.suppress_fullscreen && ctx.fullscreen_active {
@@ -92,30 +99,102 @@ pub fn decide(ctx: &PointerContext, settings: &PointerSettings) -> PointerDecisi
     PointerDecision::Show { dwell_ms: settings.dwell_ms }
 }
 
-/// Foreground window title (Windows only) for the privacy exclusion
-/// list. Other OSes have no stable foreground-title API wired yet →
-/// None (exclusions unenforced there — see Table C).
+/// Whether the foreground window could be identified.
+///
+/// The distinction matters: `Unknown` is not "not excluded", it is "we cannot
+/// tell", and treating those the same is how a privacy control ends up silently
+/// inert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForegroundTitle {
+    Known(String),
+    /// No foreground-title mechanism available on this platform/session.
+    Unknown,
+}
+
+impl ForegroundTitle {
+    pub fn as_option(&self) -> Option<&str> {
+        match self {
+            ForegroundTitle::Known(t) => Some(t.as_str()),
+            ForegroundTitle::Unknown => None,
+        }
+    }
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, ForegroundTitle::Unknown)
+    }
+}
+
+/// Foreground window title, used by the privacy exclusion list.
+///
+/// Windows: `GetForegroundWindow` + `GetWindowTextW`.
+///
+/// Linux/X11 (including XWayland): `xdotool getactivewindow getwindowname`. This
+/// is the same mechanism `architect.rs` already uses, so it introduces no new
+/// dependency — but it needs `$DISPLAY`, which native Wayland does not provide.
+///
+/// Linux/native Wayland: **`Unknown`.** There is no portable compositor API for
+/// this. `org.gnome.Shell.Eval` has been disabled since GNOME 41, and there is
+/// no "get active window" XDG portal. The portable route is the AT-SPI focused
+/// accessible, which is Step 2 of the computer-control work order. Until then
+/// this returns `Unknown` and `exclusion_gate` **refuses to capture** rather than
+/// capturing a screen it cannot vet.
 #[cfg(target_os = "windows")]
-pub fn foreground_title() -> Option<String> {
+pub fn foreground_title() -> ForegroundTitle {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
     unsafe {
         let hwnd = GetForegroundWindow();
         if hwnd.0 == 0 {
-            return None;
+            return ForegroundTitle::Unknown;
         }
         let mut buf = [0u16; 512];
         let len = GetWindowTextW(hwnd, &mut buf);
         if len <= 0 {
-            return None;
+            return ForegroundTitle::Unknown;
         }
         let title = String::from_utf16_lossy(&buf[..len as usize]).trim().to_string();
-        if title.is_empty() { None } else { Some(title) }
+        if title.is_empty() {
+            ForegroundTitle::Unknown
+        } else {
+            ForegroundTitle::Known(title)
+        }
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn foreground_title() -> Option<String> {
-    None
+#[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
+pub fn foreground_title() -> ForegroundTitle {
+    if crate::session::is_wayland() {
+        // No portable way to ask a Wayland compositor which window is focused.
+        return ForegroundTitle::Unknown;
+    }
+    x11_foreground_title().map(ForegroundTitle::Known).unwrap_or(ForegroundTitle::Unknown)
+}
+
+#[cfg(all(target_os = "linux", feature = "mock-wake"))]
+pub fn foreground_title() -> ForegroundTitle {
+    ForegroundTitle::Unknown
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn foreground_title() -> ForegroundTitle {
+    ForegroundTitle::Unknown
+}
+
+/// X11 active-window title via `xdotool`. Shared by the pointer privacy gate and
+/// `architect.rs`.
+#[cfg(target_os = "linux")]
+pub fn x11_foreground_title() -> Option<String> {
+    let out = std::process::Command::new("xdotool")
+        .args(["getactivewindow", "getwindowname"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let title = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
 }
 
 /// True when the foreground window covers the whole screen (Windows
@@ -149,18 +228,65 @@ pub fn fullscreen_active() -> bool {
     false
 }
 
-/// Pre-screenshot privacy gate: returns the matched exclusion entry when
-/// the current foreground app is on the privacy list. Callers must refuse
-/// capture AND UIA enumeration on `Some` — no pixels, no element names.
-/// Windows-only enforcement (no foreground-title API elsewhere yet).
-pub fn exclusion_gate<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+/// Outcome of the pre-screenshot privacy gate.
+///
+/// This is an enum rather than `Option<String>` precisely so that "we could not
+/// identify the foreground window" cannot be collapsed into "nothing matched".
+/// That collapse is the bug this type exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExclusionVerdict {
+    /// No exclusion applies. Capture may proceed.
+    Allow,
+    /// The foreground window matches an entry on the privacy list.
+    Blocked(String),
+    /// The foreground window could not be identified, so no match can be ruled
+    /// out. Callers must refuse capture.
+    UnknownForeground,
+}
+
+/// Pre-screenshot privacy gate.
+///
+/// Returns [`ExclusionVerdict::Blocked`] when the foreground window is on the
+/// privacy list, and [`ExclusionVerdict::UnknownForeground`] when we cannot
+/// identify it. Callers must refuse capture on both — no pixels, no element names.
+///
+/// ## Fail-closed by design
+///
+/// Before this change the gate short-circuited on `foreground_title()?`, so on
+/// every non-Windows platform it returned `None` — indistinguishable from
+/// "no match". `docs/features/research/22-…` recorded the consequence: banking
+/// and password-manager windows were screenshotted and OCR'd with the privacy
+/// list fully configured and silently doing nothing.
+///
+/// Refusing when the title is unknown trades a feature for a guarantee. On
+/// native Wayland that means screen vision is unavailable until the AT-SPI tier
+/// lands, which is the correct trade: a privacy control that quietly fails is
+/// worse than one that visibly refuses.
+pub fn exclusion_verdict<R: Runtime>(app: &AppHandle<R>) -> ExclusionVerdict {
     let settings = read_settings(app);
     if settings.excluded_apps.is_empty() {
-        return None;
+        return ExclusionVerdict::Allow;
     }
-    let title = foreground_title()?;
-    exclusion_hit(&title, &settings.excluded_apps).cloned()
+    match foreground_title() {
+        ForegroundTitle::Unknown => ExclusionVerdict::UnknownForeground,
+        ForegroundTitle::Known(title) => match exclusion_hit(&title, &settings.excluded_apps) {
+            Some(hit) => ExclusionVerdict::Blocked(hit.clone()),
+            None => ExclusionVerdict::Allow,
+        },
+    }
 }
+
+/// Backwards-compatible convenience wrapper. `true` means capture must NOT
+/// proceed — including when the foreground window is unknown.
+pub fn exclusion_gate<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    match exclusion_verdict(app) {
+        ExclusionVerdict::Allow => None,
+        ExclusionVerdict::Blocked(app_name) => Some(app_name),
+        ExclusionVerdict::UnknownForeground => Some(UNKNOWN_FOREGROUND.to_string()),
+    }
+}
+
+pub const UNKNOWN_FOREGROUND: &str = "<foreground window unidentified>";
 
 /// Evaluate conditions and emit `pointer:show` when they pass. `norm`
 /// is the 0-1000 model point; `shot_w/h` the ORIGINAL capture dims.
@@ -265,7 +391,7 @@ mod tests {
         PointerContext {
             response_is_locate: true,
             has_point: true,
-            foreground_title: Some("VS Code".to_string()),
+            foreground_title: ForegroundTitle::Known("VS Code".to_string()),
             fullscreen_active: false,
         }
     }
@@ -288,8 +414,8 @@ mod tests {
     #[test]
     fn describe_without_point_hides() {
         for c in [
-            PointerContext { response_is_locate: false, has_point: false, foreground_title: None, fullscreen_active: false },
-            PointerContext { response_is_locate: true, has_point: false, foreground_title: None, fullscreen_active: false },
+            PointerContext { response_is_locate: false, has_point: false, foreground_title: ForegroundTitle::Unknown, fullscreen_active: false },
+            PointerContext { response_is_locate: true, has_point: false, foreground_title: ForegroundTitle::Unknown, fullscreen_active: false },
         ] {
             assert!(matches!(decide(&c, &settings()), PointerDecision::Hide { .. }));
         }
@@ -298,7 +424,7 @@ mod tests {
     #[test]
     fn excluded_app_hides_case_insensitive() {
         let c = PointerContext {
-            foreground_title: Some("My BANK - Chrome".to_string()),
+            foreground_title: ForegroundTitle::Known("My BANK - Chrome".to_string()),
             ..ctx()
         };
         match decide(&c, &settings()) {
@@ -317,8 +443,24 @@ mod tests {
     }
 
     #[test]
-    fn no_foreground_title_never_excludes() {
-        let c = PointerContext { foreground_title: None, ..ctx() };
+    fn unknown_foreground_title_hides_the_pointer() {
+        // This test used to assert the opposite (`no_foreground_title_never_excludes`
+        // → Show). That encoded the vulnerability: with no title, the exclusion
+        // list could not be consulted, so the pointer drew over whatever window
+        // happened to be in front — including a banking app. Unidentified is not
+        // "unexcluded", so the pointer is suppressed instead.
+        let c = PointerContext { foreground_title: ForegroundTitle::Unknown, ..ctx() };
+        assert!(matches!(decide(&c, &settings()), PointerDecision::Hide { .. }));
+    }
+
+    #[test]
+    fn known_and_unexcluded_foreground_shows_the_pointer() {
+        // The fail-closed branch must not swallow the ordinary case: once we can
+        // name the window and it is not on the list, the pointer is allowed.
+        let c = PointerContext {
+            foreground_title: ForegroundTitle::Known("VS Code".to_string()),
+            ..ctx()
+        };
         assert!(matches!(decide(&c, &settings()), PointerDecision::Show { .. }));
     }
 

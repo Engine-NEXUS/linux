@@ -2193,12 +2193,33 @@ async fn run_screen_vision<R: Runtime>(
     let t0 = std::time::Instant::now();
     let keys = crate::router::read_provider_keys(&app);
     let outcome: Result<Option<String>, String> = async {
-        // Phase-4b privacy gate FIRST: an excluded foreground app refuses
-        // capture AND UIA enumeration — no pixels, no element names.
-        if crate::pointer::exclusion_gate(&app).is_some() {
-            return Ok(Some(
-                "That's on your privacy list, sir — I won't look at it.".to_string(),
-            ));
+        // Privacy gate FIRST: an excluded foreground app refuses capture AND UIA
+        // enumeration — no pixels, no element names. An *unidentifiable*
+        // foreground window also refuses, because we cannot rule out an
+        // exclusion without knowing which window we are looking at.
+        match crate::pointer::exclusion_verdict(&app) {
+            crate::pointer::ExclusionVerdict::Blocked(name) => {
+                return Ok(Some(format!(
+                    "That's on your privacy list, sir — I won't look at {name}."
+                )));
+            }
+            crate::pointer::ExclusionVerdict::UnknownForeground => {
+                // Fail closed. Native Wayland has no portable foreground-title
+                // API (Shell.Eval was disabled in GNOME 41; there is no
+                // get-active-window portal), so this is the expected path there
+                // until the AT-SPI tier can identify the focused window.
+                tracing::warn!(
+                    "screen vision refused: foreground window unidentified on {} — \
+                     cannot verify the privacy list",
+                    crate::session::diagnostic_line()
+                );
+                return Ok(Some(format!(
+                    "I can't tell which window is in front, sir, so I won't risk \
+                     looking at the screen. This looks like {}.",
+                    crate::session::kind().describe()
+                )));
+            }
+            crate::pointer::ExclusionVerdict::Allow => {}
         }
         // Phase-3a locate-first: an exact UIA name match skips the
         // screenshot + VLM call entirely (free, ~5ms, pixel-perfect).
