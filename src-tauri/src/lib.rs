@@ -65,6 +65,8 @@ pub mod auth_vault;
 pub mod device_auth;
 pub mod worker_proxy;
 pub mod session;
+pub mod atspi;
+mod lazy_atspi;
 pub mod ghostwriter;
 pub mod screen;
 pub mod vision;
