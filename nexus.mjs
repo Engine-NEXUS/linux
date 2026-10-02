@@ -681,6 +681,24 @@ function cmdCheck() {
   // Wake word model
   check("Wake word ONNX model", () => existsSync(join(ROOT, "src-tauri", "resources", "oww", "nexus.onnx")));
 
+  // Display session — informational, not pass/fail.
+  // The computer-control stack branches on this: keyboard synthesis needs XTEST,
+  // and there is no portable foreground-window API on native Wayland, so the
+  // screen-vision privacy gate fails closed there (see
+  // docs/features/research/21 and src-tauri/src/session.rs).
+  if (!IS_WIN) {
+    const st = process.env.XDG_SESSION_TYPE || "-";
+    const wl = process.env.WAYLAND_DISPLAY || "-";
+    const dp = process.env.DISPLAY || "-";
+    const kind = st !== "-" ? st : (wl !== "-" ? "wayland" : dp !== "-" ? "x11" : "headless");
+    const cap = kind === "wayland"
+      ? "XTEST unavailable — needs semantic input or libei/portal"
+      : kind === "x11"
+        ? "XTEST available (XWayland routes via portal)"
+        : "no display";
+    console.log(`  ${C.dim}display session:${C.reset} ${kind} ${C.dim}(${cap}) ${C.dim}[XDG_SESSION_TYPE=${st} WAYLAND_DISPLAY=${wl} DISPLAY=${dp}]${C.reset}`);
+  }
+
   console.log(`\n${C.bold}${pass > 0 && fail === 0 ? C.green : C.yellow}${pass} passed, ${fail} failed${C.reset}\n`);
   if (fail > 0) process.exit(1);
 }
