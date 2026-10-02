@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-14
 **Status:** Complete — notebook updated, cross-checked, ready for Kaggle run
-**Predecessor:** [Wake Word Training Production Plan](../research/wake-word-training-production-plan-2026-09-14.md)
+**Predecessor:** [Wake Word Training Production Plan](../research/wakeword/wake-word-training-production-plan-2026-09-14.md)
 
 ## Objective
 

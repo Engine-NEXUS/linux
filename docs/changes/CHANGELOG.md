@@ -5,6 +5,37 @@
 
 ---
 
+## P0 Security — Device Authentication & OAuth CSRF Fix (2026-10-02)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-02 | **security(worker):** three OAuth token endpoints returned live tokens keyed on a client-supplied `?user_id=` with no authentication. Added `server/worker/src/auth.ts` (SHA-256 hashing, CSPRNG tokens, constant-time compare, device auth, single-use TTL'd OAuth state) and a deny-by-default `PUBLIC_ROUTES` gate. Account identity now comes only from the verified device | [46-device-auth-and-oauth-csrf-fix.md](./46-device-auth-and-oauth-csrf-fix.md) |
+| — | 2026-10-02 | fix(worker): `state` was the literal string `provider:userId`, so it **leaked the user id through the OAuth redirect**. Now 32 random bytes, hashed at rest, single-use, 10-min TTL. `/oauth/exchange` — previously the deep-link leg with **no CSRF check at all** — now redeems state and verifies provider | [46-device-auth-and-oauth-csrf-fix.md](./46-device-auth-and-oauth-csrf-fix.md) |
+| — | 2026-10-02 | fix(worker): six more handlers trusted client-supplied `user_id` (`oauth/status`, `oauth/exchange`, `oauth/disconnect`, all three `apikeys` routes). Removed `Access-Control-Allow-Origin: *`; reflects origin with `Vary: Origin` | [46-device-auth-and-oauth-csrf-fix.md](./46-device-auth-and-oauth-csrf-fix.md) |
+| — | 2026-10-02 | feat(worker): `schema.sql` + new `migrations/0001_device_auth.sql` — `device_token_hash`, expiry/revocation enforced in the SQL predicate, and an `oauth_states` table | [46-device-auth-and-oauth-csrf-fix.md](./46-device-auth-and-oauth-csrf-fix.md) |
+| — | 2026-10-02 | feat(rust): `device_auth.rs` mints a 256-bit token from two UUIDv4s (CSPRNG) and stores it in the **OS keyring**; `worker_proxy.rs` adds an allowlisted `worker_request` proxy so the WebView never holds a credential. Deleted the renderer's direct `fetchGithubToken()` and 7 direct Worker calls | [46-device-auth-and-oauth-csrf-fix.md](./46-device-auth-and-oauth-csrf-fix.md) |
+| — | 2026-10-02 | test: 76/76 Worker (49 existing + 27 new auth), 572/572 Rust (563 + 9), frontend 28/28, `wrangler --dry-run` clean | [46-device-auth-and-oauth-csrf-fix.md](./46-device-auth-and-oauth-csrf-fix.md) |
+
+## P1 Voice Latency — Adaptive Endpoint, Silero v6, PP-OCRv6 (2026-10-02)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-02 | perf(vad): adaptive endpointing replaces the fixed 3000ms redemption with a pre-pausal cut-off — fires early only when the tail is unambiguously dead (probability collapsed **and** near-silent), otherwise falls through to the old path untouched. 3000ms → ≤400ms | [47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md](./47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md) |
+| — | 2026-10-02 | fix(vad): two bugs found while wiring — `resumeVad()` never reset state, so one adaptive cut-off would latch and **silently drop every later turn** in the retry loop; and `micVad.pause()` re-enters `onSpeechEnd` synchronously under `submitUserSpeechOnPause: true`, so the `endpointFinalized` guard must stay above the pause call | [47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md](./47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md) |
+| — | 2026-10-02 | feat(vad): Silero v5 → v6 via `@ricky0123/vad-web` 0.0.31. Deleted the now-unreferenced v5 model from `public/` (git retains it); model name collapsed to one constant; `npm ci` re-verified in a clean dir | [47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md](./47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md) |
+| — | 2026-10-02 | perf(ocr): `rapidocr-onnxruntime` 1.4.4 (PP-OCRv4) → `rapidocr` 3.9.2 (PP-OCRv6 **tiny**). **1312ms vs 4138ms — 3.1x faster**, and the runtime weight download is gone (models ship in the wheel). Upstream's `small` default would have been **27% slower** than v4 | [47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md](./47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md) |
+| — | 2026-10-02 | fix(ocr): 3.x returns a `RapidOCROutput` **dataclass**, not the legacy `(result, elapse)` tuple — `hasattr(out,"__iter__")` is `False`, so the old unpack was a hard `TypeError`. Rewrote result handling; the `or []` idiom then raised `ValueError` because `boxes` is a numpy array. Verified end-to-end through the shipped `_get_engine()` | [47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md](./47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md) |
+| — | 2026-10-02 | test: endpoint decision extracted to pure `audio/endpoint.ts` + **17 unit tests**, mutation-verified (loosening `probFloor` fails 1 test, breaking ambiguous-band handling fails 6, dropping the resume rule fails 3). Thresholds documented as **uncalibrated** — the repo ships no speech fixtures | [47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md](./47-p1-voice-latency-vad6-ppocr6-adaptive-endpoint.md) |
+
+## Computer-Control Architecture Research (2026-10-02)
+
+| Commit | Date | Summary | Details |
+|--------|------|---------|---------|
+| — | 2026-10-02 | docs(research): ten-angle audit of the 2026 competitive + platform landscape, and the prioritised work order (P0 security → P1 voice → P2 visual) | [62-competitive-and-platform-audit-2026-10.md](../features/62-competitive-and-platform-audit-2026-10.md) |
+| — | 2026-10-02 | docs(research): **20** — why screenshot-plus-vision is the wrong abstraction for an assistant on a machine you own, and the semantic-first redesign | [research/20](../features/research/20-linux-computer-control-architecture-rethink.md) |
+| — | 2026-10-02 | docs(research): **21** — every perception × actuation channel enumerated and scored on Wayland support / consent / privilege / latency / verifiability, with desktop coverage and whole-system design comparisons. Enumerating found **two errors in doc 20** (CDP input synthesis under-sold; compositor/shell tier missed) | [research/21](../features/research/21-linux-computer-control-full-comparison.md) |
+| — | 2026-10-02 | docs(research): **22** — evidence base. `file:line` audit of the current stack: no mouse on Linux, X11-only keyboard, `focus_window` returns `true` while doing nothing, the inert privacy gate, and the dead `live_*` voice path | [research/22](../features/research/22-linux-perception-actuation-codebase-audit.md) |
+
 ## Multi-Source Noise Hardening & Hardware Invariance (2026-09-23)
 
 | Commit | Date | Summary | Details |
@@ -188,8 +219,8 @@
 | Commit | Date | Summary | Details |
 |--------|------|---------|---------|
 | `395369b` | 2026-08-19 | feat: replace VAD+ASR with openWakeWord KWS for wake word detection | [15-oww-kws.md](./15-oww-kws.md) |
-| `89d9296` | 2026-08-19 | feat: wake-word variants + sound-alikes for pronunciation tolerance | [15-oww-kns.md](./15-oww-kns.md) |
-| `656ec72` | 2026-08-19 | feat: voice wake word "NEXUS" via VAD + ASR + speaker verification | [15-oww-kns.md](./15-oww-kns.md) |
+| `89d9296` | 2026-08-19 | feat: wake-word variants + sound-alikes for pronunciation tolerance | [15-oww-kns.md](./15-oww-kws.md) |
+| `656ec72` | 2026-08-19 | feat: voice wake word "NEXUS" via VAD + ASR + speaker verification | [15-oww-kns.md](./15-oww-kws.md) |
 
 ## Colab Training
 
@@ -202,7 +233,7 @@
 
 | Commit | Date | Summary | Details |
 |--------|------|---------|---------|
-| `fb4c88c` | 2026-08-19 | fix: remove comma pause in "Didn't catch that sir" TTS | [16-tts-fixes.md](./16-tss-fixes.md) |
+| `fb4c88c` | 2026-08-19 | fix: remove comma pause in "Didn't catch that sir" TTS | [16-tts-fixes.md](./16-tts-fixes.md) |
 
 ## Earlier Merges
 
