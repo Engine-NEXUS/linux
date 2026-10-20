@@ -6784,7 +6784,20 @@ async fn run_focus_app<R: Runtime>(app: AppHandle<R>, target: String) -> Result<
         let reply = if found {
             "Ok sir.".to_string()
         } else {
-            format!("Couldn't find {target} running, sir.")
+            // Linux: say WHY it could not be done. "Couldn't find it running"
+            // is a different (and often wrong) claim than "this session
+            // cannot raise another app's window".
+            #[cfg(target_os = "linux")]
+            {
+                match crate::live::commands::window::focus_unavailable_reason() {
+                    Some(reason) => format!("I can't switch to it, sir — {reason}."),
+                    None => format!("Couldn't find {target} running, sir."),
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                format!("Couldn't find {target} running, sir.")
+            }
         };
         speak_line(&app, reply, &request_id);
     }
