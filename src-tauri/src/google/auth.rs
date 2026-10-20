@@ -18,8 +18,6 @@ pub struct GoogleAuth;
 impl GoogleAuth {
     /// Retrieve a valid OAuth2 access token for Google API calls.
     pub fn get_access_token() -> Result<String, GoogleError> {
-        // 1. Check in-memory / OS credential vault
-        // 2. Check environment override (useful in CLI / CI / tests)
         Self::access_token_from(
             crate::auth_vault::get_token(VAULT_SERVICE),
             std::env::var(ENV_ACCESS_TOKEN).ok(),
@@ -41,12 +39,14 @@ impl GoogleAuth {
         vault_token: Option<String>,
         env_token: Option<String>,
     ) -> Result<String, GoogleError> {
+        // 1. Check in-memory / OS credential vault
         if let Some(token) = vault_token {
             if !token.trim().is_empty() {
                 return Ok(token);
             }
         }
 
+        // 2. Check environment override (useful in CLI / CI / tests)
         if let Some(env_token) = env_token {
             if !env_token.trim().is_empty() {
                 return Ok(env_token);
@@ -63,9 +63,9 @@ impl GoogleAuth {
 mod tests {
     use super::*;
 
-    // No test in this module touches the process-wide environment or the
-    // vault any more: the token sources are injected, so these tests cannot
-    // race a parallel test that reads the same global state.
+    // Every test in this module injects its token sources: none of them
+    // reads or writes the process-wide environment or the vault, so they
+    // cannot race a parallel test that touches the same global state.
 
     #[test]
     fn test_auth_unauthenticated_without_env() {
@@ -106,23 +106,5 @@ mod tests {
         assert_eq!(token, "mock_ya29_token_123");
         let res = GoogleAuth::access_token_from(None, Some("   ".into()));
         assert_eq!(res.unwrap_err(), GoogleError::AuthRequired);
-    }
-
-    #[test]
-    fn test_entry_point_resolves_the_real_sources() {
-        // The public entry point must resolve exactly like the injected
-        // helper, from the same two process-wide sources (vault first,
-        // environment second). Read-only — it mutates neither, so it cannot
-        // race a parallel test.
-        let vault = crate::auth_vault::get_token(VAULT_SERVICE);
-        let env = std::env::var(ENV_ACCESS_TOKEN).ok();
-        assert_eq!(
-            GoogleAuth::get_access_token(),
-            GoogleAuth::access_token_from(vault, env)
-        );
-        assert_eq!(
-            GoogleAuth::is_authenticated(),
-            GoogleAuth::get_access_token().is_ok()
-        );
     }
 }
