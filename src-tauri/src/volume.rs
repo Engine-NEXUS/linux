@@ -554,6 +554,42 @@ pub fn set_system_volume(level: f32) -> Result<(), String> {
 
 // ─── Linux: wpctl → pactl → amixer shell commands ─────────────────────
 
+/// Parse `wpctl get-volume` output.
+///
+/// `wpctl` prints a 0..1 float: "Volume: 0.50" or "Volume: 0.50 [MUTED]".
+/// Pure — unit-tested.
+#[cfg(target_os = "linux")]
+pub fn parse_wpctl_volume(stdout: &str) -> Option<f32> {
+    let line = stdout.lines().next()?;
+    let value = line.split_whitespace().nth(1)?;
+    let v = value.parse::<f32>().ok()?;
+    if (0.0..=1.0).contains(&v) {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// Parse a percentage out of `pactl get-sink-volume` / `amixer get Master`
+/// output and return it as a 0..1 level.
+///
+/// pactl: "Volume: front-left: 32768 /  50% / -6.02 dB,   front-right: …"
+/// amixer: "  Front Left: Playback 65536 [100%] [0.00dB]"
+///
+/// Pure — unit-tested.
+#[cfg(target_os = "linux")]
+pub fn parse_percent_volume(stdout: &str) -> Option<f32> {
+    let idx = stdout.find('%')?;
+    let before = &stdout[..idx];
+    let num = before.rsplit(' ').next()?.trim();
+    let pct = num.parse::<f32>().ok()?;
+    if (0.0..=100.0).contains(&pct) {
+        Some(pct / 100.0)
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn get_system_volume() -> Result<f32, String> {
     use std::process::Command;
@@ -563,14 +599,8 @@ pub fn get_system_volume() -> Result<f32, String> {
         .args(["get-volume", "@DEFAULT_SINK@"])
         .output()
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Output: "Volume: 0.50" or "Volume: 0.50 [MUTED]"
-        if let Some(line) = stdout.lines().next() {
-            if let Some(vol_str) = line.split_whitespace().nth(1) {
-                if let Ok(vol) = vol_str.parse::<f32>() {
-                    return Ok(vol);
-                }
-            }
+        if let Some(v) = parse_wpctl_volume(&String::from_utf8_lossy(&output.stdout)) {
+            return Ok(v);
         }
     }
 
@@ -579,29 +609,15 @@ pub fn get_system_volume() -> Result<f32, String> {
         .args(["get-sink-volume", "@DEFAULT_SINK@"])
         .output()
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Output: "Volume: front-left: 32768 /  50% / -6.02 dB,   front-right: ..."
-        // Parse the first percentage
-        if let Some(idx) = stdout.find('%') {
-            let before = &stdout[..idx];
-            if let Some(num_str) = before.rsplit(' ').next() {
-                if let Ok(pct) = num_str.parse::<f32>() {
-                    return Ok(pct / 100.0);
-                }
-            }
+        if let Some(v) = parse_percent_volume(&String::from_utf8_lossy(&output.stdout)) {
+            return Ok(v);
         }
     }
 
     // Fall back to amixer (ALSA)
     if let Ok(output) = Command::new("amixer").args(["get", "Master"]).output() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(idx) = stdout.find('%') {
-            let before = &stdout[..idx];
-            if let Some(num_str) = before.rsplit(' ').next() {
-                if let Ok(pct) = num_str.parse::<f32>() {
-                    return Ok(pct / 100.0);
-                }
-            }
+        if let Some(v) = parse_percent_volume(&String::from_utf8_lossy(&output.stdout)) {
+            return Ok(v);
         }
     }
 
@@ -616,26 +632,51 @@ pub fn set_system_volume(level: f32) -> Result<(), String> {
     let pct = (level * 100.0).round() as i32;
     let pct_str = format!("{}%", pct);
 
-    // Try wpctl → pactl → amixer
-    let result = Command::new("wpctl")
-        .args(["set-volume", "@DEFAULT_SINK@", &pct_str])
-        .status()
-        .or_else(|_| {
-            Command::new("pactl")
-                .args(["set-sink-volume", "@DEFAULT_SINK@", &pct_str])
-                .status()
-        })
-        .or_else(|_| {
-            Command::new("amixer")
-                .args(["-q", "set", "Master", &pct_str])
-                .status()
-        });
+    // wpctl → pactl → amixer. Each tool is tried in turn: a tool that is
+    // installed but refuses the request must not stop the next one.
+    let attempts: Vec<(&str, Vec<String>)> = vec![
+        (
+            "wpctl",
+            vec![
+                "set-volume".to_string(),
+                "@DEFAULT_SINK@".to_string(),
+                pct_str.clone(),
+            ],
+        ),
+        (
+            "pactl",
+            vec![
+                "set-sink-volume".to_string(),
+                "@DEFAULT_SINK@".to_string(),
+                pct_str.clone(),
+            ],
+        ),
+        (
+            "amixer",
+            vec![
+                "-q".to_string(),
+                "set".to_string(),
+                "Master".to_string(),
+                pct_str.clone(),
+            ],
+        ),
+    ];
 
-    match result {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(format!("volume: set command exited with {s}")),
-        Err(e) => Err(format!("volume: all Linux volume tools failed: {e}")),
+    let mut last_err = String::new();
+    for (tool, args) in attempts {
+        match Command::new(tool).args(&args).status() {
+            Ok(s) if s.success() => return Ok(()),
+            Ok(s) => {
+                last_err = format!("{tool} exited with {s}");
+                tracing::debug!("volume: {tool} failed ({s}); trying the next tool");
+            }
+            Err(e) => {
+                last_err = format!("{tool}: {e}");
+            }
+        }
     }
+
+    Err(format!("volume: all Linux volume tools failed ({last_err})"))
 }
 
 // ─── Unsupported platforms ─────────────────────────────────────────────
@@ -875,11 +916,57 @@ mod tests {
     }
 
     /// Live OS round-trip (touches the real volume briefly; restores it).
+    ///
+    /// On Linux the real volume lives behind `wpctl` / `pactl` / `amixer` — a unit test must
+    /// never spawn those against the user's audio server, so the live probe is skipped there
+    /// and the pure parsers below carry the coverage.
     #[test]
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "spawns wpctl/pactl/amixer against the real audio server"
+    )]
     fn test_volume_roundtrip() {
         let vol = get_system_volume();
         if let Ok(v) = vol {
             assert!(v >= 0.0 && v <= 1.0);
+        }
+    }
+
+    // ─── Linux tool output parsing ───────────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    mod linux_parsing {
+        use super::*;
+
+        #[test]
+        fn wpctl_output_is_parsed_as_a_zero_to_one_level() {
+            assert!(near(parse_wpctl_volume("Volume: 0.50").unwrap(), 0.50));
+            assert!(near(parse_wpctl_volume("Volume: 0.50 [MUTED]").unwrap(), 0.50));
+            assert!(near(parse_wpctl_volume("Volume: 1.00").unwrap(), 1.00));
+            assert!(near(parse_wpctl_volume("Volume: 0.00").unwrap(), 0.00));
+        }
+
+        #[test]
+        fn wpctl_output_that_is_not_a_level_is_rejected() {
+            assert!(parse_wpctl_volume("").is_none());
+            assert!(parse_wpctl_volume("Volume:").is_none());
+            // wpctl prints a 0..1 float, never a percentage — "50%" is not a level.
+            assert!(parse_wpctl_volume("Volume: 50%").is_none());
+        }
+
+        #[test]
+        fn pactl_and_amixer_output_is_parsed_as_a_percentage() {
+            let pactl = "Volume: front-left: 32768 /  50% / -6.02 dB,   front-right: 32768 /  50% / -6.02 dB";
+            assert!(near(parse_percent_volume(pactl).unwrap(), 0.50));
+            let amixer = "Simple mixer control 'Master',0\n  Front Left: Playback 65536 [100%] [0.00dB]";
+            assert!(near(parse_percent_volume(amixer).unwrap(), 1.00));
+            assert!(near(parse_percent_volume("Playback 0 [0%]").unwrap(), 0.0));
+        }
+
+        #[test]
+        fn percent_output_without_a_number_is_rejected() {
+            assert!(parse_percent_volume("").is_none());
+            assert!(parse_percent_volume("no percentage here").is_none());
         }
     }
 }

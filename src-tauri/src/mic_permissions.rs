@@ -19,6 +19,13 @@
 //!
 //! Because the grant is programmatic, it happens instantly at every request —
 //! no dialog, ever, regardless of user-profile state.
+//!
+//! **Linux:** there is nothing to hook. WebKitGTK has no `PermissionRequested`
+//! event and PipeWire/PulseAudio grant microphone capture at the session
+//! level, so the app never sees a permission prompt. The honest signal is
+//! whether a capture device actually opens — `init` reports exactly that
+//! ("granted" / "denied" / "no_device") instead of pretending to grant
+//! something the OS never asked about.
 
 #[cfg(target_os = "windows")]
 use tauri::Manager;
@@ -58,6 +65,22 @@ pub fn init<R: Runtime>(_app: &tauri::App<R>) {
             }
         }
     }
+
+    // Linux has NO per-app microphone prompt: WebKitGTK/PipeWire grant
+    // capture at the session level, and there is no WebView2-style
+    // PermissionRequested event to hook. The only honest signal is whether a
+    // capture device actually opens, so report exactly that.
+    #[cfg(target_os = "linux")]
+    {
+        match crate::audio_linux::capture_permission_state() {
+            "granted" => tracing::info!(
+                "permissions: Linux has no per-app microphone prompt — capture is decided by the device opening (granted)"
+            ),
+            other => tracing::warn!(
+                "permissions: no usable capture device on Linux ({other}) — voice input will not work until a microphone is available"
+            ),
+        }
+    }
 }
 
 /// Same auto-allow for a window created later (hand mode's camera window). Own origins only.
@@ -71,6 +94,16 @@ pub fn allow_media_for_window<R: Runtime>(_win: &tauri::WebviewWindow<R>) {
         if let Err(e) = res {
             tracing::warn!("permissions: failed to hook dynamic webview: {e}");
         }
+    }
+
+    // Linux: nothing to grant per window — WebKitGTK has no per-window
+    // permission event. The capture device opening is the permission.
+    #[cfg(target_os = "linux")]
+    {
+        tracing::debug!(
+            "permissions: '{}' needs no Linux permission grant (the capture device opening is the permission)",
+            _win.label()
+        );
     }
 }
 

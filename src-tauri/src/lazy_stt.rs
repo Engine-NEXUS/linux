@@ -71,12 +71,12 @@ fn stt_script_path() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Check if the STT server is already running (external or our child).
-/// Uses a raw TCP connection to avoid tokio runtime dependency Î“Ã‡Ã¶ this
+/// Probe the local STT sidecar with a raw HTTP GET and return the response
+/// body, or `None` when nothing is listening on the port.
+///
+/// Uses a raw TCP connection to avoid tokio runtime dependency — this
 /// function is called from non-tokio threads (wake-word thread, hotkey handler).
-pub(crate) fn is_stt_responsive() -> bool {
-    // Use a simple TCP connection + HTTP GET instead of reqwest, which
-    // requires a tokio runtime that may not be available on the calling thread.
+fn stt_http_probe() -> Option<String> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
@@ -88,24 +88,36 @@ pub(crate) fn is_stt_responsive() -> bool {
         timeout,
     );
 
-    match stream_result {
-        Ok(mut stream) => {
-            stream.set_read_timeout(Some(timeout)).ok();
-            stream.set_write_timeout(Some(timeout)).ok();
-            let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-            if stream.write_all(request.as_bytes()).is_err() {
-                return false;
-            }
-            let mut response = Vec::new();
-            if stream.read_to_end(&mut response).is_err() {
-                return false;
-            }
-            let response_str = String::from_utf8_lossy(&response);
-            // Check for HTTP 200
-            response_str.contains("200 OK") || response_str.contains("\"ok\":true")
-        }
-        Err(_) => false,
+    let mut stream = stream_result.ok()?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request.as_bytes()).is_err() {
+        return None;
     }
+    let mut response = Vec::new();
+    if stream.read_to_end(&mut response).is_err() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&response).to_string())
+}
+
+/// Check if the STT server is running AND healthy (it can transcribe).
+pub(crate) fn is_stt_responsive() -> bool {
+    let Some(response) = stt_http_probe() else {
+        return false;
+    };
+    // "200 OK" / "ok":true = healthy.
+    response.contains("200 OK") || response.contains("\"ok\":true")
+}
+
+/// True when a sidecar is listening on the port at all — even when it reports
+/// that it cannot transcribe (e.g. `moonshine-voice` is not installed, answer
+/// /health with 503 + "ok":false). The manager must not spawn a SECOND copy
+/// over a running-but-broken sidecar; the real reason travels with the
+/// transcription error instead.
+fn stt_server_present() -> bool {
+    stt_http_probe().is_some()
 }
 
 /// Environment for the local STT child process. Moonshine language is locked
@@ -206,7 +218,7 @@ pub fn ensure_stt_running() {
     }
 
     // Check if an external STT server is already running (e.g. started by run.ps1)
-    if is_stt_responsive() {
+    if stt_server_present() {
         STT_RUNNING.store(true, Ordering::Relaxed);
         STT_STARTING.store(false, Ordering::SeqCst);
         tracing::info!("lazy_stt: external STT server already running on port {STT_PORT}");

@@ -18,10 +18,29 @@
 //! needs periodic re-assertion). Rather than trust either reading, the watchdog re-asserts on
 //! every tick while any lease is held — a free Win32 call either way, correct under both
 //! interpretations.
+//!
+//! # The backend is never called with the state mutex held
+//!
+//! The backend is the OS: a Win32 call on Windows, the freedesktop screen-saver inhibit over
+//! D-Bus on Linux. The D-Bus call talks to *another program* (the desktop), and that program may
+//! never answer — so the backend is allowed to be slow, and the controller must not be able to
+//! freeze every other lease holder while it is. The state mutex ([`Controller::st`]) is therefore
+//! never held across a backend call; a separate transition mutex serialises the 0 -> 1 and
+//! 1 -> 0 edges (the only moments the backend is called) so the order of the assert/clear calls
+//! is exactly the same as when both happened under the state mutex.
+//!
+//! On Linux the backend itself is fire-and-forget (see `keep_awake_linux`): it queues the request
+//! for a worker thread and returns, and under `cfg(test)` it is a no-op so a unit test never
+//! touches the real session bus.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Linux keep-awake: the freedesktop screen-saver inhibit over D-Bus.
+#[cfg(target_os = "linux")]
+#[path = "keep_awake_linux.rs"]
+mod keep_awake_linux;
 
 const WATCHDOG_MS: u64 = 10_000;
 const WATCHDOG_POLL_MS: u64 = 500;
@@ -56,6 +75,10 @@ struct State {
 
 pub struct Controller {
     st: Mutex<State>,
+    /// Serialises the 0 -> 1 and 1 -> 0 edges — the only moments the backend is called. The
+    /// state mutex is never held across a backend call, so a slow OS (a desktop that does not
+    /// answer over D-Bus) cannot freeze the other lease holders.
+    transition: Mutex<()>,
     backend: Arc<dyn KeepAwakeBackend>,
     last_beat: AtomicU64,
     watchdog: Duration,
@@ -85,6 +108,7 @@ impl Controller {
     pub fn with_timing(backend: Arc<dyn KeepAwakeBackend>, watchdog: Duration, watchdog_poll: Duration) -> Arc<Self> {
         Arc::new(Self {
             st: Mutex::new(State::default()),
+            transition: Mutex::new(()),
             backend,
             last_beat: AtomicU64::new(now_millis()),
             watchdog,
@@ -97,31 +121,55 @@ impl Controller {
     }
 
     pub fn acquire(self: &Arc<Self>) -> Option<KeepAwakeLease> {
-        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
         self.heartbeat();
-        if st.count == 0 {
+        // The backend call must never run while the state mutex is held: the backend is the
+        // OS, and on Linux it talks to the desktop over D-Bus — a desktop that does not answer
+        // must not be able to freeze every other lease holder. `transition` (not `st`)
+        // serialises the 0 -> 1 edge, so the assert/clear order is unchanged.
+        let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
+        let first = {
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            let first = st.count == 0;
+            st.count += 1;
+            tracing::debug!("[KEEPAWAKE] acquire count={}", st.count);
+            first
+        };
+        if first {
             if let Err(e) = self.backend.assert() {
                 tracing::warn!("keep_awake: failed to assert ({e}); not holding a lease");
+                // No lease is handed out — give the count back.
+                let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+                st.count = st.count.saturating_sub(1);
                 return None;
             }
             tracing::info!("[KEEPAWAKE] asserted");
         }
-        st.count += 1;
-        tracing::debug!("[KEEPAWAKE] acquire count={}", st.count);
-        if !st.watchdog_running {
-            st.watchdog_running = true;
+        let start_watchdog = {
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            if st.watchdog_running {
+                false
+            } else {
+                st.watchdog_running = true;
+                true
+            }
+        };
+        drop(_transition);
+        if start_watchdog {
             let me = Arc::clone(self);
             std::thread::spawn(move || me.watchdog_loop());
         }
-        drop(st);
         Some(KeepAwakeLease { ctrl: Arc::clone(self), active: true })
     }
 
     fn release(self: &Arc<Self>) {
-        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        st.count = st.count.saturating_sub(1);
-        tracing::debug!("[KEEPAWAKE] release count={}", st.count);
-        if st.count == 0 {
+        let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
+        let last = {
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            st.count = st.count.saturating_sub(1);
+            tracing::debug!("[KEEPAWAKE] release count={}", st.count);
+            st.count == 0
+        };
+        if last {
             // Cleared instantly, no grace period — unlike volume, a flicker here has no
             // audible defect, and the user explicitly wants this instant.
             if let Err(e) = self.backend.clear() {
@@ -134,9 +182,14 @@ impl Controller {
 
     /// Immediate clear regardless of refcount (explicit stop, app exit).
     pub fn force_clear(&self) {
-        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        if st.count > 0 {
+        let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
+        let held = {
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            let held = st.count > 0;
             st.count = 0;
+            held
+        };
+        if held {
             let _ = self.backend.clear();
             tracing::info!("[KEEPAWAKE] force-cleared");
         }
@@ -145,14 +198,24 @@ impl Controller {
     fn watchdog_loop(self: Arc<Self>) {
         loop {
             std::thread::sleep(self.watchdog_poll);
-            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-            if st.count == 0 {
+            // Read the state under the lock, act outside it: the backend call is the one thing
+            // that can block (D-Bus on Linux), so it must never be made with `st` held.
+            let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
+            let (count, silent) = {
+                let st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+                (
+                    st.count,
+                    now_millis().saturating_sub(self.last_beat.load(Ordering::Relaxed)),
+                )
+            };
+            if count == 0 {
+                let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
                 st.watchdog_running = false;
                 return;
             }
-            let silent = now_millis().saturating_sub(self.last_beat.load(Ordering::Relaxed));
             if silent as u128 > self.watchdog.as_millis() {
                 tracing::warn!("[KEEPAWAKE] watchdog: no heartbeat for {silent} ms, force-clearing");
+                let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
                 st.count = 0;
                 let _ = self.backend.clear();
                 st.watchdog_running = false;
@@ -168,6 +231,14 @@ impl Controller {
     #[cfg(test)]
     fn snapshot(&self) -> usize {
         self.st.lock().unwrap().count
+    }
+
+    /// Test probe: is the state mutex free right now? The backend call must never run while it
+    /// is held — a blocked backend (a desktop that does not answer over D-Bus) would otherwise
+    /// freeze every other lease holder. `try_lock` never blocks, so this probe cannot hang.
+    #[cfg(test)]
+    fn state_is_free(&self) -> bool {
+        self.st.try_lock().is_ok()
     }
 }
 
@@ -239,12 +310,28 @@ fn clear_awake() -> Result<(), String> {
     if prev.0 != 0 { Ok(()) } else { Err("SetThreadExecutionState (clear) failed".into()) }
 }
 
-#[cfg(not(target_os = "windows"))]
+// ─── Linux: freedesktop screen-saver inhibit ──────────────────────────
+
+/// Hold the screen awake: `org.freedesktop.ScreenSaver.Inhibit` on the
+/// session bus. The cookie is kept and handed back by `clear_awake`.
+#[cfg(target_os = "linux")]
+fn assert_awake() -> Result<(), String> {
+    keep_awake_linux::inhibit()
+}
+
+/// Release the inhibition: `org.freedesktop.ScreenSaver.UnInhibit` with the
+/// cookie that `assert_awake` received.
+#[cfg(target_os = "linux")]
+fn clear_awake() -> Result<(), String> {
+    keep_awake_linux::uninhibit()
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 fn assert_awake() -> Result<(), String> {
     Err("keep_awake: unsupported platform".to_string())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 fn clear_awake() -> Result<(), String> {
     Err("keep_awake: unsupported platform".to_string())
 }
@@ -353,5 +440,54 @@ mod tests {
         set_working(true); // no-op, must not double-acquire
         set_working(false);
         set_working(false); // no-op
+    }
+
+    /// The backend call must never run while the controller's state mutex is held.
+    ///
+    /// The backend is the OS: on Linux it is the freedesktop screen-saver inhibit over D-Bus,
+    /// and the desktop may never answer. If the state mutex were held across that call, one
+    /// silent desktop would freeze every other lease holder (and, in the unit-test run, the
+    /// whole test binary — the hang this test guards against).
+    #[test]
+    fn the_backend_call_never_runs_with_the_state_mutex_held() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        struct Slow {
+            entered: std::sync::mpsc::Sender<()>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl KeepAwakeBackend for Slow {
+            fn assert(&self) -> Result<(), String> {
+                let _ = self.entered.send(());
+                // Block until the test lets go — exactly what a wedged D-Bus call does.
+                if let Ok(rx) = self.release.lock() {
+                    let _ = rx.recv();
+                }
+                Ok(())
+            }
+            fn clear(&self) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let slow = Arc::new(Slow { entered: entered_tx, release: Mutex::new(release_rx) });
+        let c = Controller::new(slow.clone());
+        let c2 = c.clone();
+        let worker = std::thread::spawn(move || {
+            let _lease = c2.acquire();
+            std::thread::sleep(Duration::from_millis(200));
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the backend was called");
+        assert!(
+            c.state_is_free(),
+            "the state mutex must not be held across the backend call"
+        );
+
+        let _ = release_tx.send(());
+        worker.join().ok();
     }
 }

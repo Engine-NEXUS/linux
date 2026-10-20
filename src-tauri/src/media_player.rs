@@ -87,6 +87,16 @@ pub async fn execute_media_action(
     #[cfg(target_os = "linux")]
     {
         let _ = player_name;
+        // MPRIS controls the player that is already running; it cannot search
+        // a catalogue. Say so instead of pretending the song started.
+        if let Some(q) = query {
+            if !q.trim().is_empty() {
+                return Err(
+                    "Playing a specific song is not supported by the Linux media control yet, sir."
+                        .to_string(),
+                );
+            }
+        }
         crate::mpris::send_mpris_command(action).await
     }
 

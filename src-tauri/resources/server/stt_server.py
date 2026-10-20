@@ -74,13 +74,28 @@ _transcriber = None
 _model_path = None
 _model_arch = None
 _model_arch_name = MODEL_ARCH_NAME
+# Why the model could not be loaded (missing python package, no network, …).
+# Surfaced by /health and /transcribe so the Rust client can report the real
+# reason instead of a bare "server did not become ready".
+_load_error = None
 
 
 def _load_model():
     """Load the Moonshine model. Called eagerly at startup."""
-    global _transcriber, _model_path, _model_arch, _model_arch_name
+    global _transcriber, _model_path, _model_arch, _model_arch_name, _load_error
 
-    from moonshine_voice import Transcriber, ModelArch, get_model_for_language
+    try:
+        from moonshine_voice import Transcriber, ModelArch, get_model_for_language
+    except ImportError as e:
+        # The most common failure on a fresh Linux box: the package is simply
+        # not installed. Say exactly that — a raw traceback here used to look
+        # like "NEXUS did not hear you".
+        _load_error = (
+            "moonshine-voice is not installed — "
+            f"pip install moonshine-voice fastapi uvicorn python-multipart ({e})"
+        )
+        log.error("local STT unavailable: %s", _load_error)
+        raise
 
     # Map string names to ModelArch enum
     arch_map = {
@@ -117,12 +132,19 @@ def _load_model():
     )
     _model_path = model_path
     _model_arch = model_arch_enum
+    _load_error = None
 
 
 def _get_transcriber():
     """Get the loaded transcriber instance."""
+    global _load_error
     if _transcriber is None:
-        _load_model()
+        try:
+            _load_model()
+        except Exception as e:
+            if _load_error is None:
+                _load_error = str(e)
+            raise
     return _transcriber
 
 
@@ -131,6 +153,20 @@ def _get_transcriber():
 
 @app.get("/health")
 async def health() -> JSONResponse:
+    # A server that cannot transcribe is NOT healthy. Answering 503 makes the
+    # Rust client stop waiting for it and report the real reason, instead of
+    # burning the full 20 s startup budget on a sidecar that will never work.
+    if _transcriber is None and _load_error is not None:
+        return JSONResponse(
+            {
+                "ok": False,
+                "model": f"moonshine-{_model_arch_name}",
+                "language": LANGUAGE,
+                "engine": "moonshine-voice (ONNX Runtime)",
+                "error": _load_error,
+            },
+            status_code=503,
+        )
     return JSONResponse({
         "ok": True,
         "model": f"moonshine-{_model_arch_name}",
@@ -187,7 +223,12 @@ async def transcribe(audio: UploadFile = File(...)) -> JSONResponse:
         return JSONResponse({"text": ""})
 
     # Transcribe using Moonshine
-    transcriber = _get_transcriber()
+    try:
+        transcriber = _get_transcriber()
+    except Exception as e:
+        reason = _load_error or str(e)
+        log.error("local STT unavailable: %s", reason)
+        return JSONResponse({"text": "", "error": reason}, status_code=503)
     _transcribe_start = time.monotonic()
     try:
         transcript = transcriber.transcribe_without_streaming(
@@ -229,7 +270,16 @@ async def stream(websocket: WebSocket) -> None:
     loads a second one), so no text state bleeds between turns.
     """
     await websocket.accept()
-    transcriber = _get_transcriber()
+    try:
+        transcriber = _get_transcriber()
+    except Exception as e:
+        reason = _load_error or str(e)
+        log.error("stream: local STT unavailable: %s", reason)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+        return
     stream_handle = transcriber.create_stream()
     pending_texts: list[str] = []
 
@@ -338,8 +388,19 @@ def _wav_to_float_samples(wav_bytes: bytes):
 
 @app.on_event("startup")
 async def _startup():
-    """Eagerly load the model at startup so the first transcription is fast."""
-    _load_model()
+    """Eagerly load the model at startup so the first transcription is fast.
+
+    A missing dependency must NOT kill the server: the Rust client polls
+    /health, and a dead process looks like "no STT at all". Stay up and
+    report the reason through /health (503) instead.
+    """
+    global _load_error
+    try:
+        _load_model()
+    except Exception as e:
+        if _load_error is None:
+            _load_error = str(e)
+        log.error("local STT unavailable at startup: %s", e)
 
 
 if __name__ == "__main__":
