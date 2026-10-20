@@ -823,7 +823,8 @@ function DisplayTab({ settings, update }: {
         </button>
       </div>
 
-      <ScreenPointerSection />
+      {/* Linux only: the pointer marker and its pointer.json settings live in the Linux build. */}
+      {isLinuxRuntime() && <ScreenPointerSection />}
     </>
   );
 }

@@ -1115,7 +1115,10 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::settings_patch,
+            // `pointer` is a Linux-only module (lib.rs, `#[cfg(target_os = "linux")]`).
+            #[cfg(target_os = "linux")]
             pointer::pointer_settings_get,
+            #[cfg(target_os = "linux")]
             pointer::pointer_settings_save,
             commands::get_health_status,
             commands::export_settings,
