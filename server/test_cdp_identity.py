@@ -13,8 +13,11 @@ background-window case):
   2. the candidate set is the targets whose title matches the expected
      foreground title (an EMPTY title cannot contradict the expected one, so
      it is kept and the focus probe decides);
-  3. ALL candidates are probed CONCURRENTLY, under ONE deadline for the whole
-     sweep, and the ports share one total budget;
+  3. all candidates are probed under ONE deadline for the whole sweep per
+     port — CONCURRENTLY for Chromium, where every probe has its own
+     connection, and ONE AFTER ANOTHER for Electron, where the probes share
+     a single CDP websocket that cannot demultiplex two replies — and the
+     ports share one total budget;
   4. a target is chosen ONLY when EXACTLY ONE candidate answered `known` and
      `focus` — zero focused, more than one focused, or everything unknown
      all refuse.
@@ -31,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 
@@ -416,6 +420,161 @@ def test_a_frozen_candidate_does_not_discard_the_answers_of_the_others(monkeypat
     chosen = cdp_server.choose_focused_target(targets, states)
     assert chosen is not None
     assert chosen["webSocketDebuggerUrl"] == "ws://x/2"
+
+
+# ── The Electron transport: ONE shared socket ───────────────────────────────
+#
+# The Electron probes share a single CDP websocket, and `Cdp.call` has no
+# reply demultiplexing. These tests use a fake shared connection that
+# answers OUT OF ORDER — exactly like a socket whose replies arrive in
+# completion order.
+
+
+class _ReplyLost(RuntimeError):
+    """The reply this request waited for was consumed by another waiter."""
+
+
+class _SharedCdp:
+    """One shared CDP socket with NO reply demultiplexing.
+
+    `Cdp.call` sends a request and then reads messages until it finds one
+    whose id is its own — every other message is DISCARDED. The replies
+    arrive in COMPLETION order, so with two requests in flight the older
+    waiter can take the newer reply, throw it away, and the newer waiter
+    never gets its answer at all.
+
+    The fake answers the NEWEST request first (completion order), and it
+    records how many requests were in flight at once:
+
+      * one request in flight (the sequential probe order): the request
+        reads its own reply, and every probe gets its OWN answer;
+      * two requests in flight (a concurrent sweep): the older waiter
+        takes the newer reply and discards it, and the newer waiter is left
+        with nothing.
+    """
+
+    FOCUSED = {1: False, 2: True}
+
+    def __init__(self, ws_url: str):
+        self.ws_url = ws_url
+        self._next_id = 0
+        self._inbox: list = []
+        self.in_flight = 0
+        self.peak_in_flight = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    async def call(self, method: str, params: dict | None = None) -> dict:
+        self._next_id += 1
+        mid = self._next_id
+        expression = str((params or {}).get("expression") or "")
+        m = re.search(r"x\.id === (\d+)", expression)
+        wcid = int(m.group(1)) if m else 0
+        self._inbox.append({"id": mid, "wcid": wcid})
+        # Completion order: the newest request is answered first.
+        self._inbox.sort(key=lambda msg: -msg["id"])
+        self.in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        try:
+            await asyncio.sleep(0)  # the reply arrives later
+            while True:
+                if not self._inbox:
+                    # Its reply was consumed by another waiter and thrown
+                    # away. The real client would wait for its timeout; the
+                    # probe treats a failure as "I cannot tell" either way.
+                    raise _ReplyLost("the reply was consumed by another waiter")
+                msg = self._inbox.pop(0)
+                if msg["id"] == mid:
+                    focus = bool(_SharedCdp.FOCUSED.get(msg["wcid"], False))
+                    return {
+                        "result": {
+                            "value": json.dumps(
+                                {
+                                    "focus": focus,
+                                    "vis": "visible" if focus else "hidden",
+                                }
+                            )
+                        }
+                    }
+                # Not mine: DISCARDED, exactly like the real client.
+        finally:
+            self.in_flight -= 1
+
+
+def _electron(monkeypatch) -> "cdp_server.Electron":
+    """An Electron handle whose inspector port is faked away."""
+    monkeypatch.setattr(
+        cdp_server,
+        "inspector_main_target",
+        lambda port: {"webSocketDebuggerUrl": "ws://x"},
+    )
+    return cdp_server.Electron(9229)
+
+
+def test_the_electron_probes_do_not_steal_each_others_replies(monkeypatch):
+    # The Electron transport shares ONE CDP websocket and `Cdp.call` has no
+    # reply demultiplexing: a message whose id is not the caller's is
+    # DISCARDED. Two probes in flight at once would consume each other's
+    # replies, both would be reported unknown, and the click would be
+    # refused even though the control IS in the focused window.
+    #
+    # The probes must therefore run one after another: with only one
+    # request in flight, every probe reads ITS OWN reply.
+    monkeypatch.setattr(cdp_server, "Cdp", _SharedCdp)
+    _SharedCdp.FOCUSED = {1: False, 2: True}
+    e = _electron(monkeypatch)
+
+    states = asyncio.run(e._probe_renderers([{"id": 1}, {"id": 2}], 2.0))
+
+    assert len(states) == 2
+    # Each probe got ITS OWN answer — not the other renderer's.
+    assert states[0]["known"] is True
+    assert states[0]["focus"] is False
+    assert states[1]["known"] is True
+    assert states[1]["focus"] is True
+
+
+def test_the_electron_probes_never_overlap_on_the_shared_socket(monkeypatch):
+    # The invariant the sequential order buys: at most ONE request is in
+    # flight on the shared socket at a time. A concurrent sweep would put
+    # two there and the replies would be stolen.
+    monkeypatch.setattr(cdp_server, "Cdp", _SharedCdp)
+    _SharedCdp.FOCUSED = {1: False, 2: True}
+    e = _electron(monkeypatch)
+
+    asyncio.run(e._probe_renderers([{"id": 1}, {"id": 2}], 2.0))
+
+    assert e._cdp.peak_in_flight == 1
+
+
+def test_the_electron_sweep_stays_inside_the_deadline_when_a_renderer_never_answers(
+    monkeypatch,
+):
+    # A renderer that never answers must not hold the sweep: the deadline
+    # is reached, that renderer and every one after it are unknown, and the
+    # sweep is over.
+    e = _electron(monkeypatch)
+
+    class _NeverAnswers:
+        async def main_eval(self, body):
+            await asyncio.sleep(3600)  # a frozen renderer
+            return {}
+
+    monkeypatch.setattr(e, "main_eval", _NeverAnswers().main_eval)
+
+    t0 = time.monotonic()
+    states = asyncio.run(e._probe_renderers([{"id": 1}, {"id": 2}], 0.4))
+    elapsed = time.monotonic() - t0
+
+    assert len(states) == 2
+    assert all(st["known"] is False for st in states)
+    # The sweep did not run past its deadline: the second renderer was
+    # never probed, because the first one ate the whole budget.
+    assert elapsed < 0.4 * 2
 
 
 # ── The whole rule, with a fake endpoint ────────────────────────────────────

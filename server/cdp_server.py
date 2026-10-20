@@ -415,6 +415,10 @@ async def chromium_foreground_target(
     concurrently under one deadline, and a target is chosen ONLY when exactly
     one of them proved it has the focus.
 
+    The probes may run concurrently here because EACH ONE opens its own CDP
+    connection: there is no shared socket whose replies could be mixed up
+    (the Electron transport shares one — see `Electron._probe_renderers`).
+
     Returns (None, reason) when the foreground cannot be established.
     """
     pages = [
@@ -741,9 +745,13 @@ class Electron:
 
         The rule is the same as for Chromium (see `choose_focused_target`):
         the candidate set is the renderers whose title matches the expected
-        foreground title, ALL of them are probed concurrently under one
-        deadline, and a renderer is chosen ONLY when exactly one of them
-        proved it has the focus.
+        foreground title, ALL of them are probed under ONE deadline, and a
+        renderer is chosen ONLY when exactly one of them proved it has the
+        focus.
+
+        The probes run ONE AFTER ANOTHER, not concurrently: they share a
+        single CDP websocket that cannot demultiplex two replies (see
+        `_probe_renderers`).
 
         Returns (None, reason) when the foreground cannot be established.
         """
@@ -769,40 +777,37 @@ class Electron:
         return chosen, ""
 
     async def _probe_renderers(self, candidates: list[dict], deadline: float) -> list[dict]:
-        """Probe every candidate renderer CONCURRENTLY, under one deadline."""
+        """Probe the candidate renderers ONE AFTER ANOTHER, under one deadline.
+
+        The Electron transport shares ONE CDP websocket with the whole
+        process (`self._cdp`), and `Cdp.call` has NO reply demultiplexing:
+        a message whose id is not the caller's is DISCARDED, and the
+        websockets library refuses two concurrent `recv()`s on one
+        connection. Two probes in flight at once would therefore steal each
+        other's replies — the first waiter would consume the other probe's
+        answer, throw it away, and wait for a reply that no longer exists.
+        Both would be reported unknown, `choose_focused_target` would
+        return nothing, and the click would be refused even though the
+        control IS in the focused window.
+
+        So the probes run sequentially, under the SAME overall sweep
+        deadline: the moment the deadline is reached, the remaining
+        candidates are unknown — nothing is proved — and the sweep is over.
+        """
         if not candidates:
             return []
 
-        async def one(r: dict) -> dict:
-            return await self.renderer_focus(r["id"], deadline)
-
-        tasks = [asyncio.ensure_future(one(r)) for r in candidates]
-        try:
-            gathered = list(
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True), timeout=deadline
-                )
-            )
-            # A cancelled child comes back as an exception, not a state: it is
-            # "I could not tell", like any other non-answer.
-            return [
-                s if isinstance(s, dict) else dict(_FOCUS_UNKNOWN)
-                for s in gathered
-            ]
-        except asyncio.TimeoutError:
-            pass
-
+        end = time.monotonic() + deadline
         states: list[dict] = []
-        for r, task in zip(candidates, tasks):
-            if task.done() and not task.cancelled():
-                exc = task.exception()
-                if exc is None:
-                    states.append(task.result())
-                else:
-                    states.append(dict(_FOCUS_UNKNOWN))
-            else:
-                task.cancel()
-                states.append(dict(_FOCUS_TIMED_OUT))
+        for r in candidates:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                # Out of time: this candidate and every one after it are
+                # unknown. Nothing is proved about them.
+                rest = candidates[len(states):]
+                states.extend(dict(_FOCUS_TIMED_OUT) for _ in rest)
+                break
+            states.append(await self.renderer_focus(r["id"], remaining))
         return states
 
     async def ax(self, wcid: int) -> list[dict]:
@@ -1291,9 +1296,12 @@ async def activate(request: Request) -> JSONResponse:
          foreground title (`narrow_by_title`, the same `title_matches` rule
          the identity gate uses, so an EMPTY title cannot contradict the
          expected one and is kept);
-      3. ALL candidates are probed CONCURRENTLY, under ONE deadline for the
-         whole sweep per port, and the ports share one total budget
-         (`ACTIVATE_BUDGET`) so the request stays inside 15 s;
+      3. all candidates are probed under ONE deadline for the whole sweep
+         per port — CONCURRENTLY for Chromium, where every probe has its
+         own connection, and ONE AFTER ANOTHER for Electron, where the
+         probes share a single CDP websocket that cannot demultiplex two
+         replies — and the ports share one total budget (`ACTIVATE_BUDGET`)
+         so the request stays inside 15 s;
       4. a target is chosen ONLY when EXACTLY ONE candidate answered
          `known` and `focus` — zero focused, more than one focused, or
          everything unknown all REFUSE with 409 and a reason.
