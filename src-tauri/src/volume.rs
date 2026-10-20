@@ -576,12 +576,25 @@ pub fn parse_wpctl_volume(stdout: &str) -> Option<f32> {
 /// pactl: "Volume: front-left: 32768 /  50% / -6.02 dB,   front-right: …"
 /// amixer: "  Front Left: Playback 65536 [100%] [0.00dB]"
 ///
+/// Both tools put the number directly in front of the '%', but pactl
+/// separates it with a space ("/  50% /") while amixer wraps it in brackets
+/// ("[100%]"). So the number is read as the run of digits that ENDS at the
+/// '%', whatever precedes it — the previous "last space-separated token"
+/// reading could only ever parse the pactl shape and made the amixer
+/// fallback dead code (it always returned `None`).
+///
 /// Pure — unit-tested.
 #[cfg(target_os = "linux")]
 pub fn parse_percent_volume(stdout: &str) -> Option<f32> {
     let idx = stdout.find('%')?;
     let before = &stdout[..idx];
-    let num = before.rsplit(' ').next()?.trim();
+    // The digits that end at the '%': "… /  50" → "50", "… [100" → "100".
+    let digits: String = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let num: String = digits.chars().rev().collect();
     let pct = num.parse::<f32>().ok()?;
     if (0.0..=100.0).contains(&pct) {
         Some(pct / 100.0)
@@ -954,6 +967,8 @@ mod tests {
             assert!(parse_wpctl_volume("Volume: 50%").is_none());
         }
 
+        /// pactl prints the percentage as a bare number ("/  50% /"), amixer
+        /// wraps it in brackets ("[100%]") — both must parse.
         #[test]
         fn pactl_and_amixer_output_is_parsed_as_a_percentage() {
             let pactl = "Volume: front-left: 32768 /  50% / -6.02 dB,   front-right: 32768 /  50% / -6.02 dB";
@@ -963,10 +978,29 @@ mod tests {
             assert!(near(parse_percent_volume("Playback 0 [0%]").unwrap(), 0.0));
         }
 
+        /// The verbatim `pactl get-sink-volume @DEFAULT_SINK@` output of a
+        /// mono sink — one channel, one percentage.
+        #[test]
+        fn a_mono_pactl_sink_is_parsed() {
+            let pactl = "Volume: mono: 65536 / 100% / 0.00 dB";
+            assert!(near(parse_percent_volume(pactl).unwrap(), 1.00));
+        }
+
+        /// The verbatim `amixer get Master` output: a header, the channel
+        /// lines, and the percentage in brackets on each of them.
+        #[test]
+        fn a_full_amixer_block_is_parsed() {
+            let amixer = "Simple mixer control 'Master',0\nCapabilities: pvolume pswitch pswitch-joined\nPlayback channels: Front Left - Front Right\nLimits: Playback 0 - 65536\nMono:\nFront Left: Playback 32768 [50%] [-6.02dB]\nFront Right: Playback 32768 [50%] [-6.02dB]\n";
+            assert!(near(parse_percent_volume(amixer).unwrap(), 0.50));
+        }
+
         #[test]
         fn percent_output_without_a_number_is_rejected() {
             assert!(parse_percent_volume("").is_none());
             assert!(parse_percent_volume("no percentage here").is_none());
+            // A '%' with no digits in front of it is not a level.
+            assert!(parse_percent_volume("%").is_none());
+            assert!(parse_percent_volume("Volume: front-left: 32768 /  % / -6.02 dB").is_none());
         }
     }
 }
