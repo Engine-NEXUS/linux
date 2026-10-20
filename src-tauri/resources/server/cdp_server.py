@@ -241,6 +241,69 @@ def _pick_page_target(tgts: list[dict], want: str | None) -> dict | None:
     return pages[0]
 
 
+_FOCUS_STATE_JS = (
+    "JSON.stringify({focus: document.hasFocus(), vis: document.visibilityState})"
+)
+
+
+async def _page_focus_state(t: dict) -> dict:
+    """`hasFocus()` / `visibilityState` for one page target.
+
+    A BACKGROUND tab of the same browser answers hasFocus() = false and
+    visibilityState = "hidden"; the tab the user is looking at answers
+    true / "visible". That is how the foreground target is found.
+    """
+    try:
+        async with Cdp(t["webSocketDebuggerUrl"]) as c:
+            r = await c.call(
+                "Runtime.evaluate",
+                {"expression": _FOCUS_STATE_JS, "returnByValue": True},
+            )
+    except CdpError:
+        return {"focus": False, "visible": False, "known": False}
+    v = (r.get("result") or {}).get("value")
+    try:
+        d = json.loads(v) if isinstance(v, str) else (v or {})
+    except (TypeError, ValueError):
+        return {"focus": False, "visible": False, "known": False}
+    if not isinstance(d, dict):
+        return {"focus": False, "visible": False, "known": False}
+    return {
+        "focus": bool(d.get("focus")),
+        "visible": d.get("vis") == "visible",
+        "known": True,
+    }
+
+
+async def chromium_foreground_target(port: int, want: str | None) -> dict | None:
+    """The page target the user is actually looking at.
+
+    The accessibility tree is per TARGET, so the identity check and the
+    action have to use the SAME one: the first non-blank page target is
+    usually a BACKGROUND tab, and clicking in it is exactly the bug the
+    identity check exists to prevent.
+
+    Returns None when the foreground cannot be established — no candidate has
+    focus, or more than one does. That is a refusal, not a guess.
+    """
+    pages = [
+        t
+        for t in http_list(port)
+        if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
+    ]
+    if not pages:
+        return None
+    if want:
+        for t in pages:
+            if want in (t.get("url") or "") or want == (t.get("title") or ""):
+                return t
+        return None
+    states: list[dict] = []
+    for t in pages:
+        states.append(await _page_focus_state(t))
+    return choose_focused_target(pages, states)
+
+
 async def direct_ax(port: int, target: str | None) -> list[dict]:
     tgts = http_list(port)
     t = _pick_page_target(tgts, target)
@@ -255,11 +318,13 @@ async def direct_ax(port: int, target: str | None) -> list[dict]:
     return r.get("nodes", []) or []
 
 
-async def direct_activate(port: int, target: str | None, name: str, role: str | None) -> dict:
-    tgts = http_list(port)
-    t = _pick_page_target(tgts, target)
-    if t is None:
-        raise CdpError(f"no page target on port {port}")
+async def direct_activate(t: dict, name: str, role: str | None) -> dict:
+    """Click by name inside a RESOLVED page target.
+
+    The target is passed in, not chosen here: the caller resolved the
+    foreground target first so that the identity check and this action
+    operate on the same one.
+    """
     async with Cdp(t["webSocketDebuggerUrl"]) as c:
         try:
             await c.call("Accessibility.enable")
@@ -406,6 +471,17 @@ _JS_FIND = (
 )
 
 
+_MAIN_FOCUS = """
+  const { webContents } = process.mainModule.require('electron');
+  const w = webContents.getAllWebContents().find(x => x.id === __WCID__);
+  if (!w) return null;
+  const raw = await w.webContents.executeJavaScript(
+    "JSON.stringify({focus: document.hasFocus(), vis: document.visibilityState})"
+  );
+  return JSON.parse(raw);
+"""
+
+
 class Electron:
     """A connection to an Electron main process, with renderer operations."""
 
@@ -479,6 +555,50 @@ class Electron:
         r = self.pick_renderer_info(rs, target)
         return r["id"] if r is not None else None
 
+    async def renderer_focus(self, wcid: int) -> dict:
+        """`hasFocus()` / `visibilityState` for one renderer.
+
+        A renderer of a background window answers hasFocus() = false; the
+        window the user is looking at answers true / "visible".
+        """
+        body = _MAIN_FOCUS.replace("__WCID__", str(wcid))
+        try:
+            v = await self.main_eval(body)
+        except CdpError:
+            return {"focus": False, "visible": False, "known": False}
+        if not isinstance(v, dict):
+            return {"focus": False, "visible": False, "known": False}
+        return {
+            "focus": bool(v.get("focus")),
+            "visible": v.get("vis") == "visible",
+            "known": True,
+        }
+
+    async def foreground_renderer(self, want: str | None) -> dict | None:
+        """The renderer the user is actually looking at.
+
+        The accessibility tree is per RENDERER, so the identity check and
+        the action have to use the same one: the first renderer of type
+        "window" is the first VS Code window, not the front one.
+
+        Returns None when the foreground cannot be established — no
+        candidate has focus, or more than one does. That is a refusal, not
+        a guess.
+        """
+        rs = await self.renderers()
+        windows = [r for r in rs if r.get("type") == "window"] or rs
+        if not windows:
+            return None
+        if want:
+            for r in windows:
+                if want in (r.get("url") or "") or want == (r.get("title") or ""):
+                    return r
+            return None
+        states: list[dict] = []
+        for r in windows:
+            states.append(await self.renderer_focus(r["id"]))
+        return choose_focused_target(windows, states)
+
     async def ax(self, wcid: int) -> list[dict]:
         """Fetch the accessibility tree, warming it if the first read is partial.
 
@@ -546,12 +666,37 @@ class Electron:
 def _app_name_from_command_line(cmdline: str) -> str:
     """The application name from a browser command line.
 
-    "/usr/bin/brave --remote-debugging-port=9222" -> "brave"
+        /usr/bin/brave --remote-debugging-port=9222            -> "brave"
+        /home/me/My Apps/brave --remote-debugging-port=9222    -> "brave"
+        "C:\\Program Files\\Brave\\brave.exe" --inspect=9229    -> "brave"
+
+    The executable is the path up to the first ARGUMENT (a token that starts
+    with "--"), NOT up to the first space: a path may contain spaces, and
+    splitting on the first space would yield "C:\\Program" or "/home/me/My".
+    A double-quoted path is taken as-is, quotes included.
     """
-    first = (cmdline or "").strip().split(" ")[0]
-    if not first:
+    s = (cmdline or "").strip()
+    if not s:
         return ""
-    base = first.replace("\\", "/").rsplit("/", 1)[-1]
+    if s.startswith('"'):
+        # A quoted path: the executable is what is inside the quotes.
+        end = s.find('"', 1)
+        exe = s[1:end] if end > 0 else s[1:]
+    else:
+        # The executable is everything before the first "--" argument.
+        cut = len(s)
+        idx = 0
+        while True:
+            idx = s.find("--", idx)
+            if idx < 0:
+                break
+            # Only a token START counts: the "--" has to begin a word.
+            if idx == 0 or s[idx - 1].isspace():
+                cut = idx
+                break
+            idx += 1
+        exe = s[:cut].strip()
+    base = exe.replace("\\", "/").rsplit("/", 1)[-1]
     return base.removesuffix(".exe").lower()
 
 
@@ -593,13 +738,67 @@ def title_matches(foreground_title: str, target_title: str) -> bool:
     return f == t or t in f or f in t
 
 
+def choose_focused_target(candidates: list[dict], states: list[dict]) -> dict | None:
+    """The target the user is looking at, from the candidates' focus states.
+
+    `candidates` and `states` are parallel lists: the targets and their
+    `{focus, visible, known}` states.
+
+    Pure, so the rule is unit-tested with fakes:
+      * exactly one target has focus → that one;
+      * more than one has focus → ambiguous, so nothing;
+      * none has focus but exactly one is visible → that one;
+      * otherwise → nothing (the foreground is unknown).
+
+    Returning None is a REFUSAL, not a reason to fall back to an arbitrary
+    tab: the first non-blank page target is usually a background one.
+    """
+    focused = [
+        t
+        for t, st in zip(candidates, states)
+        if st.get("known") and st.get("focus")
+    ]
+    if len(focused) == 1:
+        return focused[0]
+    if len(focused) > 1:
+        return None  # ambiguous
+    visible = [
+        t
+        for t, st in zip(candidates, states)
+        if st.get("known") and st.get("visible")
+    ]
+    if len(visible) == 1:
+        return visible[0]
+    return None
+
+
+def endpoint_matches(
+    expected_app: str,
+    expected_title: str,
+    identity: dict,
+    target: dict | None,
+) -> bool:
+    """Whether an endpoint, and the target resolved on it, may act.
+
+    `target` is None when the foreground target could not be established,
+    which is a refusal.
+    """
+    if target is None:
+        return False
+    if expected_app and not app_names_match(expected_app, str(identity.get("app") or "")):
+        return False
+    if expected_title and not title_matches(expected_title, str(target.get("title") or "")):
+        return False
+    return True
+
+
 async def chromium_identity(port: int, target: str | None) -> dict:
-    """Who a Chromium debug port belongs to."""
+    """Who a Chromium debug port belongs to.
+
+    The APPLICATION part only: the title and URL belong to a target, and the
+    target is resolved separately (the foreground one).
+    """
     out = {"kind": "chromium", "app": "", "title": "", "url": "", "product": ""}
-    t = _pick_page_target(http_list(port), target)
-    if t is not None:
-        out["title"] = str(t.get("title") or "")
-        out["url"] = str(t.get("url") or "")
     ws = browser_ws_url(port)
     if ws:
         try:
@@ -619,25 +818,45 @@ async def chromium_identity(port: int, target: str | None) -> dict:
 
 
 async def electron_identity(port: int, target: str | None) -> dict:
-    """Who an Electron inspector port belongs to."""
+    """Who an Electron inspector port belongs to.
+
+    The APPLICATION part only: the app name comes from the main process, and
+    the target (renderer) is resolved separately.
+    """
     out = {"kind": "electron", "app": "", "title": "", "url": "", "product": ""}
     try:
         async with Electron(port) as e:
             out["app"] = str(await e.app_name() or "")
-            r = Electron.pick_renderer_info(await e.renderers(), target)
-            if r is not None:
-                out["title"] = str(r.get("title") or "")
-                out["url"] = str(r.get("url") or "")
     except CdpError:
         pass
     return out
 
 
 async def endpoint_identity(port: int, kind: str, target: str | None) -> dict:
-    """The identity of one endpoint, by kind."""
+    """The identity of one endpoint, by kind.
+
+    The APPLICATION part does not depend on the target: it is the browser
+    process itself. The TARGET part is filled in by the caller, which
+    resolves the foreground target first.
+    """
     if kind == "electron":
         return await electron_identity(port, target)
     return await chromium_identity(port, target)
+
+
+async def foreground_target(port: int, kind: str, want: str | None) -> dict | None:
+    """The target the user is actually looking at, on this endpoint.
+
+    None means "unknown" — zero or more than one candidate qualifies. The
+    caller must treat that as a refusal.
+    """
+    if kind == "electron":
+        try:
+            async with Electron(port) as e:
+                return await e.foreground_renderer(want)
+        except CdpError:
+            return None
+    return await chromium_foreground_target(port, want)
 
 
 # ── Matching ─────────────────────────────────────────────────────────────────
@@ -828,25 +1047,35 @@ async def activate(request: Request) -> JSONResponse:
     if not ports:
         return _err("no CDP endpoint reachable", 503)
 
-    # Pick the endpoint that belongs to the application in front. When the
-    # caller did not say which application that is, the first reachable port
-    # is used (the legacy behaviour).
+    # Pick the endpoint AND the target that belong to the application in front.
+    #
+    # The order matters: the FOREGROUND TARGET is resolved FIRST, and the
+    # same target is used for the identity check and for the action. The
+    # accessibility tree is per target, so checking the title of one target
+    # and clicking another is not a check at all.
     chosen: int | None = None
+    fg_target: dict | None = None
     identity: dict = {}
     for p in ports:
         kind = "chromium" if p in r["direct_ports"] else "electron"
         ident = await endpoint_identity(p, kind, target)
-        if not expected_app:
-            chosen, identity = p, ident
-            break
-        if app_names_match(expected_app, str(ident.get("app") or "")) and title_matches(
-            expected_title, str(ident.get("title") or "")
-        ):
-            chosen, identity = p, ident
-            break
-    if chosen is None:
+        # The foreground target on this endpoint, resolved FIRST.
+        fg = await foreground_target(p, kind, target)
+        # The application AND the target must prove they are the ones in
+        # front. `endpoint_matches` is the whole rule.
+        if not endpoint_matches(expected_app, expected_title, ident, fg):
+            continue
+        chosen = p
+        fg_target = fg
+        identity = {
+            **ident,
+            "title": str(fg.get("title") or ""),
+            "url": str(fg.get("url") or ""),
+        }
+        break
+    if chosen is None or fg_target is None:
         return _err(
-            "no reachable debug endpoint belongs to the application in front",
+            "no reachable debug endpoint proves it is the application in front",
             409,
             expected_app=expected_app,
             expected_title=expected_title,
@@ -856,10 +1085,10 @@ async def activate(request: Request) -> JSONResponse:
     t0 = time.monotonic()
     try:
         if p in r["direct_ports"]:
-            out = await direct_activate(p, target, name, role)
+            out = await direct_activate(fg_target, name, role)
         else:
             async with Electron(p) as e:
-                wcid = await e.pick_renderer(target)
+                wcid = fg_target.get("id")
                 if wcid is None:
                     return _err("no renderer", 502)
                 out = await e.click(wcid, name, role)

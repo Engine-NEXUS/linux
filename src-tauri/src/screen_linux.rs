@@ -80,14 +80,14 @@ pub fn list_actionables() -> Vec<UiElement> {
 ///   be trusted to catch;
 /// * the element must be **enabled** (the toolkit reports no
 ///   STATE_ENABLED / STATE_SENSITIVE for an insensitive widget);
-/// * it must be **shown** — the sidecar reports STATE_SHOWING for a widget
-///   that is actually RENDERED. A widget scrolled out of a viewport, or
-///   inside a collapsed container, is still laid out (GTK gives it real
-///   extents, so `extents_of` accepts them) but it is not shown: it cannot
-///   be clicked, and offering it as "the 3rd option" sends the pointer into
-///   the void. The sidecar does not report STATE_VISIBLE, so the ABSENCE of
-///   "showing" is the signal. A toolkit that reports no states at all is not
-///   disqualifying every element;
+/// * it must be **on screen**. The toolkit reports STATE_VISIBLE for a widget
+///   that is laid out and STATE_SHOWING for one that is actually RENDERED.
+///   "Visible but not showing" is the off-screen verdict (a collapsed
+///   container, a viewport that clips it). When the toolkit reports NEITHER,
+///   the verdict is **unknown** — the absence of an optional state is not
+///   evidence that the widget is hidden — so the element is kept and the
+///   application is logged once, so an empty list is never confused with an
+///   empty window;
 /// * it must be something the toolkit can act on: it exposes an action, or it
 ///   is an editable field (a text field is a legitimate click target). The
 ///   server applies the same rule; repeating it here keeps the guarantee on
@@ -107,7 +107,17 @@ pub fn is_actionable_hit(h: &crate::semantic::SemanticHit) -> bool {
             .states
             .iter()
             .any(|s| s.as_str() == "enabled" || s.as_str() == "sensitive");
-    let offscreen = !h.states.is_empty() && !h.states.iter().any(|s| s.as_str() == "showing");
+    let reports_visibility = h
+        .states
+        .iter()
+        .any(|s| s.as_str() == "visible" || s.as_str() == "showing");
+    if !reports_visibility {
+        // The toolkit says nothing about visibility: that is "cannot tell",
+        // not "nothing is on screen" — and it is logged once per application
+        // so an empty list is never confused with an empty window.
+        log_unknown_visibility_once(&h.app);
+    }
+    let offscreen = is_offscreen(&h.states);
     let actionable = !h.actions.is_empty()
         || h.states.iter().any(|s| s.as_str() == "editable");
     if !actionable {
@@ -120,6 +130,49 @@ pub fn is_actionable_hit(h: &crate::semantic::SemanticHit) -> bool {
         tracing::debug!("screen: {:?} comes from a Chromium/Electron tree", h.name);
     }
     crate::screen::accept_actionable(enabled, offscreen, &h.name, b.w, b.h)
+}
+
+/// Whether the toolkit's state set proves the element is off screen.
+///
+/// "Visible but not showing" is the only verdict that counts. A state set
+/// that mentions neither is **unknown** — the toolkit may simply not implement
+/// those states — and an unknown verdict must not disqualify the element.
+fn is_offscreen(states: &[String]) -> bool {
+    let visible = states.iter().any(|s| s == "visible");
+    let showing = states.iter().any(|s| s == "showing");
+    if !visible && !showing {
+        return false;
+    }
+    visible && !showing
+}
+
+/// Applications whose toolkit reports neither STATE_VISIBLE nor
+/// STATE_SHOWING, logged once each.
+///
+/// Without this, a toolkit that does not implement those states produces an
+/// empty list with no explanation — which reads as "this window has no
+/// controls" rather than "I could not tell whether anything was on screen".
+static UNKNOWN_VISIBILITY_LOGGED: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = once_cell::sync::Lazy::new(|| {
+    std::sync::Mutex::new(std::collections::HashSet::new())
+});
+
+fn log_unknown_visibility_once(app: &str) {
+    let key = if app.trim().is_empty() {
+        "<unnamed>"
+    } else {
+        app
+    };
+    if let Ok(mut seen) = UNKNOWN_VISIBILITY_LOGGED.lock() {
+        if seen.insert(key.to_string()) {
+            tracing::warn!(
+                "screen: the toolkit of {key:?} reports neither STATE_VISIBLE nor \
+                 STATE_SHOWING — the off-screen test cannot run for it, so elements are \
+                 offered even when they are clipped"
+            );
+        }
+    }
 }
 
 /// The actionable elements of the foreground window, with the refusal reason.
@@ -543,6 +596,7 @@ mod tests {
         crate::semantic::SemanticHit {
             name: name.into(),
             role: role.into(),
+            app: "test-app".into(),
             bounds: Some(crate::atspi::AtspiBounds { x, y, w: 80, h: 30 }),
             tier: crate::semantic::Tier::AtSpi,
             actions: vec!["click".into()],
@@ -603,16 +657,30 @@ mod tests {
     }
 
     #[test]
-    fn an_element_that_is_not_shown_is_not_offered() {
-        // The sidecar reports STATE_SHOWING for a widget that is actually
-        // rendered. A widget scrolled out of a viewport still has real
-        // extents, so only the missing "showing" marks it as unclickable.
+    fn an_element_that_is_visible_but_not_shown_is_not_offered() {
+        // "Visible but not showing" is the ONLY off-screen verdict: laid out,
+        // but not rendered (a collapsed container, a clipped viewport). It
+        // cannot be clicked, and offering it as "the 3rd option" sends the
+        // pointer into the void.
         let els = to_actionable_list(vec![
-            hit("Hidden", "push button", 10, 10, &["enabled", "sensitive"]),
-            hit("Shown", "push button", 10, 100, &["enabled", "sensitive", "showing"]),
+            hit("Clipped", "push button", 10, 10, &["enabled", "sensitive", "visible"]),
+            hit("Shown", "push button", 10, 100, &["enabled", "sensitive", "visible", "showing"]),
         ]);
         assert_eq!(els.len(), 1);
         assert_eq!(els[0].name, "Shown");
+    }
+
+    #[test]
+    fn an_element_whose_visibility_is_unknown_is_kept() {
+        // A toolkit that implements neither STATE_VISIBLE nor STATE_SHOWING
+        // says NOTHING about visibility. Treating that as "not on screen"
+        // would empty the whole list and read as "this window has no
+        // controls" — so the verdict stays unknown and the element is kept.
+        let els = to_actionable_list(vec![
+            hit("Save", "push button", 10, 10, &["enabled", "sensitive"]),
+        ]);
+        assert_eq!(els.len(), 1);
+        assert_eq!(els[0].name, "Save");
     }
 
     #[test]
@@ -623,6 +691,18 @@ mod tests {
         ]);
         assert_eq!(els.len(), 1);
         assert_eq!(els[0].name, "Save");
+    }
+
+    #[test]
+    fn the_off_screen_verdict_needs_a_positive_signal() {
+        // Pure: only "visible and not showing" is off screen.
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        assert!(is_offscreen(&s(&["visible"])));
+        assert!(!is_offscreen(&s(&["showing"])));
+        assert!(!is_offscreen(&s(&["visible", "showing"])));
+        // Neither reported: unknown, so not off screen.
+        assert!(!is_offscreen(&s(&["enabled"])));
+        assert!(!is_offscreen(&s(&[])));
     }
 
     #[test]

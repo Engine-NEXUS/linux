@@ -87,6 +87,36 @@ def test_the_application_name_comes_from_the_command_line():
     assert cdp_server._app_name_from_command_line("   ") == ""
 
 
+def test_a_linux_path_with_spaces_is_parsed():
+    # An AppImage under a directory whose name contains a space. Splitting on
+    # the first space would yield "/home/me/My" — which matches no
+    # application and would make the endpoint look unidentified.
+    assert cdp_server._app_name_from_command_line(
+        "/home/me/My Apps/brave.AppImage --remote-debugging-port=9222"
+    ) == "brave.appimage"
+
+
+def test_a_quoted_path_is_parsed():
+    assert cdp_server._app_name_from_command_line(
+        '"C:\\Program Files\\Brave\\brave.exe" --inspect=9229'
+    ) == "brave"
+    assert cdp_server._app_name_from_command_line(
+        '"/home/me/My Apps/brave" --remote-debugging-port=9222'
+    ) == "brave"
+
+
+def test_a_path_with_no_arguments_is_parsed():
+    assert cdp_server._app_name_from_command_line("/usr/bin/brave") == "brave"
+
+
+def test_a_double_dash_inside_a_path_is_not_an_argument():
+    # "--" only starts an argument at a word boundary, so a directory named
+    # "--weird" does not truncate the path.
+    assert cdp_server._app_name_from_command_line(
+        "/home/me/--weird/brave --remote-debugging-port=9222"
+    ) == "brave"
+
+
 # ── The whole decision, with a fake endpoint ────────────────────────────────
 
 
@@ -104,3 +134,84 @@ def test_a_background_endpoint_does_not_prove_anything():
     # Brave in front; a background VS Code holding a debug port.
     idn = _identity("electron", "Visual Studio Code", "main.rs - nexus")
     assert not cdp_server.app_names_match("brave", idn["app"])
+
+
+# ── The foreground target ───────────────────────────────────────────────────
+#
+# The accessibility tree is per TARGET, so the identity check and the action
+# have to use the SAME one. These tests use fake targets and fake focus
+# states — no browser, no websocket.
+
+
+def _state(focus: bool, visible: bool, known: bool = True) -> dict:
+    return {"focus": focus, "visible": visible, "known": known}
+
+
+def test_the_tab_that_has_focus_is_the_one_chosen():
+    # Two tabs of the same browser; the SECOND one has focus. Picking the
+    # first (the old first-non-blank rule) would act in a background tab.
+    tabs = [
+        {"title": "Background tab", "url": "https://example.com/one"},
+        {"title": "GitHub", "url": "https://github.com/"},
+    ]
+    states = [_state(False, True), _state(True, True)]
+    chosen = cdp_server.choose_focused_target(tabs, states)
+    assert chosen is not None
+    assert chosen["title"] == "GitHub"
+
+
+def test_no_focused_tab_refuses():
+    # Nothing has focus: the foreground is unknown, so nothing is chosen.
+    tabs = [{"title": "GitHub", "url": "https://github.com/"}]
+    assert cdp_server.choose_focused_target(tabs, [_state(False, False)]) is None
+
+
+def test_two_focused_tabs_refuse():
+    # Ambiguity is a refusal, not a coin toss.
+    tabs = [{"title": "A"}, {"title": "B"}]
+    states = [_state(True, True), _state(True, True)]
+    assert cdp_server.choose_focused_target(tabs, states) is None
+
+
+def test_a_single_visible_target_is_the_fallback():
+    # Nothing has focus, but exactly one is visible.
+    tabs = [{"title": "GitHub"}]
+    assert cdp_server.choose_focused_target(tabs, [_state(False, True)]) is not None
+
+
+def test_two_visible_targets_without_focus_refuse():
+    tabs = [{"title": "A"}, {"title": "B"}]
+    states = [_state(False, True), _state(False, True)]
+    assert cdp_server.choose_focused_target(tabs, states) is None
+
+
+def test_an_unknown_focus_state_does_not_qualify():
+    tabs = [{"title": "GitHub"}]
+    assert cdp_server.choose_focused_target(tabs, [_state(False, False, known=False)]) is None
+
+
+# ── The whole endpoint decision, with fakes ────────────────────────────────
+
+
+def test_an_app_name_mismatch_refuses_the_endpoint():
+    # Brave in front; the debug port belongs to VS Code.
+    ident = _identity("electron", "Visual Studio Code", "")
+    target = {"title": "main.rs - nexus", "url": ""}
+    assert not cdp_server.endpoint_matches("brave", "GitHub", ident, target)
+
+
+def test_a_title_mismatch_refuses_the_endpoint():
+    ident = _identity("chromium", "brave", "")
+    target = {"title": "Some other tab", "url": ""}
+    assert not cdp_server.endpoint_matches("brave", "GitHub", ident, target)
+
+
+def test_an_unknown_foreground_target_refuses_the_endpoint():
+    ident = _identity("chromium", "brave", "")
+    assert not cdp_server.endpoint_matches("brave", "GitHub", ident, None)
+
+
+def test_a_matching_endpoint_is_allowed():
+    ident = _identity("chromium", "brave", "")
+    target = {"title": "GitHub", "url": "https://github.com/"}
+    assert cdp_server.endpoint_matches("brave", "GitHub - Brave", ident, target)

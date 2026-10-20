@@ -29,6 +29,9 @@ pub struct SemanticHit {
     pub name: String,
     /// AT-SPI role or CDP role. Comparable to a Windows UIA control type.
     pub role: String,
+    /// The application the element belongs to (the accessibility bus'
+    /// application name).
+    pub app: String,
     pub bounds: Option<crate::atspi::AtspiBounds>,
     /// Which tier answered. Useful for explaining latency and for diagnostics.
     pub tier: Tier,
@@ -220,6 +223,7 @@ fn from_atspi(n: AtspiNode) -> Option<SemanticHit> {
     Some(SemanticHit {
         name: n.name,
         role: n.role,
+        app: n.app,
         bounds: n.bounds,
         tier: Tier::AtSpi,
         actions: n.actions,
@@ -236,6 +240,7 @@ fn from_cdp(n: CdpNode) -> Option<SemanticHit> {
     Some(SemanticHit {
         name: n.name,
         role: n.role,
+        app: String::new(),
         bounds: None,
         tier: Tier::Cdp,
         actions: Vec::new(),
@@ -700,6 +705,7 @@ mod tests {
         SemanticHit {
             name: "Save".into(),
             role: "push button".into(),
+            app: "code".into(),
             bounds,
             tier: Tier::AtSpi,
             actions: vec!["click".into()],

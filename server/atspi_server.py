@@ -219,7 +219,7 @@ def states_of(node: Any) -> list[str]:
     for name in (
         "STATE_CHECKED", "STATE_PRESSED", "STATE_EXPANDED", "STATE_SELECTED",
         "STATE_SENSITIVE", "STATE_SHOWING", "STATE_FOCUSED", "STATE_ENABLED",
-        "STATE_ACTIVE", "STATE_EDITABLE", "STATE_READ_ONLY",
+        "STATE_ACTIVE", "STATE_EDITABLE", "STATE_READ_ONLY", "STATE_VISIBLE",
     ):
         enum = _safe(lambda n=name: getattr(A.StateType, n))
         if enum is None:

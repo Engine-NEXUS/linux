@@ -219,7 +219,7 @@ def states_of(node: Any) -> list[str]:
     for name in (
         "STATE_CHECKED", "STATE_PRESSED", "STATE_EXPANDED", "STATE_SELECTED",
         "STATE_SENSITIVE", "STATE_SHOWING", "STATE_FOCUSED", "STATE_ENABLED",
-        "STATE_ACTIVE", "STATE_EDITABLE", "STATE_READ_ONLY",
+        "STATE_ACTIVE", "STATE_EDITABLE", "STATE_READ_ONLY", "STATE_VISIBLE",
     ):
         enum = _safe(lambda n=name: getattr(A.StateType, n))
         if enum is None:
@@ -876,14 +876,6 @@ def is_credential_role(role: str) -> bool:
     """Whether an element's role denotes a credential field."""
     r = (role or "").lower()
     return any(r == c or c in r for c in CREDENTIAL_ROLES)
-    """The foreground window, as the platform reports it.
-
-    `app` is the accessibility bus' application name, `title` the top-level
-    frame's accessible name.
-    """
-
-    app: str
-    title: str
 
 
 def is_cosmic_session() -> bool:
