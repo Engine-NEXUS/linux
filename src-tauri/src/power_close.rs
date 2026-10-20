@@ -82,6 +82,22 @@ pub trait CloseEnv {
     fn list(&self) -> Vec<Win>;
     fn close(&self, w: &Win);
     fn sleep_ms(&self, ms: u64);
+    /// How often the window set is re-checked while waiting for the closes
+    /// to land. Windows polls fast (a `EnumWindows` call is free); Linux
+    /// spawns `wmctrl`, so it polls slower. The default keeps the Windows
+    /// behaviour exactly as it was.
+    fn poll_ms(&self) -> u64 {
+        POLL_MS
+    }
+    /// A listing failure, if one happened. A failed listing means we no
+    /// longer know what is open, so the closer must not report a clean
+    /// shutdown. Only Linux can fail to list (`wmctrl` talks to the X
+    /// server); Windows' `EnumWindows` has no failure mode, so the method
+    /// does not exist there at all.
+    #[cfg(target_os = "linux")]
+    fn failure(&self) -> Option<String> {
+        None
+    }
 }
 
 const POLL_MS: u64 = 250;
@@ -92,10 +108,11 @@ pub fn close_all(env: &dyn CloseEnv, wait_ms: u64) -> Outcome {
     for w in &targets {
         env.close(w);
     }
+    let poll = env.poll_ms();
     let mut waited = 0u64;
     loop {
-        env.sleep_ms(POLL_MS);
-        waited += POLL_MS;
+        env.sleep_ms(poll);
+        waited += poll;
         let now = env.list();
         let remaining: Vec<&Win> = targets.iter().filter(|t| now.iter().any(|n| n.hwnd == t.hwnd)).collect();
         if remaining.is_empty() {
@@ -221,6 +238,705 @@ impl CloseEnv for RealEnv {
 
     fn sleep_ms(&self, ms: u64) {
         std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+// ─── Linux ────────────────────────────────────────────────────────────
+//
+// The Windows path above asks every top-level window to close the way its X
+// button does. Linux has no equivalent API: the closest thing is `wmctrl -c`,
+// which asks an *X11* window to close, and only X11 windows are visible to
+// it. On a native Wayland session (COSMIC, GNOME Wayland) no client may ask
+// another application to close at all — so the honest answer there is "I can't
+// close your other apps", not a silent skip.
+//
+// `wmctrl` is optional on most desktops (it is not installed on the target
+// machine), so its absence is a first-class case too.
+
+#[cfg(target_os = "linux")]
+pub mod linux {
+    use super::{CloseEnv, Win};
+
+    /// What the "close everything" step can do in this session.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Strategy {
+        /// X11 session with `wmctrl`: the windows can be asked to close.
+        Wmctrl,
+        /// Native Wayland: no client may ask another application to close.
+        Wayland,
+        /// X11 session, but `wmctrl` is not installed.
+        NoTool,
+    }
+
+    /// Why the other apps cannot be closed — spoken to the user.
+    pub const WAYLAND_REASON: &str =
+        "I can't close your other apps on Wayland, sir — anything unsaved will be lost.";
+    pub const NO_TOOL_REASON: &str =
+        "I can't ask your other apps to close, sir — anything unsaved will be lost.";
+    /// `wmctrl` is installed but cannot talk to the X server.
+    pub const TOOL_BROKEN_REASON: &str =
+        "I can't reach your window manager, sir — anything unsaved will be lost.";
+
+    /// The pure decision (unit-tested): can we ask the other apps to close?
+    ///
+    /// A Wayland session cannot, whatever is installed — `wmctrl` only sees
+    /// X11 windows, and the native Wayland apps (which is what the user runs)
+    /// are invisible to it. An X11 session can, provided `wmctrl` is there.
+    pub fn strategy(session_is_wayland: bool, has_wmctrl: bool) -> Strategy {
+        if session_is_wayland {
+            Strategy::Wayland
+        } else if has_wmctrl {
+            Strategy::Wmctrl
+        } else {
+            Strategy::NoTool
+        }
+    }
+
+    /// Can this session ask the other apps to close? `Err(reason)` when it
+    /// cannot — the caller speaks the reason and only continues on the
+    /// user's confirmation.
+    ///
+    /// This is a real probe, not a "is the binary installed" check: `wmctrl`
+    /// can be present while the X server is unreachable, and then it closes
+    /// nothing at all. That must read as "cannot", never as "nothing open".
+    pub fn can_close_apps() -> Result<(), String> {
+        let strat = strategy(crate::session::is_wayland(), wmctrl::installed());
+        let probe = match strat {
+            Strategy::Wmctrl => wmctrl::list().map(|_| ()),
+            _ => Ok(()),
+        };
+        if let Err(detail) = &probe {
+            // The raw command error is for the log, never for the user's ear.
+            tracing::warn!("power_close: the window tool failed: {detail}");
+        }
+        can_close_from(strat, probe)
+    }
+
+    /// The pure mapping (unit-tested): can the apps be closed here, and if
+    /// not, what is the user told?
+    ///
+    /// The tool's raw error is deliberately dropped — the user is told what
+    /// it means for them, the error text goes to the log.
+    pub fn can_close_from(strategy: Strategy, probe: Result<(), String>) -> Result<(), String> {
+        match strategy {
+            Strategy::Wmctrl => match probe {
+                Ok(()) => Ok(()),
+                Err(_) => Err(TOOL_BROKEN_REASON.to_string()),
+            },
+            Strategy::Wayland => Err(WAYLAND_REASON.to_string()),
+            Strategy::NoTool => Err(NO_TOOL_REASON.to_string()),
+        }
+    }
+
+    /// The result of the Linux close step.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum CloseResult {
+        /// Everything that was asked to close has closed.
+        AllClosed { closed: usize },
+        /// Some windows are still open (usually a "save your work?" prompt).
+        Refused { closed: usize, still_open: Vec<String> },
+        /// This session cannot ask the other apps to close at all (native
+        /// Wayland, or no `wmctrl`) — nothing was closed.
+        CannotClose { reason: String },
+        /// The tool that can close windows is not working — we do NOT know
+        /// whether the apps closed, so the shutdown must not go ahead.
+        ToolFailed { reason: String },
+    }
+
+    /// What NEXUS says when it could not even find out whether the other
+    /// apps closed. The shutdown stops here, so the line says what to do.
+    pub fn tool_failed_line() -> String {
+        "I couldn't check whether your other apps closed, sir, so I've stopped the shutdown — please save your work and turn it off yourself."
+            .to_string()
+    }
+
+    // ── The "I can't close your other apps" warning ──────────────────────
+    //
+    // On Linux the shutdown may only go past the close step when the user
+    // has EXPLICITLY confirmed that warning in THIS shutdown flow. Several
+    // paths reach the shutdown without ever showing it — the loose-mishearing
+    // offer ("Did you want me to shut down your laptop, sir?") and the
+    // meeting/drill early returns in the blocker — and there the apps are
+    // still open when the machine powers off.
+    //
+    // The state is tracked here so the rule cannot depend on which path the
+    // shutdown came from.
+
+    /// The state of the Linux close-warning inside the current flow.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum WarningState {
+        /// The warning was not asked in this flow.
+        None,
+        /// The warning was asked; the answer has not arrived yet.
+        Asked,
+        /// The warning was asked and the user answered "yes" in this flow.
+        Confirmed,
+    }
+
+    impl WarningState {
+        fn as_code(self) -> u8 {
+            match self {
+                WarningState::None => 0,
+                WarningState::Asked => 1,
+                WarningState::Confirmed => 2,
+            }
+        }
+
+        fn from_code(code: u8) -> WarningState {
+            match code {
+                1 => WarningState::Asked,
+                2 => WarningState::Confirmed,
+                _ => WarningState::None,
+            }
+        }
+    }
+
+    static WARNING_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+    /// The current state of the warning.
+    pub fn warning_state() -> WarningState {
+        WarningState::from_code(WARNING_STATE.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// The warning was asked (the question is on its way to the user).
+    pub fn note_warning_asked() {
+        WARNING_STATE.store(WarningState::Asked.as_code(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The user answered "yes" to the pending power question. Only a pending
+    /// Linux warning becomes a confirmation; anything else clears the state
+    /// (the "yes" was for a different question).
+    pub fn confirm_warning() {
+        let next = match warning_state() {
+            WarningState::Asked => WarningState::Confirmed,
+            _ => WarningState::None,
+        };
+        WARNING_STATE.store(next.as_code(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Forget the warning — a new flow started, or the question was answered
+    /// with anything but "yes".
+    pub fn clear_warning() {
+        WARNING_STATE.store(WarningState::None.as_code(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Consume the confirmation: true when the user confirmed the warning in
+    /// this flow. The state is cleared, so a later shutdown cannot inherit it.
+    pub fn take_warning_confirmed() -> bool {
+        if warning_state() == WarningState::Confirmed {
+            clear_warning();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// What happens after the close step (unit-tested).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Proceed {
+        /// The shutdown may go ahead.
+        Continue,
+        /// The shutdown stops and the user is told why.
+        Stop { line: String },
+    }
+
+    /// The pure decision (unit-tested): may the shutdown go on after the
+    /// close step?
+    ///
+    /// `confirmed` = the user explicitly confirmed the "I can't close your
+    /// other apps" warning in THIS shutdown flow. Without it, a session that
+    /// cannot close the apps (or a window tool that failed) stops the
+    /// shutdown instead of quietly dropping unsaved work.
+    pub fn after_close(close: &CloseResult, confirmed: bool) -> Proceed {
+        match close {
+            // Everything asked to close did close.
+            CloseResult::AllClosed { .. } => Proceed::Continue,
+            // A window stayed open — the shutdown stops, as it always has.
+            CloseResult::Refused { still_open, .. } => {
+                Proceed::Stop { line: super::refusal_line(still_open) }
+            }
+            // The apps could not be closed (or we cannot even tell): the
+            // shutdown may only go ahead if the user was warned and said yes.
+            CloseResult::CannotClose { reason } => {
+                if confirmed {
+                    Proceed::Continue
+                } else {
+                    Proceed::Stop { line: format!("{reason} I've stopped the shutdown.") }
+                }
+            }
+            CloseResult::ToolFailed { .. } => {
+                if confirmed {
+                    Proceed::Continue
+                } else {
+                    Proceed::Stop { line: tool_failed_line() }
+                }
+            }
+        }
+    }
+
+    /// A sticky listing failure.
+    ///
+    /// Once a listing has failed we no longer know what is open, so a later
+    /// SUCCESSFUL listing must not erase the failure — the first one is
+    /// kept, because the failed listing may have been the one that built
+    /// the target set (an empty target set means nothing was ever asked to
+    /// close).
+    #[derive(Default)]
+    pub struct FailureFlag {
+        error: std::cell::RefCell<Option<String>>,
+    }
+
+    impl FailureFlag {
+        /// Record a listing failure. The FIRST failure wins.
+        pub fn record(&self, error: String) {
+            let mut slot = self.error.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(error);
+            }
+        }
+
+        /// The sticky failure, if any listing failed.
+        pub fn get(&self) -> Option<String> {
+            self.error.borrow().clone()
+        }
+    }
+
+    /// The X11 windows `wmctrl` can see, as the closer sees them.
+    ///
+    /// `failure` remembers a failed listing: an empty window list and a
+    /// broken `wmctrl` look the same from the outside, and the difference is
+    /// the difference between "nothing was open" and "we closed nothing".
+    pub struct LinuxEnv {
+        failure: FailureFlag,
+    }
+
+    impl LinuxEnv {
+        pub fn new() -> Self {
+            Self { failure: FailureFlag::default() }
+        }
+
+        /// Turn a listing result into the windows the closer works on.
+        ///
+        /// A failed listing is recorded (sticky) and looks like an empty
+        /// room — the caller checks `failure()` before believing it.
+        pub fn absorb(&self, result: Result<Vec<wmctrl::Window>, String>) -> Vec<Win> {
+            let windows = match result {
+                Ok(w) => w,
+                Err(e) => {
+                    // Sticky: a later successful listing does NOT erase this.
+                    self.failure.record(e);
+                    return vec![];
+                }
+            };
+            windows
+                .into_iter()
+                .filter_map(|w| {
+                    let title = w.title.trim();
+                    if title.is_empty() {
+                        return None;
+                    }
+                    // NEXUS's own windows are never closed — the stage hosts
+                    // the orb, and closing it would take the overlay down.
+                    if title.starts_with("NEXUS") {
+                        return None;
+                    }
+                    let hwnd = parse_window_id(&w.id)?;
+                    Some(Win {
+                        hwnd,
+                        // wmctrl reports no executable name; the title is the
+                        // only thing a user would recognise ("Firefox is
+                        // asking to save, sir.").
+                        exe: title.to_string(),
+                        class: String::new(),
+                        title: title.to_string(),
+                    })
+                })
+                .collect()
+        }
+    }
+
+    impl CloseEnv for LinuxEnv {
+        fn list(&self) -> Vec<Win> {
+            self.absorb(wmctrl::list())
+        }
+
+        fn close(&self, w: &Win) {
+            wmctrl::close(w.hwnd);
+        }
+
+        fn sleep_ms(&self, ms: u64) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+
+        /// Every poll on Linux spawns a `wmctrl` process, so it polls far
+        /// less often than the (free) Windows `EnumWindows` poll.
+        fn poll_ms(&self) -> u64 {
+            1_000
+        }
+
+        fn failure(&self) -> Option<String> {
+            self.failure.get()
+        }
+    }
+
+    /// Close everything with the given environment, and report honestly.
+    ///
+    /// A listing that failed is a FAILURE, not an empty room: the caller
+    /// must not power the machine off while believing the apps were closed.
+    /// (The failure is sticky — see [`FailureFlag`] — so a failed FIRST
+    /// listing, which is the one that builds the target set, cannot be
+    /// erased by a later successful poll.)
+    pub fn close_with(env: &dyn CloseEnv, wait_ms: u64) -> CloseResult {
+        let outcome = super::close_all(env, wait_ms);
+        if let Some(reason) = env.failure() {
+            return CloseResult::ToolFailed {
+                reason: format!("{TOOL_BROKEN_REASON} ({reason})"),
+            };
+        }
+        match outcome {
+            super::Outcome::AllClosed { closed } => CloseResult::AllClosed { closed },
+            super::Outcome::Refused { closed, still_open } => CloseResult::Refused { closed, still_open },
+        }
+    }
+
+    /// Close everything, and report honestly what happened.
+    pub fn close_everything(wait_ms: u64) -> CloseResult {
+        match strategy(crate::session::is_wayland(), wmctrl::installed()) {
+            // Native Wayland: no client may ask another application to close.
+            Strategy::Wayland => {
+                return CloseResult::CannotClose { reason: WAYLAND_REASON.to_string() }
+            }
+            // No `wmctrl`: there is no way to ask an X11 window to close.
+            Strategy::NoTool => {
+                return CloseResult::CannotClose { reason: NO_TOOL_REASON.to_string() }
+            }
+            Strategy::Wmctrl => {}
+        }
+        let env = LinuxEnv::new();
+        close_with(&env, wait_ms)
+    }
+
+    /// "0x03a00003" -> the window id as a number.
+    pub fn parse_window_id(id: &str) -> Option<isize> {
+        let hex = id.trim().trim_start_matches("0x").trim_start_matches("0X");
+        i64::from_str_radix(hex, 16).ok().map(|v| v as isize)
+    }
+
+    /// The `wmctrl` command line.
+    pub mod wmctrl {
+        /// One window as `wmctrl -l` reports it.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct Window {
+            pub id: String,
+            pub title: String,
+        }
+
+        /// Pure parser for one `wmctrl -l` line:
+        /// `0x03a00003  0  hostname  Firefox - Private` -> id + title.
+        ///
+        /// The line is `id desktop hostname title`, the title being the rest
+        /// of the line (it may contain spaces). The id is hexadecimal.
+        pub fn parse_line(line: &str) -> Option<Window> {
+            let mut rest = line.trim_start();
+            let id = take_field(&mut rest)?;
+            if !id.starts_with("0x") {
+                return None;
+            }
+            let _desktop = take_field(&mut rest)?;
+            let _host = take_field(&mut rest)?;
+            let title = rest.trim().to_string();
+            if title.is_empty() {
+                return None;
+            }
+            Some(Window { id, title })
+        }
+
+        /// The next whitespace-delimited field, advancing `rest`.
+        fn take_field(rest: &mut &str) -> Option<String> {
+            let s = rest.trim_start();
+            if s.is_empty() {
+                return None;
+            }
+            let end = s.find(char::is_whitespace).unwrap_or(s.len());
+            let field = s[..end].to_string();
+            *rest = &s[end..];
+            Some(field)
+        }
+
+        /// The windows the X server knows about.
+        ///
+        /// A failure is an ERROR, never an empty list: "wmctrl could not talk
+        /// to the X server" and "no windows are open" must not look the same,
+        /// or the shutdown would power the machine off while believing the
+        /// apps had been closed.
+        pub fn list() -> Result<Vec<Window>, String> {
+            let out = std::process::Command::new("wmctrl")
+                .arg("-l")
+                .output()
+                .map_err(|e| format!("wmctrl could not be started: {e}"))?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let detail = stderr.lines().next().unwrap_or("").trim();
+                return Err(if detail.is_empty() {
+                    format!("wmctrl -l exited with {}", out.status)
+                } else {
+                    format!("wmctrl -l failed: {detail}")
+                });
+            }
+            Ok(String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(parse_line)
+                .collect())
+        }
+
+        /// Ask one window to close (what its X button does).
+        pub fn close(id: isize) -> bool {
+            std::process::Command::new("wmctrl")
+                .arg("-c")
+                .arg(format!("0x{id:x}"))
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+
+        /// Is `wmctrl` installed?
+        pub fn installed() -> bool {
+            let Some(path) = std::env::var_os("PATH") else {
+                return false;
+            };
+            std::env::split_paths(&path).any(|dir| is_executable(&dir.join("wmctrl")))
+        }
+
+        fn is_executable(path: &std::path::Path) -> bool {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(path)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod linux_tests {
+    #[cfg(target_os = "linux")]
+    use super::linux::{parse_window_id, strategy, wmctrl, Strategy};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_can_never_close_the_other_apps() {
+        // Even with wmctrl installed, a native Wayland session has no way to
+        // ask another application to close.
+        assert_eq!(strategy(true, true), Strategy::Wayland);
+        assert_eq!(strategy(true, false), Strategy::Wayland);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_needs_wmctrl() {
+        assert_eq!(strategy(false, true), Strategy::Wmctrl);
+        assert_eq!(strategy(false, false), Strategy::NoTool);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wmctrl_lines_are_parsed() {
+        let w = wmctrl::parse_line("0x03a00003  0  hostname  Firefox - Private").unwrap();
+        assert_eq!(w.id, "0x03a00003");
+        assert_eq!(w.title, "Firefox - Private");
+        // Tabs and extra spaces are tolerated.
+        let w = wmctrl::parse_line("0x03a00004\t0\thost\tA  B").unwrap();
+        assert_eq!(w.id, "0x03a00004");
+        assert_eq!(w.title, "A  B");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rubbish_lines_are_ignored() {
+        assert!(wmctrl::parse_line("").is_none());
+        assert!(wmctrl::parse_line("   ").is_none());
+        assert!(wmctrl::parse_line("03000003 0 host Title").is_none(), "no 0x prefix");
+        assert!(wmctrl::parse_line("0x03a00003 0 host").is_none(), "no title");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn window_ids_are_hexadecimal() {
+        assert_eq!(parse_window_id("0x03a00003"), Some(0x03a00003));
+        assert_eq!(parse_window_id("0X03A00003"), Some(0x03a00003));
+        assert_eq!(parse_window_id("not-an-id"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_listing_is_a_tool_failure_not_an_empty_room() {
+        // The Linux failure mode: `list()` cannot talk to the X server, so
+        // it returns nothing — which, without the failure flag, would look
+        // like "no windows were open" and the machine would power off with
+        // the user's work still running.
+        struct FailingEnv {
+            failure: Option<String>,
+        }
+        impl super::CloseEnv for FailingEnv {
+            fn list(&self) -> Vec<super::Win> {
+                vec![] // a failed listing looks like an empty room
+            }
+            fn close(&self, _w: &super::Win) {}
+            fn sleep_ms(&self, _ms: u64) {}
+            fn failure(&self) -> Option<String> {
+                self.failure.clone()
+            }
+        }
+
+        let broken = FailingEnv {
+            failure: Some("wmctrl -l failed: Cannot open display".into()),
+        };
+        let result = super::linux::close_with(&broken, 0);
+        assert!(
+            matches!(result, super::linux::CloseResult::ToolFailed { .. }),
+            "a failed listing must never be reported as a clean close: {result:?}"
+        );
+
+        // The same env without a failure IS a clean close — the mapping
+        // distinguishes the two instead of always refusing.
+        let healthy = FailingEnv { failure: None };
+        let result = super::linux::close_with(&healthy, 0);
+        assert!(
+            matches!(result, super::linux::CloseResult::AllClosed { .. }),
+            "{result:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_first_listing_is_not_erased_by_a_later_success() {
+        use super::CloseEnv;
+        let env = super::linux::LinuxEnv::new();
+        // The FIRST listing fails — it is the one that builds the target
+        // set, so nothing was ever asked to close.
+        assert!(env.absorb(Err("Cannot open display".into())).is_empty());
+        // A later listing works. The failure must still stand.
+        let later = env.absorb(Ok(vec![super::linux::wmctrl::Window {
+            id: "0x03a00003".into(),
+            title: "Firefox".into(),
+        }]));
+        assert_eq!(later.len(), 1);
+        assert!(
+            env.failure().is_some(),
+            "the sticky failure must survive a later successful listing"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_list_error_makes_the_close_step_refuse_without_reading_the_error_aloud() {
+        // The blocker asks the user once; the raw command error is for the
+        // log, not for the user's ear.
+        let reason = super::linux::can_close_from(
+            super::linux::Strategy::Wmctrl,
+            Err("wmctrl -l failed: Cannot open display".to_string()),
+        )
+        .expect_err("a broken window tool must refuse to close silently");
+        assert!(!reason.contains("Cannot open display"), "the raw error must not be spoken: {reason}");
+        assert!(reason.contains("window manager"), "{reason}");
+        // A working tool still allows closing; Wayland / a missing tool keep
+        // their own reasons.
+        assert!(super::linux::can_close_from(super::linux::Strategy::Wmctrl, Ok(())).is_ok());
+        assert!(super::linux::can_close_from(super::linux::Strategy::Wayland, Ok(())).is_err());
+        assert!(super::linux::can_close_from(super::linux::Strategy::NoTool, Ok(())).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_close_step_polls_at_the_envs_own_rate() {
+        // Every Linux poll spawns a `wmctrl` process, so the loop must use
+        // the environment's interval, not the 250 ms Windows default.
+        struct SlowEnv {
+            lists: std::cell::Cell<u32>,
+        }
+        impl super::CloseEnv for SlowEnv {
+            fn list(&self) -> Vec<super::Win> {
+                self.lists.set(self.lists.get() + 1);
+                vec![super::Win {
+                    hwnd: 1,
+                    exe: "x".into(),
+                    class: String::new(),
+                    title: "never closes".into(),
+                }]
+            }
+            fn close(&self, _w: &super::Win) {}
+            fn sleep_ms(&self, _ms: u64) {}
+            fn poll_ms(&self) -> u64 {
+                1_000
+            }
+        }
+        let env = SlowEnv { lists: std::cell::Cell::new(0) };
+        // The window never goes away, so the step waits out its budget.
+        let _ = super::close_all(&env, 2_000);
+        assert!(
+            env.lists.get() <= 3,
+            "the window set must not be polled every 250 ms: {} polls",
+            env.lists.get()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_shutdown_only_goes_on_when_the_warning_was_confirmed() {
+        use super::linux::{after_close, CloseResult, Proceed};
+
+        let cannot = CloseResult::CannotClose {
+            reason: "I can't close your other apps on Wayland, sir — anything unsaved will be lost.".to_string(),
+        };
+        // No confirmation in this flow (the loose-mishearing offer, the
+        // meeting/drill early returns) -> the shutdown stops and says why.
+        match after_close(&cannot, false) {
+            Proceed::Stop { line } => {
+                assert!(line.contains("stopped the shutdown"), "{line}");
+                assert!(line.contains("Wayland"), "{line}");
+            }
+            other => panic!("expected a stop, got {other:?}"),
+        }
+        // Confirmed in this flow -> the shutdown goes ahead, and nothing
+        // extra is spoken (the user already heard the warning).
+        assert_eq!(after_close(&cannot, true), Proceed::Continue);
+
+        // The same rule for a window tool that failed.
+        let failed = CloseResult::ToolFailed { reason: "wmctrl -l failed".to_string() };
+        assert!(matches!(after_close(&failed, false), Proceed::Stop { .. }));
+        assert_eq!(after_close(&failed, true), Proceed::Continue);
+
+        // Everything that was asked to close did close -> always go ahead.
+        assert_eq!(after_close(&CloseResult::AllClosed { closed: 3 }, false), Proceed::Continue);
+
+        // A window that stayed open always stops the shutdown.
+        let refused = CloseResult::Refused { closed: 1, still_open: vec!["Notepad".to_string()] };
+        match after_close(&refused, true) {
+            Proceed::Stop { line } => assert!(line.contains("Notepad"), "{line}"),
+            other => panic!("expected a stop, got {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_warning_confirmation_is_tracked_per_flow() {
+        use super::linux::{
+            clear_warning, confirm_warning, note_warning_asked, take_warning_confirmed, warning_state,
+            WarningState,
+        };
+
+        clear_warning();
+        assert_eq!(warning_state(), WarningState::None);
+        // A "yes" to a question that carried no warning confirms nothing.
+        confirm_warning();
+        assert!(!take_warning_confirmed());
+        // The warning was asked and answered "yes" -> confirmed, once.
+        note_warning_asked();
+        assert_eq!(warning_state(), WarningState::Asked);
+        confirm_warning();
+        assert_eq!(warning_state(), WarningState::Confirmed);
+        assert!(take_warning_confirmed());
+        assert!(!take_warning_confirmed(), "the confirmation is consumed");
+        assert_eq!(warning_state(), WarningState::None);
     }
 }
 

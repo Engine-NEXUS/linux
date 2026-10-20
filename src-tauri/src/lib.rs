@@ -143,6 +143,10 @@ pub(crate) mod live_glass;
 pub(crate) mod luminance_probe;
 #[cfg(target_os = "linux")]
 pub(crate) mod session;
+// Linux display-backend bootstrap (GDK_BACKEND=x11 when XWayland is there).
+// Called from main() before Tauri/GTK starts — see the module docs.
+#[cfg(target_os = "linux")]
+pub mod gdk_backend_linux;
 
 use tauri::{Emitter, Listener, Manager};
 #[cfg(not(target_os = "windows"))]
@@ -315,8 +319,12 @@ pub fn run() {
             let is_setup = args.iter().any(|a| a == "--setup" || a == "-s");
             let is_settings = args.iter().any(|a| a == "--settings");
             let is_background = args.iter().any(|a| a == "--background");
+            // `--wake` is the summon path on Linux, where the global hotkey is
+            // compiled out: a desktop shortcut / custom keybinding runs
+            // `nexus --wake`, which lands here and wakes the running instance.
+            let is_wake = args.iter().any(|a| a == "--wake");
 
-            if is_background && !is_setup && !is_settings {
+            if is_background && !is_setup && !is_settings && !is_wake {
                 // Silent background launch — don't show the orb, just ensure the
                 // tray is running. This handles the scheduled-task auto-start case.
                 tracing::info!("single-instance: --background launch, staying hidden");
@@ -338,7 +346,7 @@ pub fn run() {
                 // Only wake the orb if we are NOT in the middle of setup
                 let setup_active = app.get_webview_window("setup").is_some();
                 if !setup_active {
-                    crate::window_manager::wake_orb_src(app, "relaunch");
+                    crate::window_manager::wake_orb_src(app, if is_wake { "wake-flag" } else { "relaunch" });
                 }
             }
         }))
@@ -931,6 +939,26 @@ pub fn run() {
                 let is_background = std::env::args().any(|arg| arg == "--background");
                 if is_background {
                     tracing::info!("startup: --background mode — orb hidden, tray only");
+                }
+
+                // ─── --wake flag: summon the orb ─────────────────────────
+                //
+                // The Linux desktop shortcut / custom keybinding runs
+                // `nexus --wake` (the global hotkey is compiled out there).
+                // When NEXUS is already running, the single-instance callback
+                // above forwards the flag and wakes it. A COLD start has to
+                // wake itself — and only once the stage renderer is alive,
+                // otherwise the wake event fires before React mounts and the
+                // orb stays idle.
+                if std::env::args().any(|arg| arg == "--wake") {
+                    tracing::info!("startup: --wake flag — summoning the orb");
+                    let handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        if !crate::stage::wait_until_ready(20_000).await {
+                            tracing::warn!("startup: --wake — the stage never beat; summoning anyway");
+                        }
+                        crate::window_manager::wake_orb_src(&handle, "wake-flag");
+                    });
                 }
             }
 

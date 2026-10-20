@@ -102,12 +102,15 @@ TARGET_BIN="$SCRIPT_DIR/src-tauri/target/release/nexus"
 ln -sf "$TARGET_BIN" ~/.local/bin/nexus
 
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-  # Desktop entry: GDK_BACKEND=x11 ensures consistent floating overlay and window management
+  # Desktop entry: the binary picks the GTK backend itself (it forces
+  # GDK_BACKEND=x11 only when an XWayland display is actually available),
+  # so nothing is forced here — pointing GTK at a missing X server would
+  # stop the app from starting.
   cat << DESKTOP_EOF > ~/.local/share/applications/nexus.desktop
 [Desktop Entry]
 Name=NEXUS
 Comment=Floating Desktop AI Assistant
-Exec=env GDK_BACKEND=x11 NEXUS_PYTHON=$VENV_DIR/bin/python3 PATH=$VENV_DIR/bin:\$PATH $TARGET_BIN
+Exec=env NEXUS_PYTHON=$VENV_DIR/bin/python3 PATH=$VENV_DIR/bin:\$PATH $TARGET_BIN
 Icon=$SCRIPT_DIR/src-tauri/icons/128x128.png
 Terminal=false
 Type=Application
@@ -129,7 +132,7 @@ Name=NEXUS
 Terminal=false
 NoDisplay=true
 MimeType=x-scheme-handler/nexus
-Exec=env GDK_BACKEND=x11 NEXUS_PYTHON=$VENV_DIR/bin/python3 "$TARGET_BIN" %u
+Exec=env NEXUS_PYTHON=$VENV_DIR/bin/python3 "$TARGET_BIN" %u
 HANDLER_EOF
     fi
   fi
@@ -146,7 +149,7 @@ Type=Application
 Version=1.0
 Name=NEXUS
 Comment=NEXUS startup script
-Exec=env GDK_BACKEND=x11 NEXUS_PYTHON=$VENV_DIR/bin/python3 "$TARGET_BIN"
+Exec=env NEXUS_PYTHON=$VENV_DIR/bin/python3 "$TARGET_BIN"
 StartupNotify=false
 Terminal=false
 AUTOSTART_EOF

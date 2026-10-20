@@ -152,9 +152,30 @@ pub fn get_or_create_window<R: Runtime>(
     // Create new window
     tracing::info!("dyn_windows: creating '{}' window on-demand", config.label);
 
+    // Linux: the fullscreen stage is sized from the monitor. GTK ignores
+    // `maximized` on a window that is still hidden (the stage is created
+    // hidden and shown a moment later), so without this the overlay keeps
+    // the placeholder 1920x1080 size and does not cover the screen. At
+    // creation the monitor may not be known yet — `window_manager::
+    // size_stage_to_monitor` fixes it up right after the first show.
+    #[cfg(target_os = "linux")]
+    let (width, height) = if config.label == "stage" {
+        match app.primary_monitor() {
+            Ok(Some(m)) => {
+                let scale = m.scale_factor();
+                (m.size().width as f64 / scale, m.size().height as f64 / scale)
+            }
+            _ => (config.width, config.height),
+        }
+    } else {
+        (config.width, config.height)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let (width, height) = (config.width, config.height);
+
     let mut builder = WebviewWindowBuilder::new(app, config.label, WebviewUrl::App(config.url.into()))
         .title(config.title)
-        .inner_size(config.width, config.height)
+        .inner_size(width, height)
         .resizable(config.resizable)
         .decorations(config.decorations)
         .transparent(config.transparent)

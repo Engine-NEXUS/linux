@@ -697,10 +697,13 @@ function cmdRun() {
     info(`Launching NEXUS: ${binPath}`);
     run(binPath, [], { stdio: "ignore" });
   } else {
-    // Unix: launch directly with GDK_BACKEND=x11 and Python venv on Linux
+    // Unix: launch directly, with the Python venv on Linux.
+    // GDK_BACKEND is deliberately NOT set here: the binary picks the GTK
+    // backend itself (gdk_backend_linux), and it only forces X11 when an
+    // XWayland display is actually available. Setting it here would point
+    // GTK at an X server that may not exist and stop the app from starting.
     const runEnv = { ...process.env };
     if (IS_LINUX) {
-      if (!runEnv.GDK_BACKEND) runEnv.GDK_BACKEND = "x11";
       const venvPython = join(process.env.HOME || "", ".local", "share", "nexus", "venv", "bin", "python3");
       if (existsSync(venvPython) && !runEnv.NEXUS_PYTHON) {
         runEnv.NEXUS_PYTHON = venvPython;

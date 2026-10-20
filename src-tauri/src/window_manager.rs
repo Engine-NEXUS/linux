@@ -6,7 +6,7 @@
 //! emits that rect to the stage frontend over Tauri events — it no longer
 //! owns an OS window to show/hide/position directly.
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
 
 /// Last-emitted rects, for the stage frontend to pull on mount (race-free
 /// delivery pattern already used elsewhere in this codebase for
@@ -207,8 +207,42 @@ pub fn monitor_info<R: Runtime>(app: &AppHandle<R>) -> (i32, i32, f64) {
             return (m.size().width as i32, m.size().height as i32, m.scale_factor());
         }
     }
+    // Linux: at cold boot the primary monitor is often not known yet (the
+    // stage window is not realised), and the hardcoded 1920x1080 below is
+    // then plainly wrong on a 2560x1440 or a 1366x768 screen. Any available
+    // monitor is better than the guess.
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(monitors) = app.available_monitors() {
+            if let Some(m) = monitors.first() {
+                return (m.size().width as i32, m.size().height as i32, m.scale_factor());
+            }
+        }
+    }
     (1920, 1080, 1.0)
 }
+
+/// Linux: make the fullscreen stage really cover the monitor it is on.
+///
+/// GTK ignores `maximized` on a window that is still hidden (the stage is
+/// created hidden and shown a moment later), and Wayland forbids client
+/// positioning entirely — so the only reliable way to get a full-screen
+/// overlay is to size it explicitly once it is mapped. On Windows the stage
+/// keeps its configured size, so this is a no-op there.
+#[cfg(target_os = "linux")]
+pub fn size_stage_to_monitor<R: Runtime>(app: &AppHandle<R>, win: &WebviewWindow<R>) {
+    let (w, h, _scale) = monitor_info(app);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let _ = win.set_size(tauri::PhysicalSize::new(w as u32, h as u32));
+    let _ = win.set_position(tauri::PhysicalPosition::new(0, 0));
+    tracing::info!("stage: sized to the primary monitor ({w}x{h} physical)");
+}
+
+/// Windows/macOS: the stage keeps the size it was configured with.
+#[cfg(not(target_os = "linux"))]
+pub fn size_stage_to_monitor<R: Runtime>(_app: &AppHandle<R>, _win: &WebviewWindow<R>) {}
 
 /// Compute a physical-px rect for arbitrary (h, v, size) — shared by
 /// `orb_rect`, the calibration preview, and `set_orb_position`'s

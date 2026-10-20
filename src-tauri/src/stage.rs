@@ -127,14 +127,48 @@ fn disabled() -> bool {
 
 /// Ensure the stage window exists (created hidden). Does NOT show it.
 /// The stage is a visual-only canvas: it must NEVER intercept mouse
-/// clicks. `set_ignore_cursor_events(true)` is enforced here at creation
-/// and re-asserted in `stage_show` so a fresh WebView incarnation can
-/// never swallow the desktop (hitbox loop re-opens holes when needed).
+/// clicks. `set_ignore_cursor_events(true)` is enforced at creation on
+/// Windows/macOS and right after the first show on Linux (tao aborts on a
+/// not-yet-realized window), and it is re-asserted on every show, so a fresh
+/// WebView incarnation can never swallow the desktop (the hitbox loop
+/// re-opens holes when needed).
 fn ensure_stage<R: Runtime>(app: &AppHandle<R>) -> Result<tauri::WebviewWindow<R>, String> {
     let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::stage())?;
+    // Linux: `set_ignore_cursor_events(true)` ABORTS inside tao while the GTK
+    // window is unrealized (`window.window()` is None until the first show —
+    // event_loop.rs unwraps it). A hidden window eats no clicks anyway, so
+    // the flag is applied right after the show instead. Windows and macOS
+    // keep setting it at creation, as they always have.
+    #[cfg(not(target_os = "linux"))]
     win.set_ignore_cursor_events(true)
         .map_err(|e| format!("stage click-through: {e}"))?;
     Ok(win)
+}
+
+/// Make the stage click-through — it must never swallow a desktop click.
+#[cfg(target_os = "windows")]
+fn set_click_through<R: Runtime>(win: &tauri::WebviewWindow<R>) -> Result<(), String> {
+    win.set_ignore_cursor_events(true)
+        .map_err(|e| format!("stage click-through: {e}"))
+}
+
+/// macOS: same as Windows — the flag is safe to set at any time.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn set_click_through<R: Runtime>(win: &tauri::WebviewWindow<R>) -> Result<(), String> {
+    win.set_ignore_cursor_events(true)
+        .map_err(|e| format!("stage click-through: {e}"))
+}
+
+/// Linux: `set_ignore_cursor_events(true)` ABORTS inside tao while the GTK
+/// window is unrealized (`window.window()` is None until the first show).
+/// A hidden window eats no clicks anyway, so the flag is only applied once
+/// the window is actually visible.
+#[cfg(target_os = "linux")]
+fn set_click_through<R: Runtime>(win: &tauri::WebviewWindow<R>) -> Result<(), String> {
+    if win.is_visible().unwrap_or(false) {
+        let _ = win.set_ignore_cursor_events(true);
+    }
+    Ok(())
 }
 
 /// Synchronous core of `stage_show` — no actual `.await` happens in this
@@ -148,11 +182,13 @@ pub fn stage_show_sync<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     FAILS.store(0, std::sync::atomic::Ordering::Relaxed);
     let win = ensure_stage(app)?;
     win.show().map_err(|e| format!("stage show: {e}"))?;
+    // Linux: GTK ignores `maximized` on a still-hidden window, so the overlay
+    // is sized from the monitor explicitly once it is mapped (no-op elsewhere).
+    crate::window_manager::size_stage_to_monitor(app, &win);
     // Re-assert on every show: a recreated window resets to the default
     // (cursor-intercepting) state — the fullscreen overlay must be
     // strictly click-through before the hitbox loop re-opens holes.
-    win.set_ignore_cursor_events(true)
-        .map_err(|e| format!("stage click-through: {e}"))?;
+    set_click_through(&win)?;
     VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
     *SHOWN_AT.lock() = Some(std::time::Instant::now());
     tracing::info!("stage: shown (click-through enforced)");
@@ -540,6 +576,13 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
                     if win.show().is_err() {
                         continue;
                     }
+                    // Same as stage_show_sync: the overlay must cover the
+                    // monitor (Linux sizes it explicitly — GTK ignores
+                    // `maximized` on a hidden window) and must be
+                    // click-through (a recreated window starts out
+                    // intercepting the cursor).
+                    crate::window_manager::size_stage_to_monitor(&app, &win);
+                    let _ = set_click_through(&win);
                     VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
                     *SHOWN_AT.lock() = Some(std::time::Instant::now());
                     // Wait up to 30s for a fresh heartbeat (proves the
