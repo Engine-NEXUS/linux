@@ -10,6 +10,8 @@ import { LiveCaption } from "./LiveCaption";
 import { TourOverlay } from "./TourOverlay";
 import { HandOverlay } from "./HandOverlay";
 import { initThemeSync } from "../sidebar/theme";
+import { ScreenPointerLayer } from "../overlay/PointerOverlay";
+import { isLinuxRuntime } from "../platform";
 
 initThemeSync(); // Light/Dark follows the Command Hub setting (orb, callouts)
 
@@ -342,6 +344,8 @@ function StageApp() {
       </div>
       <SpatialAnnotationLayer />
       <TourOverlay />
+      {/* Linux: the "point at X" marker. Windows shows its ghost pointer instead. */}
+      {isLinuxRuntime() && <ScreenPointerLayer />}
       <HandOverlay />
       <AnnotationCanvas />
       <OrbFrame />

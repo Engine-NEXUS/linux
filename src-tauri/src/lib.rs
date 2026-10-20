@@ -1109,6 +1109,8 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::settings_patch,
+            pointer::pointer_settings_get,
+            pointer::pointer_settings_save,
             commands::get_health_status,
             commands::export_settings,
             commands::import_settings,

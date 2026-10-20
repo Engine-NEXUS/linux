@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { HandModeSection } from "./HandModeSection";
 import { AgentWatchSection } from "./AgentWatchSection";
+import { ScreenPointerSection } from "./ScreenPointerSection";
 import { invoke } from "@tauri-apps/api/core";
 import { isPlausibleGeminiKey } from "./keyFormat";
 import { identityBanner, type IdentityBanner } from "../setup/identityBanner";
@@ -798,6 +799,8 @@ function DisplayTab({ settings, update }: {
           ✦ Open Orb Customization Studio ›
         </button>
       </div>
+
+      <ScreenPointerSection />
     </>
   );
 }
