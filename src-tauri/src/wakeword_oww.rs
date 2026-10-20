@@ -4612,8 +4612,44 @@ fn start_audio_capture(
         }
     };
     tracing::info!("audio: found {} input device(s):", devices.len());
+    // Linux: names whose metadata query timed out. `default_input_config()`
+    // hanging means the device is hung, and probing it again would cost a
+    // second full deadline up front — the probe loop tries it last.
+    #[cfg(target_os = "linux")]
+    let mut hung_in_listing: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (i, d) in devices.iter().enumerate() {
         let name = d.name().unwrap_or_else(|_| "unknown".into());
+        // Linux: `default_input_config()` can block FOREVER inside ALSA (the
+        // raw `pipewire` PCM did), so even this metadata query runs behind a
+        // hard deadline on its own thread. It only opens the PCM (no audio
+        // wait), so it gets the short `LIST_QUERY_DEADLINE_MS`; the name is
+        // remembered and probed last by the probe loop instead of paying a second
+        // full deadline first. On Windows/macOS the query is unchanged.
+        #[cfg(target_os = "linux")]
+        let cfg = {
+            let device = d.clone();
+            let deadline =
+                std::time::Duration::from_millis(crate::audio_linux::LIST_QUERY_DEADLINE_MS);
+            match crate::audio_linux::run_probe_with_deadline(deadline, move || {
+                device.default_input_config()
+            }) {
+                Ok(Ok(cfg)) => Some(cfg),
+                Ok(Err(e)) => {
+                    tracing::debug!("audio: '{}' default_input_config failed: {e}", name);
+                    None
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "audio: '{}' did not answer default_input_config within {}ms — device is hung, it will be probed last",
+                        name,
+                        crate::audio_linux::LIST_QUERY_DEADLINE_MS
+                    );
+                    hung_in_listing.insert(name.clone());
+                    None
+                }
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
         let cfg = d.default_input_config().ok();
         let sr = cfg.as_ref().map(|c| c.sample_rate().0).unwrap_or(0);
         let ch = cfg.as_ref().map(|c| c.channels()).unwrap_or(0);
@@ -4628,8 +4664,9 @@ fn start_audio_capture(
     // "Monitor of ..." loopbacks report as real inputs but only carry
     // speaker output, and ALSA's plugin devices (`lavrate`, `jack`, …) open
     // happily and deliver silence. The Linux probe order puts the audio
-    // server's own capture path (pipewire / pulse / default) first, the real
-    // hardware next, and the plugins and loopbacks last — see
+    // server's own capture path (`default` first, then `pulse`) first, the
+    // real hardware next, the raw `pipewire` PCM after the hardware, and the
+    // plugins and loopbacks last — see
     // `crate::audio_linux::probe_priority`.
     let default_device = host.default_input_device();
     let mut try_order: Vec<cpal::Device> = Vec::new();
@@ -4647,30 +4684,11 @@ fn start_audio_capture(
             try_order.push(d.clone());
         }
     }
-    // Linux: `pipewire`, `pulse` and `default` are three names for the same
-    // source on a PipeWire system. Probing all three would spend the long
-    // probe window on one microphone three times and delay every real device
-    // behind it, so when `pipewire` is present its aliases are skipped (the
-    // same rule as `crate::audio_linux::probe_order`).
-    #[cfg(target_os = "linux")]
-    {
-        let names: Vec<String> = try_order
-            .iter()
-            .map(|d| d.name().unwrap_or_default())
-            .collect();
-        let pipewire_present = names
-            .iter()
-            .any(|n| crate::audio_linux::is_pipewire(n.as_str()));
-        if pipewire_present {
-            let filtered: Vec<cpal::Device> = try_order
-                .iter()
-                .zip(names.iter())
-                .filter(|(_, n)| !crate::audio_linux::is_server_alias(n.as_str()))
-                .map(|(d, _)| d.clone())
-                .collect();
-            try_order = filtered;
-        }
-    }
+    // Linux: no alias dedupe. An earlier version skipped `default` and
+    // `pulse` whenever the raw `pipewire` PCM was present, because all three
+    // reach the same source — but `default` is the route that actually works
+    // on the target machine, while the raw `pipewire` PCM is the one that can
+    // hang. Every name stays in the list; `probe_priority` sorts them.
     // Stable sort: devices in the same tier keep the default-device-first
     // order, the ALSA plugin devices and the loopback/dummy sources move to
     // the end.
@@ -4679,6 +4697,11 @@ fn start_audio_capture(
         let n = d.name().unwrap_or_default().to_lowercase();
         crate::audio_linux::probe_priority(&n)
     });
+    // Linux: a device whose metadata query timed out in the listing is most
+    // likely hung, so it is probed last (stable sort keeps the tiers). It is
+    // not dropped: a slow cold start must not lose the only working mic.
+    #[cfg(target_os = "linux")]
+    try_order.sort_by_key(|d| hung_in_listing.contains(&d.name().unwrap_or_default()));
 
     if try_order.is_empty() {
         return Err("no input devices available".to_string());
@@ -4715,7 +4738,73 @@ fn start_audio_capture(
         #[cfg(not(target_os = "linux"))]
         let probe_wait_ms = 500u64;
 
-        match try_device(device, engine.clone(), probe_wait_ms) {
+        // Linux: every device probe — `default_input_config()` and building
+        // the stream included — runs on its own thread behind a hard deadline
+        // (the probe window plus a grace period). The raw ALSA `pipewire` PCM
+        // blocked FOREVER inside `default_input_config()` on the target
+        // machine; a hung device is abandoned here (never joined, so the call
+        // that never returns can never block us), logged, and skipped. The
+        // engine mutex is NOT held across the device call — `try_device`
+        // locks it only after the device answered, to read `sample_rate`.
+        #[cfg(target_os = "linux")]
+        let probe_result = {
+            let deadline_ms = crate::audio_linux::probe_deadline_ms(&dev_name);
+            // The caller keeps one guard, the worker thread gets the other.
+            // On timeout the caller cancels its worker: if the hung ALSA call
+            // ever returns, the late thread must not install its stream over
+            // the device we settled on.
+            let cancel = ProbeCancel::new();
+            let worker_cancel = cancel.clone();
+            let device = device.clone();
+            let engine = engine.clone();
+            let deadline = std::time::Duration::from_millis(deadline_ms);
+            let result = crate::audio_linux::run_probe_with_deadline(deadline, move || {
+                try_device(&device, engine, probe_wait_ms, worker_cancel)
+            });
+            match result {
+                Ok(result) => result,
+                Err(crate::audio_linux::ProbeWaitError::TimedOut) => {
+                    match cancel.cancel() {
+                        crate::audio_linux::ProbeCancelOutcome::AlreadyInstalled => {
+                            // The worker stored its stream just before the
+                            // deadline won the race. Treat the device exactly
+                            // like an `Ok(())`: probing another device now
+                            // would install a second live stream over it.
+                            tracing::info!(
+                                "audio: device '{}' was accepted just before its {}ms deadline — keeping it",
+                                dev_name, deadline_ms
+                            );
+                            return Ok(());
+                        }
+                        _ => {
+                            tracing::warn!(
+                                "audio: device '{}' hung inside the device call for {}ms — abandoning it and trying the next device",
+                                dev_name, deadline_ms
+                            );
+                            last_err = format!(
+                                "device '{}' hung inside the device call ({}ms deadline)",
+                                dev_name, deadline_ms
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Err(crate::audio_linux::ProbeWaitError::Failed) => {
+                    tracing::warn!(
+                        "audio: probe thread for '{}' could not run — trying the next device",
+                        dev_name
+                    );
+                    last_err = format!("device '{}' probe thread failed", dev_name);
+                    continue;
+                }
+            }
+        };
+        // Windows/macOS: unchanged — probe inline with an inert guard (its
+        // checks are compiled to `false`).
+        #[cfg(not(target_os = "linux"))]
+        let probe_result = try_device(device, engine.clone(), probe_wait_ms, ProbeCancel::new());
+
+        match probe_result {
             Ok(()) => {
                 tracing::info!("audio: device '{}' accepted", dev_name);
                 return Ok(());
@@ -4740,9 +4829,9 @@ fn start_audio_capture(
                         best_device = Some((device.clone(), rms));
                     }
                 }
-                // Linux keeps every candidate (the >= tie-break lives in
-                // `audio_linux::silent_fallback_index`, which also prefers a
-                // real device over a plugin/loopback).
+                // Linux keeps every candidate (the first-wins tie-break lives
+                // in `audio_linux::silent_fallback_index`, which also prefers
+                // a real device over a plugin/loopback).
                 #[cfg(target_os = "linux")]
                 probed.push((attempt, dev_name.clone(), rms));
                 tracing::warn!("audio: device '{}' failed: {}", dev_name, e);
@@ -4755,12 +4844,12 @@ fn start_audio_capture(
     // giving up entirely. The mic may start working later (driver recovery,
     // user unmutes, headset reconnects, etc.).
     //
-    // Linux: prefer the best real capture path (pipewire/pulse/default or a
-    // `hw:` device) over an ALSA plugin or a loopback even when the plugin's
-    // RMS is equal or higher — a plugin never becomes a microphone, while a
-    // real device may start working as soon as the user unmutes it. The
-    // overall best device is still used when no real device exists, so the
-    // fallback is never lost.
+    // Linux: prefer the best real capture path (`default`, `pulse`, `hw:` …
+    // over the raw `pipewire` PCM that is known to hang) and never an ALSA
+    // plugin or a loopback even when the plugin's RMS is equal or higher — a
+    // plugin never becomes a microphone, while a real device may start working
+    // as soon as the user unmutes it. The overall best device is still used
+    // when no real device exists, so the fallback is never lost.
     #[cfg(target_os = "linux")]
     let fallback: Option<(cpal::Device, f32)> = {
         let candidates: Vec<(&str, f32)> = probed
@@ -4926,6 +5015,73 @@ fn log_capture_device(device_name: &str) {
     );
 }
 
+/// Error text for a probe that outlived its deadline and was abandoned.
+#[cfg(not(feature = "mock-wake"))]
+const PROBE_ABANDONED: &str = "probe abandoned (deadline expired)";
+
+/// Three-state handshake for a Linux device probe.
+///
+/// A Linux probe runs on its own thread behind a hard deadline
+/// ([`crate::audio_linux::run_probe_with_deadline`]). The worker claims the
+/// install slot ([`ProbeCancel::try_install`]) inside the critical section
+/// that stores the stream; the caller claims the cancellation
+/// ([`ProbeCancel::cancel`]) when the deadline expires. Whichever wins, the
+/// loser sees it: a cancelled probe cannot install, and a caller that lost to
+/// an install treats the device as accepted instead of probing another one
+/// over a live stream.
+///
+/// On Windows/macOS the probe runs inline and nothing can be abandoned, so
+/// every check compiles to `false`/`true` and behaviour is unchanged.
+#[cfg(not(feature = "mock-wake"))]
+#[derive(Clone, Default)]
+struct ProbeCancel {
+    #[cfg(target_os = "linux")]
+    state: crate::audio_linux::ProbeState,
+}
+
+#[cfg(not(feature = "mock-wake"))]
+impl ProbeCancel {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// The caller gave up on this probe: discard whatever it returns.
+    ///
+    /// Returns [`crate::audio_linux::ProbeCancelOutcome::AlreadyInstalled`]
+    /// when the worker installed its stream just before the deadline; the
+    /// caller must then keep that device.
+    #[cfg(target_os = "linux")]
+    fn cancel(&self) -> crate::audio_linux::ProbeCancelOutcome {
+        self.state.try_cancel()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.state.is_cancelled()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    /// Claim the right to install the stream.
+    ///
+    /// Off Linux the probe is inline and cannot be abandoned, so the claim
+    /// always succeeds.
+    fn try_install(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.state.try_install()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    }
+}
+
 /// Try to start audio capture on a single device.
 /// Starts the stream, waits `probe_wait_ms` for the first callback, and
 /// checks the RMS of the captured audio. If the device produces silence
@@ -4935,6 +5091,7 @@ fn try_device(
     device: &cpal::Device,
     engine: std::sync::Arc<parking_lot::Mutex<engine::WakeEngine>>,
     probe_wait_ms: u64,
+    cancel: ProbeCancel,
 ) -> Result<(), String> {
     use cpal::traits::{DeviceTrait, StreamTrait};
     use cpal::Sample;
@@ -4943,6 +5100,15 @@ fn try_device(
     let default_config = device
         .default_input_config()
         .map_err(|e| format!("default_input_config: {e}"))?;
+
+    // The engine mutex is deliberately NOT held across the device call above:
+    // `default_input_config()` can block for a very long time (forever, on the
+    // raw `pipewire` PCM), and holding the lock would freeze every other
+    // wake-engine user while ALSA thinks. It is only locked below, to read
+    // `sample_rate`.
+    if cancel.is_cancelled() {
+        return Err(PROBE_ABANDONED.to_string());
+    }
 
     tracing::info!(
         "audio: native sample_rate = {} Hz, channels = {}, format = {:?}",
@@ -5117,7 +5283,18 @@ fn try_device(
     };
 
     let stream = build_result.map_err(|e| format!("build stream: {e}"))?;
+    // The deadline may have expired while ALSA was building the stream: this
+    // probe has been abandoned and must not touch the global stream slot.
+    if cancel.is_cancelled() {
+        return Err(PROBE_ABANDONED.to_string());
+    }
     stream.play().map_err(|e| format!("play stream: {e}"))?;
+    // `play()` can itself block inside ALSA. If the deadline expired while it
+    // did, this probe has been abandoned: returning drops `stream`, so the
+    // late probe cannot play audio alongside the device being probed now.
+    if cancel.is_cancelled() {
+        return Err(PROBE_ABANDONED.to_string());
+    }
 
     // Wait for the first callback and compute RMS over the window.
     std::thread::sleep(std::time::Duration::from_millis(probe_wait_ms));
@@ -5158,10 +5335,27 @@ fn try_device(
         return Err(format!("device produces silence (RMS={:.6})", rms));
     }
 
+    // Last check before the install: the probe may have outlived its deadline
+    // by now (the waiter gave up and moved on to another device).
+    if cancel.is_cancelled() {
+        return Err(PROBE_ABANDONED.to_string());
+    }
     log_capture_device(&device.name().unwrap_or_else(|_| "unknown".into()));
     // Store the stream in the global so pause_stream/resume_stream can
     // access it for the mic baton pass. Keep it alive forever.
-    *CPAL_STREAM.write() = Some(SendStream(stream));
+    //
+    // The install claim shares one critical section with the store, and it is
+    // a compare-exchange: if the caller cancelled just before this point the
+    // claim fails and nothing is stored; if the claim wins, the caller's
+    // cancel reports `AlreadyInstalled` and keeps this device instead of
+    // probing another one over a live stream.
+    {
+        let mut slot = CPAL_STREAM.write();
+        if !cancel.try_install() {
+            return Err(PROBE_ABANDONED.to_string());
+        }
+        *slot = Some(SendStream(stream));
+    }
     Ok(())
 }
 

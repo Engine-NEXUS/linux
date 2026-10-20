@@ -23,18 +23,25 @@
 //! anything.
 //!
 //! The Linux build therefore probes in a fixed order ([`probe_priority`]):
-//! the audio server's own capture path first (`pipewire`, `pulse`,
-//! `default`), then the real hardware (`hw:`, `plughw:`, `sysdefault:`), then
-//! everything else, and only last the ALSA plugin devices and the
-//! loopback/monitor sources. On a PipeWire system `pipewire`, `pulse` and
-//! `default` are three names for the same source, so only `pipewire` is
-//! probed when it is present — probing all three would spend the long probe
-//! window three times on one microphone ([`probe_order`]).
+//! ALSA's `default` first — it is the audio server's own route — then
+//! `pulse`, then the real hardware (`hw:`, `plughw:`, `sysdefault:`), then
+//! the raw ALSA `pipewire` PCM, then everything else, and only last the ALSA
+//! plugin devices and the loopback/monitor sources.
+//!
+//! The raw `pipewire` PCM deliberately comes after the hardware: on the
+//! target machine it blocked **forever** inside `default_input_config()`
+//! (CPAL never returned from the ALSA PCM), so probing it first stopped the
+//! wake word from starting at all. Every Linux probe therefore runs on its
+//! own thread behind a hard deadline ([`run_probe_with_deadline`]): a device
+//! that does not answer within its probe window plus a grace period is
+//! abandoned — never joined — and the next device is tried.
 //!
 //! When every device turns out to be silent, [`silent_fallback_index`]
 //! reopens the best **real** capture path rather than a plugin or a loopback:
 //! a plugin will never become a microphone, while a real device may start
-//! working as soon as the input is unmuted.
+//! working as soon as the input is unmuted. On equal RMS the first device
+//! probed wins, so an all-silent machine falls back to `default` instead of
+//! the raw `pipewire` PCM that is known to hang.
 //!
 //! Everything in this module is pure so it can be unit-tested without a
 //! sound card.
@@ -68,14 +75,15 @@ const ALSA_PLUGIN_MARKERS: &[&str] = &[
 
 // ─── Probe tiers (lower is probed first) ─────────────────────────────────────
 
-/// The PipeWire capture device — the audio server's own default source.
-const TIER_PIPEWIRE: u8 = 0;
+/// ALSA's `default` capture device — the audio server's own route.
+const TIER_DEFAULT: u8 = 0;
 /// The PulseAudio capture device (the compatibility layer).
 const TIER_PULSE: u8 = 1;
-/// ALSA's `default` capture device (resolves to the server's default source).
-const TIER_DEFAULT: u8 = 2;
 /// A real hardware capture device (`hw:`, `plughw:`, `sysdefault:`).
-const TIER_HARDWARE: u8 = 3;
+const TIER_HARDWARE: u8 = 2;
+/// The raw ALSA PipeWire PCM — observed hanging inside
+/// `default_input_config()`, so it is never probed before real hardware.
+const TIER_PIPEWIRE: u8 = 3;
 /// Anything else that is not a plugin and not a loopback.
 const TIER_OTHER: u8 = 4;
 /// An ALSA plugin / virtual device — opens, but delivers silence.
@@ -131,12 +139,11 @@ pub fn is_loopback_device(name: &str) -> bool {
 /// Probe-order key: lower is probed first.
 ///
 /// The tiers are, in order:
-/// 0. `pipewire` — the audio server's own capture path;
-/// 1. `pulse` — the PulseAudio compatibility layer (skipped when `pipewire`
-///    is present: same source);
-/// 2. `default` — ALSA's default device, the server's default source
-///    (likewise skipped when `pipewire` is present);
-/// 3. `hw:` / `plughw:` / `sysdefault:` — real hardware;
+/// 0. `default` — ALSA's default device, the audio server's own route;
+/// 1. `pulse` — the PulseAudio compatibility layer;
+/// 2. `hw:` / `plughw:` / `sysdefault:` — real hardware;
+/// 3. `pipewire` — the raw ALSA PipeWire PCM, which was observed hanging
+///    inside `default_input_config()`; only tried after real hardware;
 /// 4. everything else that is neither a plugin nor a loopback;
 /// 5. ALSA plugin / virtual devices (they open, but deliver silence);
 /// 6. output loopbacks ("Monitor of …" — they carry speaker output).
@@ -152,20 +159,20 @@ pub fn probe_priority(name: &str) -> u8 {
     if is_loopback_device(&lower) {
         return TIER_LOOPBACK;
     }
-    if lower.starts_with("pipewire") {
-        return TIER_PIPEWIRE;
-    }
-    if lower.starts_with("pulse") {
-        return TIER_PULSE;
-    }
     // Exact match only: "sysdefault:…" is a hardware device, not ALSA's
     // "default" device.
     if lower == "default" {
         return TIER_DEFAULT;
     }
+    if lower.starts_with("pulse") {
+        return TIER_PULSE;
+    }
     if lower.starts_with("hw:") || lower.starts_with("plughw:") || lower.starts_with("sysdefault:")
     {
         return TIER_HARDWARE;
+    }
+    if lower.starts_with("pipewire") {
+        return TIER_PIPEWIRE;
     }
     if ALSA_PLUGIN_MARKERS.iter().any(|m| lower.contains(m)) {
         return TIER_PLUGIN;
@@ -173,18 +180,9 @@ pub fn probe_priority(name: &str) -> u8 {
     TIER_OTHER
 }
 
-/// Is this PipeWire's own capture device?
+/// Is this the raw ALSA PipeWire capture device?
 pub fn is_pipewire(name: &str) -> bool {
     probe_priority(name) == TIER_PIPEWIRE
-}
-
-/// Is this the PulseAudio / ALSA compatibility alias of the audio server's
-/// capture device (`pulse`, `default`)?
-///
-/// On a PipeWire system all three names resolve to the same source, so the
-/// aliases add nothing once `pipewire` is in the list.
-pub fn is_server_alias(name: &str) -> bool {
-    matches!(probe_priority(name), TIER_PULSE | TIER_DEFAULT)
 }
 
 /// The capture devices in the order they should be probed.
@@ -192,18 +190,13 @@ pub fn is_server_alias(name: &str) -> bool {
 /// Pure: the same names always come back in the same order, and the order is
 /// stable (equal tiers keep the caller's order).
 ///
-/// When PipeWire is present its `pulse` and `default` aliases are dropped:
-/// probing the same microphone under three names would spend the long probe
-/// window ([`SLOW_PROBE_WAIT_MS`]) three times before any real hardware is
-/// reached. A machine without PipeWire still probes `pulse` and `default`,
-/// so the compatibility path is never lost.
+/// Every device stays in the list — including `pulse` and `default` when the
+/// raw `pipewire` PCM is present. They are not skipped as aliases: `default`
+/// is the route that works on the target machine, while the raw `pipewire`
+/// PCM is the one that can hang, so it must never displace them
+/// ([`probe_priority`] puts it after real hardware).
 pub fn probe_order<'a>(names: &[&'a str]) -> Vec<&'a str> {
-    let pipewire_present = names.iter().any(|n| is_pipewire(n));
-    let mut ordered: Vec<&'a str> = names
-        .iter()
-        .copied()
-        .filter(|n| !(pipewire_present && is_server_alias(n)))
-        .collect();
+    let mut ordered: Vec<&'a str> = names.to_vec();
     ordered.sort_by_key(|n| probe_priority(n));
     ordered
 }
@@ -213,15 +206,17 @@ pub fn probe_order<'a>(names: &[&'a str]) -> Vec<&'a str> {
 ///
 /// `candidates` are `(name, rms)` pairs in the order they were probed.
 ///
-/// A real capture path (`pipewire`, `pulse`, `default`, `hw:` …) always wins
-/// over an ALSA plugin or a loopback, even when the plugin/loopback reports
-/// a higher RMS: plugins and loopbacks are not microphones (see the module
+/// A real capture path (`default`, `pulse`, `hw:` …) always wins over an
+/// ALSA plugin or a loopback, even when the plugin/loopback reports a
+/// higher RMS: plugins and loopbacks are not microphones (see the module
 /// docs), so reopening one can never let the wake word hear the user, while
 /// a real device may start working as soon as the input is unmuted. Among
-/// the real devices the highest RMS wins; the `>=` tie-break keeps the last
-/// one, which is also what guarantees a fallback exists when every RMS is
-/// exactly 0.0. When no real device exists the overall highest-RMS device is
-/// returned.
+/// the real devices the highest RMS wins; on a tie the **first** device
+/// probed wins (`>`), so an all-silent machine falls back to `default` — the
+/// audio server's own route — rather than the raw `pipewire` PCM that is
+/// known to hang. When no real device exists the overall highest-RMS device
+/// is returned (again first-wins on ties), so a fallback always exists even
+/// when every RMS is exactly 0.0.
 pub fn silent_fallback_index(candidates: &[(&str, f32)]) -> Option<usize> {
     let mut best: Option<usize> = None;
     let mut best_rms = 0.0f32;
@@ -229,15 +224,16 @@ pub fn silent_fallback_index(candidates: &[(&str, f32)]) -> Option<usize> {
     let mut best_real_rms = 0.0f32;
 
     for (i, (name, rms)) in candidates.iter().enumerate() {
-        // `>=` (not `>`) so that even a device with RMS = 0.0 is kept —
+        // `is_none()` keeps even a device with RMS = 0.0 as a fallback —
         // otherwise an all-silent machine would have no fallback at all.
-        if best.is_none() || *rms >= best_rms {
+        // `>` (not `>=`) keeps the FIRST device probed on a tie.
+        if best.is_none() || *rms > best_rms {
             best = Some(i);
             best_rms = *rms;
         }
         // Real = any tier before the plugin tier (plugins and loopbacks
         // are the last two tiers).
-        if probe_priority(name) < TIER_PLUGIN && (best_real.is_none() || *rms >= best_real_rms) {
+        if probe_priority(name) < TIER_PLUGIN && (best_real.is_none() || *rms > best_real_rms) {
             best_real = Some(i);
             best_real_rms = *rms;
         }
@@ -248,20 +244,180 @@ pub fn silent_fallback_index(candidates: &[(&str, f32)]) -> Option<usize> {
 
 /// How long to wait for the first audio callback when probing a device.
 ///
-/// The audio server's own capture path (`pipewire`, `pulse`, `default`)
-/// needs [`SLOW_PROBE_WAIT_MS`]: PipeWire's ALSA bridge delivers its first
-/// callback late, and the normal window would report a good microphone as
-/// silent. Every other device keeps the normal window.
+/// The audio server's own capture paths (`default`, `pulse` and the raw
+/// `pipewire` PCM) need [`SLOW_PROBE_WAIT_MS`]: PipeWire's ALSA bridge
+/// delivers its first callback late, and the normal window would report a
+/// good microphone as silent. Every other device keeps the normal window.
 ///
-/// `pulse` and `default` only reach the probe when PipeWire is absent (see
-/// [`probe_order`]), so their long window is never paid on a PipeWire
-/// machine for the same source twice.
+/// `default` and `pulse` are always probed now — they are no longer skipped
+/// when the raw `pipewire` PCM is present (see [`probe_order`]) — and all
+/// three names reach the same slow-starting source, so all three get the
+/// long window.
 pub fn probe_wait_ms(name: &str) -> u64 {
     let lower = name.trim().to_lowercase();
-    if lower.starts_with("pipewire") || lower.starts_with("pulse") || lower == "default" {
+    if is_pipewire(name) || lower.starts_with("pulse") || lower == "default" {
         SLOW_PROBE_WAIT_MS
     } else {
         PROBE_WAIT_MS
+    }
+}
+
+// ─── Hard probe deadline (a hung device must never stop the wake word) ──────
+
+/// Extra time a probe thread gets beyond the device's probe window before it
+/// is declared hung.
+///
+/// `default_input_config()` and `build_input_stream()` open the ALSA PCM and
+/// normally answer in milliseconds; the probe window itself is then spent
+/// waiting for the first audio callback. A device that has not returned from
+/// that call within the probe window plus this grace period is not going to
+/// answer — on the target machine the raw `pipewire` PCM never did.
+pub const PROBE_DEADLINE_GRACE_MS: u64 = 3000;
+
+/// Deadline for the enumeration-only metadata query.
+///
+/// The device listing opens each PCM once just to print its sample rate and
+/// channel count — it never waits for an audio callback. A hung device must
+/// therefore not cost the full probe deadline *twice* (once while listing,
+/// once while probing); this short fixed deadline bounds the listing, and the
+/// caller remembers the device that timed out and skips it in the probe loop.
+pub const LIST_QUERY_DEADLINE_MS: u64 = 1500;
+
+/// Hard deadline for one Linux device probe: its probe window
+/// ([`probe_wait_ms`]) plus [`PROBE_DEADLINE_GRACE_MS`].
+pub fn probe_deadline_ms(name: &str) -> u64 {
+    probe_wait_ms(name) + PROBE_DEADLINE_GRACE_MS
+}
+
+/// Why a probe that ran on its own thread did not deliver a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeWaitError {
+    /// The probe did not finish inside its deadline. The thread is left
+    /// running and must be abandoned (never joined).
+    TimedOut,
+    /// The probe thread could not be started, panicked, or its result could
+    /// not be received.
+    Failed,
+}
+
+// ─── Probe state: RUNNING → CANCELLED, or RUNNING → INSTALLED ────────────────
+//
+// The deadline races against the worker's install. If the worker stores its
+// stream just before the caller's `recv_timeout` expires, a plain
+// "cancelled" flag would make the caller report a timeout and move on while
+// the stream it just installed stays live. A three-state cell resolves the
+// race: whichever side wins the compare-exchange settles the probe, and the
+// loser can see what happened.
+
+const PROBE_RUNNING: u8 = 0;
+const PROBE_CANCELLED: u8 = 1;
+const PROBE_INSTALLED: u8 = 2;
+
+/// What [`ProbeState::try_cancel`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeCancelOutcome {
+    /// The probe is now cancelled; its result must be discarded.
+    Cancelled,
+    /// The probe was already cancelled (two timeout paths raced).
+    AlreadyCancelled,
+    /// The probe already installed its stream: the device was accepted.
+    AlreadyInstalled,
+}
+
+/// The shared state of one device probe.
+///
+/// Cloned into the worker thread (it is an `Arc`); the caller keeps one clone.
+/// The worker claims the install slot with [`try_install`](Self::try_install)
+/// inside the critical section that stores the stream; the caller claims the
+/// cancellation with [`try_cancel`](Self::try_cancel) when its deadline
+/// expires. Both transitions are one-time, so exactly one of them wins.
+#[derive(Clone, Default)]
+pub struct ProbeState {
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl ProbeState {
+    /// True once the probe has been abandoned.
+    pub fn is_cancelled(&self) -> bool {
+        self.state.load(std::sync::atomic::Ordering::SeqCst) == PROBE_CANCELLED
+    }
+
+    /// Claim the install slot (`RUNNING -> INSTALLED`).
+    ///
+    /// Returns `false` when the probe was cancelled (or already installed), in
+    /// which case the worker must not store its stream.
+    pub fn try_install(&self) -> bool {
+        self.state
+            .compare_exchange(
+                PROBE_RUNNING,
+                PROBE_INSTALLED,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// Abandon the probe (`RUNNING -> CANCELLED`).
+    ///
+    /// A cancelled probe cannot install afterwards. If the install won the
+    /// race first, the caller learns it through
+    /// [`ProbeCancelOutcome::AlreadyInstalled`] and must treat the device as
+    /// accepted instead of probing another one over it.
+    pub fn try_cancel(&self) -> ProbeCancelOutcome {
+        match self.state.compare_exchange(
+            PROBE_RUNNING,
+            PROBE_CANCELLED,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(_) => ProbeCancelOutcome::Cancelled,
+            Err(current) if current == PROBE_INSTALLED => ProbeCancelOutcome::AlreadyInstalled,
+            Err(_) => ProbeCancelOutcome::AlreadyCancelled,
+        }
+    }
+}
+
+/// Run `probe` on its own thread and wait at most `deadline` for it.
+///
+/// On Linux, CPAL's `default_input_config()` and `build_input_stream()` can
+/// block **forever** inside ALSA (the raw `pipewire` PCM did exactly that),
+/// so the capture setup must never call them on the thread that starts the
+/// wake word. The probe gets a worker thread; on timeout the caller receives
+/// [`ProbeWaitError::TimedOut`] and is expected to abandon the handle and
+/// try the next device.
+///
+/// The worker handle is deliberately dropped, never joined: joining a hung
+/// ALSA call would block for exactly as long as the call does, which is what
+/// this helper exists to prevent.
+///
+/// The probe closure must be self-contained (`'static`): it may outlive its
+/// deadline. Callers that install shared state (a capture stream) must give
+/// the closure a [`ProbeState`] so a late return cannot overwrite the device
+/// the caller settled on, and so a stream installed just before the deadline
+/// is reported as accepted rather than as a timeout.
+pub fn run_probe_with_deadline<T, F>(
+    deadline: std::time::Duration,
+    probe: F,
+) -> Result<T, ProbeWaitError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    // A failed send only means the caller already gave up (timeout) — the
+    // result is simply dropped.
+    let _worker = match std::thread::Builder::new()
+        .name("nexus-device-probe".into())
+        .spawn(move || {
+            let _ = tx.send(probe());
+        }) {
+        Ok(handle) => handle,
+        Err(_) => return Err(ProbeWaitError::Failed),
+    };
+    match rx.recv_timeout(deadline) {
+        Ok(value) => Ok(value),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ProbeWaitError::TimedOut),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ProbeWaitError::Failed),
     }
 }
 
@@ -313,7 +469,24 @@ pub fn capture_permission_state() -> &'static str {
 
     for d in ordered {
         let name = d.name().unwrap_or_else(|_| "unknown".into());
-        if device_opens(d) {
+        // Opening a device is a probe too: `default_input_config()` and
+        // `build_input_stream()` can block forever inside ALSA (the raw
+        // `pipewire` PCM did), and this runs during app setup. Bound it with
+        // the same deadline the wake-word probe uses; a device that does not
+        // answer is treated as unusable instead of freezing startup.
+        let device = d.clone();
+        let deadline = std::time::Duration::from_millis(probe_deadline_ms(&name));
+        let opened = match run_probe_with_deadline(deadline, move || device_opens(&device)) {
+            Ok(opened) => opened,
+            Err(_) => {
+                tracing::warn!(
+                    "audio_linux: capture device '{name}' did not answer within {}ms — treating it as unusable",
+                    deadline.as_millis()
+                );
+                false
+            }
+        };
+        if opened {
             tracing::info!("audio_linux: capture device '{name}' opened — microphone granted");
             return permission_verdict(true, true);
         }
@@ -450,18 +623,21 @@ mod tests {
     }
 
     #[test]
-    fn the_server_capture_path_is_probed_first() {
-        // PipeWire's own capture device is the real microphone on a modern
-        // Linux desktop: it must be probed before everything else.
-        assert_eq!(probe_priority("pipewire"), TIER_PIPEWIRE);
-        assert_eq!(probe_priority("pulse"), TIER_PULSE);
+    fn default_comes_first_then_pulse_then_hardware_then_pipewire() {
+        // `default` is the audio server's own route and the one that works on
+        // the target machine: it must be probed before everything else.
         assert_eq!(probe_priority("default"), TIER_DEFAULT);
-        // Real hardware comes after the server's own path.
+        assert_eq!(probe_priority("pulse"), TIER_PULSE);
+        // Real hardware comes after the server's first two routes.
         assert_eq!(probe_priority("hw:CARD=sofhdadsp,DEV=6"), TIER_HARDWARE);
         assert_eq!(probe_priority("plughw:CARD=PCH,DEV=0"), TIER_HARDWARE);
         assert_eq!(probe_priority("sysdefault:CARD=PCH,DEV=0"), TIER_HARDWARE);
         // "sysdefault:…" is a hardware device, not ALSA's "default" device.
         assert_ne!(probe_priority("sysdefault:CARD=PCH,DEV=0"), TIER_DEFAULT);
+        // The raw ALSA PipeWire PCM — the device that hung — comes last of
+        // the real routes, after hardware.
+        assert_eq!(probe_priority("pipewire"), TIER_PIPEWIRE);
+        assert!(TIER_PIPEWIRE > TIER_HARDWARE);
     }
 
     #[test]
@@ -505,18 +681,30 @@ mod tests {
             "hw:CARD=sofhdadsp,DEV=6",
             "hw:CARD=sofhdadsp,DEV=7",
         ];
-        // `pulse` and `default` are the same PipeWire source under other
-        // names, so they are not probed a second and third time.
+        // `default` is the route that works on this machine; the raw
+        // `pipewire` PCM — which hung inside `default_input_config()` — is
+        // probed only after `default`, `pulse` and the real hardware.
         assert_eq!(
             probe_order(&names),
             vec![
-                "pipewire",
+                "default",
+                "pulse",
                 "hw:CARD=sofhdadsp,DEV=6",
                 "hw:CARD=sofhdadsp,DEV=7",
+                "pipewire",
                 "lavrate",
                 "jack",
             ]
         );
+    }
+
+    #[test]
+    fn pipewire_does_not_hide_the_default_and_pulse_routes() {
+        // The T7 alias dedupe skipped `default` and `pulse` whenever the raw
+        // `pipewire` PCM was present — which skipped the only route that
+        // worked. Every name must stay in the probe list.
+        let names = ["pipewire", "pulse", "default"];
+        assert_eq!(probe_order(&names), vec!["default", "pulse", "pipewire"]);
     }
 
     #[test]
@@ -533,8 +721,8 @@ mod tests {
         assert_eq!(
             probe_order(&names),
             vec![
-                "pulse",
                 "default",
+                "pulse",
                 "hw:CARD=sofhdadsp,DEV=6",
                 "lavrate",
                 "jack",
@@ -547,7 +735,7 @@ mod tests {
         // Every device is silent — the exact list from the target machine,
         // in the order the probe really walks it. `lavrate` and `jack` open
         // happily and deliver silence, so reopening one would leave the wake
-        // word listening to nothing; the physical microphone must win.
+        // word listening to nothing; a real route must win.
         let names = [
             "lavrate",
             "jack",
@@ -561,8 +749,11 @@ mod tests {
         let candidates: Vec<(&str, f32)> = probed.iter().map(|n| (*n, 0.0)).collect();
         let chosen = silent_fallback_index(&candidates).map(|i| candidates[i].0);
 
-        // The `>=` tie-break keeps the last real device probed.
-        assert_eq!(chosen, Some("hw:CARD=sofhdadsp,DEV=7"));
+        // The first-wins tie-break (`>`) keeps the FIRST real device probed,
+        // which is `default` — the route that works on this machine — not the
+        // raw `pipewire` PCM that is known to hang.
+        assert_eq!(chosen, Some("default"));
+        assert_ne!(chosen, Some("pipewire"));
         assert_ne!(chosen, Some("jack"));
         assert_ne!(chosen, Some("lavrate"));
         assert!(probe_priority(chosen.unwrap()) < TIER_PLUGIN);
@@ -580,25 +771,30 @@ mod tests {
     #[test]
     fn the_silent_fallback_still_exists_without_a_real_device() {
         // A machine whose only "inputs" are plugins/loopbacks must still get
-        // a fallback device (the `>=` tie-break keeps the last one).
+        // a fallback device (the first-wins tie-break keeps the first one).
         let candidates = [("lavrate", 0.0), ("jack", 0.0)];
-        assert_eq!(silent_fallback_index(&candidates), Some(1));
+        assert_eq!(silent_fallback_index(&candidates), Some(0));
         assert_eq!(silent_fallback_index(&[]), None);
     }
 
     #[test]
     fn the_probe_order_is_stable() {
         // Two devices of the same tier keep the order they were listed in.
+        // The raw `pipewire` PCM is a later tier than hardware, so it sorts
+        // after both hardware devices even though it was listed first.
         let names = ["hw:CARD=B,DEV=0", "hw:CARD=A,DEV=0", "pipewire"];
         assert_eq!(
             probe_order(&names),
-            vec!["pipewire", "hw:CARD=B,DEV=0", "hw:CARD=A,DEV=0"]
+            vec!["hw:CARD=B,DEV=0", "hw:CARD=A,DEV=0", "pipewire"]
         );
     }
 
     #[test]
     fn the_server_capture_path_gets_the_long_probe_window() {
-        // PipeWire's ALSA bridge delivers its first callback late.
+        // PipeWire's ALSA bridge delivers its first callback late. `default`
+        // and `pulse` are always probed (they are no longer skipped when the
+        // raw `pipewire` PCM is present) and reach the same slow source, so
+        // all three get the long window.
         assert_eq!(probe_wait_ms("pipewire"), SLOW_PROBE_WAIT_MS);
         assert_eq!(probe_wait_ms("pulse"), SLOW_PROBE_WAIT_MS);
         assert_eq!(probe_wait_ms("default"), SLOW_PROBE_WAIT_MS);
@@ -606,6 +802,121 @@ mod tests {
         assert_eq!(probe_wait_ms("hw:CARD=sofhdadsp,DEV=6"), PROBE_WAIT_MS);
         assert_eq!(probe_wait_ms("lavrate"), PROBE_WAIT_MS);
         assert_eq!(probe_wait_ms(""), PROBE_WAIT_MS);
+    }
+
+    #[test]
+    fn the_probe_deadline_is_the_probe_window_plus_the_grace_period() {
+        // A device that has not answered within its probe window plus the
+        // grace period is hung (the raw `pipewire` PCM never answered at all).
+        assert_eq!(
+            probe_deadline_ms("default"),
+            SLOW_PROBE_WAIT_MS + PROBE_DEADLINE_GRACE_MS
+        );
+        assert_eq!(
+            probe_deadline_ms("pulse"),
+            SLOW_PROBE_WAIT_MS + PROBE_DEADLINE_GRACE_MS
+        );
+        assert_eq!(
+            probe_deadline_ms("pipewire"),
+            SLOW_PROBE_WAIT_MS + PROBE_DEADLINE_GRACE_MS
+        );
+        assert_eq!(
+            probe_deadline_ms("hw:CARD=sofhdadsp,DEV=6"),
+            PROBE_WAIT_MS + PROBE_DEADLINE_GRACE_MS
+        );
+        assert_eq!(
+            probe_deadline_ms("lavrate"),
+            PROBE_WAIT_MS + PROBE_DEADLINE_GRACE_MS
+        );
+    }
+
+    #[test]
+    fn a_fast_probe_returns_its_value() {
+        let value = run_probe_with_deadline(std::time::Duration::from_secs(5), || 42u32);
+        assert_eq!(value, Ok(42));
+    }
+
+    #[test]
+    fn a_probe_that_never_returns_times_out_instead_of_blocking() {
+        // The raw `pipewire` PCM blocked forever inside `default_input_config()`.
+        // The deadline helper must give up on schedule and leave the worker
+        // thread abandoned (never joined) so the wake word can try the next
+        // device.
+        let deadline = std::time::Duration::from_millis(100);
+        let started = std::time::Instant::now();
+        // The probe blocks on a channel that is never sent to — a stand-in
+        // for a hung ALSA call. It outlives the call by design.
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let result: Result<(), ProbeWaitError> = run_probe_with_deadline(deadline, move || {
+            let _ = rx.recv();
+        });
+        let elapsed = started.elapsed();
+
+        assert_eq!(result, Err(ProbeWaitError::TimedOut));
+        // It waited out the deadline...
+        assert!(
+            elapsed >= deadline,
+            "returned before the deadline ({elapsed:?} < {deadline:?})"
+        );
+        // ...but did not block anywhere near as long as the hung device would.
+        assert!(
+            elapsed < deadline + std::time::Duration::from_secs(5),
+            "did not return promptly after the deadline ({elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn the_list_query_deadline_is_shorter_than_every_probe_deadline() {
+        // The listing query only opens the PCM (no audio wait), so it gets a
+        // short fixed deadline. If it were as long as a probe deadline, a
+        // hung device would cost a full deadline in the listing AND another
+        // one in the probe loop.
+        for name in [
+            "default",
+            "pulse",
+            "pipewire",
+            "hw:CARD=sofhdadsp,DEV=6",
+            "plughw:CARD=PCH,DEV=0",
+            "sysdefault:CARD=PCH,DEV=0",
+            "lavrate",
+            "Monitor of Built-in Audio Analog Stereo",
+            "",
+        ] {
+            assert!(
+                LIST_QUERY_DEADLINE_MS < probe_deadline_ms(name),
+                "the listing deadline must be shorter than the probe deadline of '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancelled_probe_cannot_install() {
+        let state = ProbeState::default();
+        assert_eq!(state.try_cancel(), ProbeCancelOutcome::Cancelled);
+        assert!(state.is_cancelled());
+        // The caller gave up first: a late worker must not store its stream.
+        assert!(!state.try_install());
+        assert!(state.is_cancelled());
+    }
+
+    #[test]
+    fn an_installed_probe_reports_installed_when_cancelled() {
+        let state = ProbeState::default();
+        assert!(state.try_install());
+        // The worker won the race: the caller must keep this device instead
+        // of probing another one over the live stream.
+        assert_eq!(state.try_cancel(), ProbeCancelOutcome::AlreadyInstalled);
+        assert!(!state.is_cancelled());
+        // The install slot is one-shot.
+        assert!(!state.try_install());
+    }
+
+    #[test]
+    fn double_cancel_is_fine() {
+        let state = ProbeState::default();
+        assert_eq!(state.try_cancel(), ProbeCancelOutcome::Cancelled);
+        assert_eq!(state.try_cancel(), ProbeCancelOutcome::AlreadyCancelled);
+        assert!(!state.try_install());
     }
 
     #[test]
