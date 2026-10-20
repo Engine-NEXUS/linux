@@ -81,7 +81,16 @@ fn synthesize_blocking(text: &str) -> Result<(Vec<f32>, u32), String> {
     crate::tts_wav::decode_wav(&bytes).ok_or_else(|| "system voice returned an unsupported audio format".to_string())
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn synthesize_blocking(_text: &str) -> Result<(Vec<f32>, u32), String> {
+    // Linux has no WinRT speech synthesizer. We deliberately do NOT shell out
+    // to `spd-say`/`espeak`: a different speaker would break the "one voice per
+    // utterance" rule and the persona chain. The tier is skipped and the
+    // offline Kokoro voice (or the cloud Edge voice) speaks instead.
+    Err("the Windows built-in voice is not available on Linux".into())
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
 fn synthesize_blocking(_text: &str) -> Result<(Vec<f32>, u32), String> {
     Err("the Windows voice is only available on Windows".into())
 }

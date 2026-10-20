@@ -80,6 +80,15 @@ mod agent_watch;
 mod meeting_detect;
 mod mic_permissions;
 mod mpris;
+// Linux platform helpers: PipeWire/ALSA capture-device selection and
+// browser-meeting detection (both pure, both unit-tested).
+#[cfg(target_os = "linux")]
+mod audio_linux;
+#[cfg(target_os = "linux")]
+mod meeting_linux;
+// Bounded subprocess runs for the Linux desktop tools (wpctl/pactl/amixer).
+#[cfg(target_os = "linux")]
+mod proc_linux;
 pub(crate) mod media_player;
 mod architect;
 mod browser_url;

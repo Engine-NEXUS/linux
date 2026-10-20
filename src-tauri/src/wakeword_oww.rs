@@ -2578,6 +2578,33 @@ static EXACT_ZERO_CBS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// never listened to (it watched silence instead). Consumed (take) per poll.
 #[cfg(not(feature = "mock-wake"))]
 static STREAM_ERROR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Last stream-error log time (millis since epoch) — Linux flood guard.
+#[cfg(all(not(feature = "mock-wake"), target_os = "linux"))]
+static LAST_STREAM_ERR_LOG_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Throttled stream-error log for the cpal error callback (runs on the RT thread).
+///
+/// On Linux the ALSA duplex handle dies as soon as the device disappears and
+/// cpal then fires the error callback PER TICK (hundreds per second), which
+/// floods the log and starves the recovery thread. Log the first error, then at
+/// most one every 5 s. The death signal itself is still set on every call.
+#[cfg(all(not(feature = "mock-wake"), target_os = "linux"))]
+fn log_stream_err_throttled(err: cpal::StreamError) {
+    use std::sync::atomic::Ordering;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last = LAST_STREAM_ERR_LOG_MS.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < 5000 {
+        return;
+    }
+    LAST_STREAM_ERR_LOG_MS.store(now, Ordering::Relaxed);
+    tracing::error!("audio stream error: {err}");
+    // TRUE death signal (device invalidated/removed) — the recovery thread
+    // consumes this.
+    STREAM_ERROR.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 /// Last restart time (ms since boot, monotonic). Enforces the restart floor.
 #[cfg(not(feature = "mock-wake"))]
 static LAST_RESTART_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3910,7 +3937,16 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     )
                     .await;
 
-                    let raw_text = transcript.unwrap_or_default();
+                    // A failed transcription is NEVER dropped silently: the
+                    // chain (cloud STT → local sidecar) reports why. The reason
+                    // is logged and spoken after the transcript event, so the
+                    // truthful line is the last thing the user hears (the
+                    // frontend's own "I didn't catch that" would otherwise be
+                    // the final word and blame the microphone).
+                    let (raw_text, stt_error) = match transcript {
+                        Ok(text) => (text, None),
+                        Err(e) => (String::new(), Some(e)),
+                    };
                     let normalized = crate::intent_parser::normalize_phonetic_mishearings(&raw_text);
                     let text = if normalized.is_empty() { raw_text } else { normalized };
                     let parsed = crate::intent_parser::parse_deterministic(&text);
@@ -3938,6 +3974,20 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     stats.stt_path = crate::stt::last_stt_path_str();
                     stats.filter = crate::stt::last_filter_str();
                     crate::commands::emit_logged(&app_for_stt, "stt:turn_stats", &stats);
+
+                    // After the transcript event, so the truthful reason is the
+                    // last thing said (the frontend answers an empty transcript
+                    // with "I didn't catch that", which blames the mic).
+                    //
+                    // Linux only: on Windows/macOS a failed transcription has
+                    // always ended the turn silently, and that behaviour must
+                    // not change.
+                    #[cfg(target_os = "linux")]
+                    if let Some(e) = stt_error {
+                        crate::stt::note_transcription_failure(&app_for_stt, &e);
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = stt_error;
                 });
             }
         })
@@ -4508,7 +4558,12 @@ fn start_audio_capture(
     // On Linux and macOS, the OS audio server manages stream routing and the default
     // input device is the user's active microphone. Start it directly without the
     // multi-device 5-second silence cascade.
-    #[cfg(not(target_os = "windows"))]
+    //
+    // Linux is EXCLUDED on purpose: the ALSA `default` frequently resolves to a
+    // PipeWire dummy/monitor sink that emits electrical static (RMS ~0.003) instead
+    // of speech. Linux therefore probes every device like Windows does, with the
+    // loopback sources probed LAST (see `crate::audio_linux::probe_priority`).
+    #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
     {
         if let Some(default_device) = host.default_input_device() {
             let dev_name = default_device.name().unwrap_or_else(|_| "default".into());
@@ -4551,6 +4606,10 @@ fn start_audio_capture(
     // Try the default device first, then fall back to others.
     // The Intel SST "Digital Microphones" driver sometimes returns silence
     // in WASAPI shared mode, so we need to try ALL devices.
+    //
+    // Linux: PipeWire "Monitor of ..." loopbacks report as real inputs but only
+    // carry speaker output — probing them first costs 5s each and they can
+    // false-trigger the KWS on TTS playback. Try real mics first.
     let default_device = host.default_input_device();
     let mut try_order: Vec<cpal::Device> = Vec::new();
     if let Some(ref d) = default_device {
@@ -4567,6 +4626,13 @@ fn start_audio_capture(
             try_order.push(d.clone());
         }
     }
+    // Stable sort: real microphones keep the default-device-first order, the
+    // loopback/dummy sources move to the end.
+    #[cfg(target_os = "linux")]
+    try_order.sort_by_key(|d| {
+        let n = d.name().unwrap_or_default().to_lowercase();
+        crate::audio_linux::probe_priority(&n)
+    });
 
     if try_order.is_empty() {
         return Err("no input devices available".to_string());
@@ -4669,6 +4735,11 @@ fn try_device_silent(
     let out_buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<f32>::with_capacity(2560)));
     let engine_cb = engine;
     let wake_tx = WAKE_TX.get().cloned();
+    // Linux throttles the log (ALSA floods the callback when the device dies);
+    // everywhere else the error is logged as-is.
+    #[cfg(target_os = "linux")]
+    let err_cb = log_stream_err_throttled;
+    #[cfg(not(target_os = "linux"))]
     let err_cb = |err| {
         tracing::error!("audio stream error: {err}");
         // TRUE death signal (device invalidated/removed) — the recovery
@@ -4786,6 +4857,11 @@ fn try_device(
     let sum_sq = std::sync::Arc::new(AtomicU64::new(0)); // sum of squares * 1e9 (fixed-point)
     let total_samples = std::sync::Arc::new(AtomicU64::new(0));
 
+    // Linux throttles the log (ALSA floods the callback when the device dies);
+    // everywhere else the error is logged as-is.
+    #[cfg(target_os = "linux")]
+    let err_cb = log_stream_err_throttled;
+    #[cfg(not(target_os = "linux"))]
     let err_cb = |err| {
         tracing::error!("audio stream error: {err}");
         // TRUE death signal (device invalidated/removed) — the recovery

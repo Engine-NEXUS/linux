@@ -202,6 +202,14 @@ pub fn get_or_create_window<R: Runtime>(
 
     let win = builder.build().map_err(|e| format!("Failed to create {} window: {e}", config.label))?;
 
+    // Linux: WebKitGTK denies getUserMedia unless the webview has a
+    // `permission-request` handler, and the handler lives ON the webview —
+    // so every webview NEXUS creates needs one. The stage window in
+    // particular is destroyed and rebuilt by the blackout watchdog, and a
+    // rebuilt webview without a handler silently kills the orb's mic path.
+    #[cfg(target_os = "linux")]
+    crate::mic_permissions::allow_media_for_window(&win);
+
     // Apply platform-specific effects
     #[cfg(target_os = "windows")]
     {

@@ -131,6 +131,14 @@ async fn disk_lookup(text: &str, voice: &str) -> Option<CachedAudio> {
         .map(cached_from_loaded)
 }
 
+/// What the "system voice" tier is called in the logs. Windows has the WinRT
+/// built-in voice; on Linux the tier is skipped entirely (Kokoro is the
+/// offline voice), so the log must not claim a Windows voice was used.
+#[cfg(target_os = "windows")]
+const SYSTEM_VOICE_LABEL: &str = "Windows voice";
+#[cfg(not(target_os = "windows"))]
+const SYSTEM_VOICE_LABEL: &str = "system voice";
+
 /// The Windows built-in voice as a full synthesis result (estimated word timings).
 async fn system_voice_line(text: &str, reason: &str) -> Result<(Vec<f32>, u32, CaptionTrack), String> {
     let t0 = std::time::Instant::now();
@@ -138,7 +146,7 @@ async fn system_voice_line(text: &str, reason: &str) -> Result<(Vec<f32>, u32, C
     let total_ms = samples.len() as u64 * 1000 / (sr as u64).max(1);
     let words = estimate_words(text, total_ms);
     let envelope = compute_envelope(&samples, sr, ENVELOPE_FRAME_MS);
-    tracing::info!("[TTS] Windows voice used ({reason}) - ready in {} ms", t0.elapsed().as_millis());
+    tracing::info!("[TTS] {} used ({reason}) - ready in {} ms", SYSTEM_VOICE_LABEL, t0.elapsed().as_millis());
     Ok((
         samples,
         sr,
@@ -156,7 +164,7 @@ async fn synthesize_local_guarded(text: &str) -> Result<(Vec<f32>, u32, CaptionT
         return match system_voice_line(text, "local voice still loading").await {
             Ok(v) => Ok(v),
             Err(why) => {
-                tracing::warn!("tts: Windows voice unavailable ({why}); waiting for the local voice");
+                tracing::warn!("tts: {} unavailable ({why}); waiting for the local voice", SYSTEM_VOICE_LABEL);
                 job.await.map_err(|e| format!("local voice join: {e}"))?
             }
         };
@@ -166,7 +174,7 @@ async fn synthesize_local_guarded(text: &str) -> Result<(Vec<f32>, u32, CaptionT
         Err(_late) => match system_voice_line(text, "local voice too slow").await {
             Ok(v) => Ok(v),
             Err(why) => {
-                tracing::warn!("tts: Windows voice unavailable ({why}); waiting for the local voice");
+                tracing::warn!("tts: {} unavailable ({why}); waiting for the local voice", SYSTEM_VOICE_LABEL);
                 job.await.map_err(|e| format!("local voice join: {e}"))?
             }
         },
