@@ -4,16 +4,23 @@
 //! that "scratch that" can take it back. Rules (each is a refusal reason that is spoken, never silent):
 //! - never type into a protected window (banking / password manager / crypto wallet, the denylist in
 //!   `live::safety`), into NEXUS's own windows, into an elevated window we cannot type into, or into
-//!   a password field;
+//!   a password field (on a native Wayland session the focused window cannot be identified, so that
+//!   rule cannot be enforced there — see `foreground_target`);
 //! - never press Enter on its own: utterances are joined with a space, line breaks only come from
 //!   the user saying "new line" / "new paragraph";
 //! - undo only when the same window is still in front, otherwise Ctrl+Z.
+//!
+//! On Linux there is one more case: a native Wayland window cannot be typed into at all (the
+//! synthetic key events never reach it), so the text goes on the clipboard and the user pastes it
+//! — see [`fallback_line`]. Each utterance replaces the previous one there, so the clipboard holds
+//! the latest line only.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::dictation_text::{self, Ctx};
+use crate::live::commands::keyboard::InputSession;
 
 /// A dictation session with no accepted line for this long stops itself (a TV must not type into a
 /// forgotten document).
@@ -183,7 +190,76 @@ pub enum Outcome {
     /// Nothing to type (a pure command with no effect, or only fillers).
     Nothing,
     /// Not typed; say this.
+    ///
+    /// On Linux the text may have gone to the clipboard instead (a native
+    /// Wayland window cannot be typed into), so the sentence can also be
+    /// "copied to the clipboard — it holds only this last line".
     Refused(String),
+}
+
+/// The line to speak when dictation text could not be typed into the focused
+/// window.
+///
+/// `None` means "typing was the right delivery, so report the typing error";
+/// `Some(line)` is what to say instead.
+///
+/// Pure, so the choice can be tested without a display, and shared by every
+/// platform so the decision lives in one place. `clipboard` says whether the
+/// text could be put on the clipboard — the caller has already put it there
+/// when this is true.
+pub fn fallback_line(session: &InputSession, clipboard: bool) -> Option<String> {
+    if !session.display {
+        return Some("There is no display, sir — I cannot type anything.".to_string());
+    }
+    if !session.wayland {
+        // X11: typing was expected to work and did not. The caller reports it.
+        return None;
+    }
+    if clipboard {
+        // The text is on the clipboard; the user pastes it. Each utterance
+        // replaces the previous one, so the clipboard holds the latest line
+        // only — say so, rather than let the user paste a fragment and think
+        // the rest was lost.
+        Some(
+            "Copied to the clipboard, sir — it holds only this last line, so paste it with Ctrl+V."
+                .to_string(),
+        )
+    } else {
+        Some(
+            "I cannot type into native Wayland windows, sir, and there is no clipboard to fall back on."
+                .to_string(),
+        )
+    }
+}
+
+/// Dictation text that could not be typed: what to do about it.
+///
+/// Windows and macOS: typing was supposed to work, so the failure is the
+/// news. The shared decision is still asked, so both platforms agree on what
+/// "the fallback is" — on these platforms it is never the clipboard.
+#[cfg(not(target_os = "linux"))]
+fn typing_failed(_text: &str, err: &str) -> Outcome {
+    let session = crate::live::commands::keyboard::current_session();
+    match fallback_line(&session, false) {
+        Some(line) => Outcome::Refused(line),
+        None => Outcome::Refused(format!("Typing failed: {err}")),
+    }
+}
+
+/// Dictation text that could not be typed: what to do about it.
+///
+/// On Linux the focused window may be a native Wayland window, which no
+/// synthetic input can reach. The text goes on the clipboard instead and the
+/// user pastes it — honest, where "Ok sir" over a silent no-op is not.
+#[cfg(target_os = "linux")]
+fn typing_failed(text: &str, err: &str) -> Outcome {
+    let session = crate::live::commands::keyboard::current_session();
+    // Only touch the clipboard when the clipboard is actually the fallback.
+    let copied = session.wayland && crate::live::commands::keyboard::copy_to_clipboard(text);
+    match fallback_line(&session, copied) {
+        Some(line) => Outcome::Refused(line),
+        None => Outcome::Refused(format!("Typing failed: {err}")),
+    }
 }
 
 /// Continuous dictation: lines join with a space, capitalisation continues across lines.
@@ -216,17 +292,45 @@ fn dictate_inner(raw: &str, dictionary: Vec<(String, String)>, oneshot: bool) ->
         let undo = HISTORY.lock().map(|mut h| h.undo(&target.title)).unwrap_or(Undo::Nothing);
         return match undo {
             Undo::Backspace(n) => {
+                let mut pressed = true;
                 for _ in 0..n {
                     if crate::live::commands::keyboard::press_key("backspace").is_err() {
+                        pressed = false;
                         break;
                     }
                 }
+                // On Linux the focused window may be out of reach (a native
+                // Wayland window), and saying "undone" over an insertion that
+                // is still there is exactly the lie this module refuses to
+                // tell.
+                #[cfg(target_os = "linux")]
+                {
+                    if !pressed {
+                        return Outcome::Refused(
+                            "I could not take that text back, sir — I cannot reach that window."
+                                .to_string(),
+                        );
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = pressed;
                 AT_SENTENCE_START.store(true, Ordering::Relaxed);
                 AT_SENTENCE_START_AFTER_BREAK.store(false, Ordering::Relaxed);
                 Outcome::Undone
             }
             Undo::CtrlZ => {
-                let _ = crate::live::commands::keyboard::press_hotkey(&["ctrl", "z"]);
+                let sent = crate::live::commands::keyboard::press_hotkey(&["ctrl", "z"]);
+                #[cfg(target_os = "linux")]
+                {
+                    if sent.is_err() {
+                        return Outcome::Refused(
+                            "I could not take that text back, sir — I cannot reach that window."
+                                .to_string(),
+                        );
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = sent;
                 Outcome::Undone
             }
             Undo::Nothing => Outcome::Nothing,
@@ -247,7 +351,7 @@ fn dictate_inner(raw: &str, dictionary: Vec<(String, String)>, oneshot: bool) ->
     };
     let to_type = format!("{joiner}{}", cleaned.text);
     if let Err(e) = crate::live::commands::keyboard::type_text(&to_type) {
-        return Outcome::Refused(format!("Typing failed: {e}"));
+        return typing_failed(&to_type, &e);
     }
     AT_SENTENCE_START.store(dictation_text::ends_sentence(&cleaned.text), Ordering::Relaxed);
     AT_SENTENCE_START_AFTER_BREAK.store(cleaned.text.ends_with('\n'), Ordering::Relaxed);
@@ -284,7 +388,23 @@ fn foreground_target() -> Target {
     t
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn foreground_target() -> Target {
+    // The foreground window title is knowable on X11 only (xdotool). On a
+    // native Wayland session there is no portable way to ask the compositor
+    // which window has the focus, so the title stays empty.
+    //
+    // Consequence, stated plainly: on native Wayland the protected-window
+    // gate does NOT work. `refusal()` has no title to match against
+    // `live::safety::DENIED_TARGETS`, so a dictated password into a native
+    // Wayland password manager is copied to the clipboard unrefused. The gate
+    // is real on X11; on Wayland it is an open limitation of this port, not a
+    // solved problem.
+    let title = crate::browser_url::foreground_window_title().unwrap_or_default();
+    Target { title, ..Default::default() }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn foreground_target() -> Target {
     Target::default()
 }
@@ -374,5 +494,37 @@ mod tests {
         );
         assert!(parse_dictionary("not json").is_empty());
         assert!(load_dictionary(std::path::Path::new("Z:/definitely/not/here")).is_empty());
+    }
+
+    #[test]
+    fn an_x11_session_reports_the_typing_failure() {
+        // Typing was supposed to work, so there is no fallback line: the
+        // caller reports the typing error itself.
+        let s = InputSession { display: true, wayland: false, xwayland_focus: None };
+        assert!(fallback_line(&s, false).is_none());
+        assert!(fallback_line(&s, true).is_none());
+    }
+
+    #[test]
+    fn a_wayland_session_falls_back_to_the_clipboard() {
+        let s = InputSession { display: true, wayland: true, xwayland_focus: Some(false) };
+        let line = fallback_line(&s, true).expect("a spoken line");
+        assert!(line.to_lowercase().contains("clipboard"), "{line}");
+        assert!(line.to_lowercase().contains("paste"), "{line}");
+        // Each utterance replaces the previous one on the clipboard, so the
+        // line has to say so — otherwise the user pastes a fragment and
+        // thinks the rest was lost.
+        assert!(line.to_lowercase().contains("last line"), "{line}");
+
+        // No clipboard: a clear error, never a silent no-op.
+        let line = fallback_line(&s, false).expect("a spoken line");
+        assert!(line.to_lowercase().contains("wayland"), "{line}");
+    }
+
+    #[test]
+    fn no_display_says_so_instead_of_typing() {
+        let s = InputSession { display: false, wayland: false, xwayland_focus: None };
+        let line = fallback_line(&s, false).expect("a spoken line");
+        assert!(line.to_lowercase().contains("display"), "{line}");
     }
 }
