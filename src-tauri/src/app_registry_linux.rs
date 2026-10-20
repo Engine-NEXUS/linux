@@ -30,12 +30,8 @@
 //!      Wayland, so the process table answers that instead — which is what
 //!      stops a second copy of an already-open app from being launched.
 
-use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use super::{build_search_names, AppEntry, FocusOutcome, LaunchMethod};
 
@@ -961,6 +957,11 @@ impl ProcessSnapshot {
     }
 
     /// The pids of the processes whose name matches one of `names`.
+    ///
+    /// Loose: a candidate of 4+ characters also matches a decorated name
+    /// ("firefox" inside "firefox-esr"). This decides whether the app is
+    /// running — never which window belongs to it. Use
+    /// [`Self::pids_for_exact`] for that.
     pub fn pids_for(&self, names: &[String]) -> Vec<u32> {
         if names.is_empty() {
             return Vec::new();
@@ -983,28 +984,27 @@ impl ProcessSnapshot {
         }
         pids
     }
-}
 
-/// How long a process-table snapshot is reused before it is read again.
-const PROCESS_SNAPSHOT_TTL: Duration = Duration::from_millis(1000);
-
-/// The process table, read at most once per [`PROCESS_SNAPSHOT_TTL`].
-///
-/// The wait loop behind "open X" polls every 250 ms, so without this the
-/// whole table would be scanned a dozen times in a row.
-pub fn process_snapshot() -> Arc<ProcessSnapshot> {
-    static CACHE: Lazy<Mutex<Option<(Instant, Arc<ProcessSnapshot>)>>> =
-        Lazy::new(|| Mutex::new(None));
-
-    let mut cache = CACHE.lock();
-    if let Some((at, snapshot)) = cache.as_ref() {
-        if at.elapsed() < PROCESS_SNAPSHOT_TTL {
-            return Arc::clone(snapshot);
+    /// The pids of the processes whose name EXACTLY matches one of `names`.
+    ///
+    /// The window pick uses this: with `code` and `code-insiders` both
+    /// running, the loose rule matches both, and "open code" would raise
+    /// whichever window came first in the list.
+    pub fn pids_for_exact(&self, names: &[String]) -> Vec<u32> {
+        if names.is_empty() {
+            return Vec::new();
         }
+        let mut pids: Vec<u32> = Vec::new();
+        for (process_name, pid) in &self.processes {
+            if names
+                .iter()
+                .any(|candidate| !candidate.is_empty() && process_name == candidate.as_str())
+            {
+                pids.push(*pid);
+            }
+        }
+        pids
     }
-    let snapshot = Arc::new(ProcessSnapshot::capture());
-    *cache = Some((Instant::now(), Arc::clone(&snapshot)));
-    snapshot
 }
 
 /// The EWMH id of the window owned by one of `pids`.
@@ -1065,6 +1065,37 @@ pub fn blocked_reason_message(blocked: Option<&str>) -> String {
     match blocked {
         Some(reason) => format!("I can't bring it to the front, sir — {reason}."),
         None => "I couldn't raise that window, sir.".to_string(),
+    }
+}
+
+/// What the legacy "the app is already running" resolver should do next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegacyFocusAction {
+    /// The window was raised: report the app as already open.
+    AlreadyOpen,
+    /// This session cannot raise another app's window: say so, and do NOT
+    /// launch a copy of an app that is already running.
+    CannotFocus(String),
+    /// The session can raise windows, but none carried that title: fall
+    /// through and let the caller launch a fresh instance.
+    LaunchCopy,
+}
+
+/// The pure decision of the legacy "the app is already running" path.
+///
+/// `focused` says whether the window was actually raised; `blocked` is the
+/// speakable reason when this session cannot raise another app's window at
+/// all (native Wayland has no EWMH).
+///
+/// A blocked session never yields [`LegacyFocusAction::LaunchCopy`]: that is
+/// what used to start a second GIMP (the "7 Notepad windows" regression).
+pub fn legacy_focus_action(focused: bool, blocked: Option<&str>) -> LegacyFocusAction {
+    if focused {
+        LegacyFocusAction::AlreadyOpen
+    } else if let Some(reason) = blocked {
+        LegacyFocusAction::CannotFocus(blocked_reason_message(Some(reason)))
+    } else {
+        LegacyFocusAction::LaunchCopy
     }
 }
 
@@ -1340,6 +1371,79 @@ mod tests {
         assert_eq!(window_id_for_pids(&windows, &[4242]), None);
         assert_eq!(window_id_for_pids(&windows, &[]), None);
         assert_eq!(window_id_for_pids(&[], &[21337]), None);
+    }
+
+    #[test]
+    fn the_window_pick_needs_an_exact_process_name() {
+        // `code` and `code-insiders` both running: the loose rule matches
+        // both ("code" is inside "code-insiders"), but only the exact one
+        // may own the window that "open code" raises.
+        let snapshot = ProcessSnapshot {
+            processes: vec![
+                ("code".to_string(), 100),
+                ("code-insiders".to_string(), 200),
+            ],
+        };
+        let names = vec!["code".to_string()];
+        // The loose rule may only decide "is it running".
+        assert_eq!(snapshot.pids_for(&names).len(), 2);
+        // The window pick is exact.
+        assert_eq!(snapshot.pids_for_exact(&names), vec![100]);
+        let windows = [(0x03e0_0006u64, 100u32), (0x03e0_0007, 200)];
+        assert_eq!(
+            window_id_for_pids(&windows, &snapshot.pids_for_exact(&names)),
+            Some(0x03e0_0006)
+        );
+    }
+
+    #[test]
+    fn an_exact_name_that_is_not_running_picks_no_window() {
+        // Only code-insiders is running: it must not answer for "code".
+        let snapshot = ProcessSnapshot {
+            processes: vec![("code-insiders".to_string(), 200)],
+        };
+        let names = vec!["code".to_string()];
+        assert_eq!(snapshot.pids_for_exact(&names), Vec::<u32>::new());
+        let windows = [(0x03e0_0007u64, 200u32)];
+        assert_eq!(
+            window_id_for_pids(&windows, &snapshot.pids_for_exact(&names)),
+            None
+        );
+    }
+
+    // ── Legacy "app is already running" decision ───────────────────────────
+
+    #[test]
+    fn a_blocked_session_never_launches_a_copy() {
+        // The regression this guards: falling through to "launch" while the
+        // session cannot raise windows started a SECOND copy of a running
+        // app (the duplicate-GIMP report).
+        let action = legacy_focus_action(false, Some("this is a native Wayland session"));
+        assert_ne!(action, LegacyFocusAction::LaunchCopy);
+        match action {
+            LegacyFocusAction::CannotFocus(message) => {
+                assert!(message.contains("Wayland"), "message was: {message}");
+            }
+            other => panic!("expected CannotFocus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_focused_window_is_reported_as_already_open() {
+        assert_eq!(
+            legacy_focus_action(true, None),
+            LegacyFocusAction::AlreadyOpen
+        );
+    }
+
+    #[test]
+    fn a_focusable_session_without_a_matching_window_launches_a_copy() {
+        // X11 with wmctrl: the app runs but no window carries that title, so
+        // a fresh instance is the right answer.
+        assert_eq!(
+            legacy_focus_action(false, None),
+            LegacyFocusAction::LaunchCopy
+        );
     }
 
     // ── Outcome mapping ────────────────────────────────────────────────────

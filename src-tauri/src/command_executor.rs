@@ -1057,36 +1057,39 @@ fn check_running_and_focus(target: &str, display_name: &str) -> Option<CommandRe
                 }
                 #[cfg(target_os = "linux")]
                 {
+                    use crate::app_registry::app_registry_linux::{
+                        legacy_focus_action, LegacyFocusAction,
+                    };
+
                     // The app *is* running, but "is running" is not "is focused".
                     // Spawning `wmctrl` and discarding the Result claimed success
                     // for an action that on native Wayland does nothing, because
                     // EWMH is absent there.
+                    //
+                    // The decision is pure (`legacy_focus_action`) so it can be
+                    // unit-tested: a blocked session must never end in
+                    // "launch a copy" — that started a SECOND GIMP.
                     let focused = crate::app_registry::focus_by_title(display_name);
-                    if focused {
-                        return Some(CommandResult {
+                    let blocked = crate::live::commands::window::focus_unavailable_reason();
+                    return match legacy_focus_action(focused, blocked.as_deref()) {
+                        LegacyFocusAction::AlreadyOpen => Some(CommandResult {
                             success: true,
                             message: format!("{} is already open, sir.", display_name),
-                        });
-                    }
-                    // This session cannot raise another app's window at all.
-                    // Say so instead of falling through: the caller would
-                    // launch a SECOND copy of an app that is already running
-                    // (the "7 Notepad windows" regression).
-                    if let Some(reason) =
-                        crate::live::commands::window::focus_unavailable_reason()
-                    {
-                        return Some(CommandResult {
+                        }),
+                        LegacyFocusAction::CannotFocus(message) => Some(CommandResult {
                             success: false,
-                            message: format!("I can't bring it to the front, sir — {reason}."),
-                        });
-                    }
-                    // X11 with wmctrl: the app runs but no window carries that
-                    // title, so a fresh instance is the right answer here.
-                    tracing::debug!(
-                        "focus of already-running {:?} failed; falling through to launch",
-                        display_name
-                    );
-                    return None;
+                            message,
+                        }),
+                        LegacyFocusAction::LaunchCopy => {
+                            // X11 with wmctrl: the app runs but no window carries
+                            // that title, so a fresh instance is the right answer.
+                            tracing::debug!(
+                                "focus of already-running {:?} failed; falling through to launch",
+                                display_name
+                            );
+                            None
+                        }
+                    };
                 }
                 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
                 {

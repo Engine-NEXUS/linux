@@ -833,11 +833,12 @@ pub enum FocusOutcome {
 
 /// Check if an app is already running and focus its window.
 ///
-/// Returns what happened, so the caller can tell "focused" from "running but
-/// this session cannot raise it" from "not running". This is the FIRST
-/// priority in the launch flow.
+/// Returns what happened, so the caller can tell "focused" from "the process
+/// is up but its window is not mapped yet" from "running but this session
+/// cannot raise it" from "not running". This is the FIRST priority in the
+/// launch flow.
 ///
-/// The tri-state matters on Linux. A native Wayland session has no way to
+/// The distinction matters on Linux. A native Wayland session has no way to
 /// raise another app's window, but the app may still be running: reporting
 /// "not running" would make the caller launch a second copy of an app the
 /// user already has open, and reporting "focused" would be a lie the user
@@ -847,13 +848,26 @@ pub fn focus_existing(entry: &AppEntry) -> FocusOutcome {
     // here and every repeat of "open notepad" launched ANOTHER one (7 windows in a live test).
     // A live scan costs a few ms and is the only honest answer to "is it already open?".
     refresh_window_cache();
+
+    // Linux: the process table is read ONCE per call and every question
+    // below asks that one snapshot. A cached table would report "not
+    // running" for an app that started a moment ago, and the caller would
+    // launch a second copy of it. Only desktop entries have a process to
+    // look for, so a URL entry skips the scan entirely.
+    #[cfg(target_os = "linux")]
+    let snapshot = if linux_process_names(entry).is_empty() {
+        None
+    } else {
+        Some(app_registry_linux::ProcessSnapshot::capture())
+    };
+
     // Linux first: the window that belongs to the app's running process is
     // the exact match. The title rarely equals the `.desktop` name ("Text
     // Editor" vs "gedit", "Firefox" vs "Mozilla Firefox"), so the PID is
     // what identifies the window.
     #[cfg(target_os = "linux")]
     {
-        if let Some(outcome) = linux_focus_running_window(entry) {
+        if let Some(outcome) = linux_focus_running_window(entry, snapshot.as_ref()) {
             return outcome;
         }
     }
@@ -892,7 +906,7 @@ pub fn focus_existing(entry: &AppEntry) -> FocusOutcome {
     // The app's process is up, but no window of it could be raised.
     #[cfg(target_os = "linux")]
     {
-        if let Some(outcome) = linux_window_not_ready(entry) {
+        if let Some(outcome) = linux_window_not_ready(entry, snapshot.as_ref()) {
             return outcome;
         }
     }
@@ -900,23 +914,12 @@ pub fn focus_existing(entry: &AppEntry) -> FocusOutcome {
     FocusOutcome::NotRunning
 }
 
-/// Linux: the pids of the app's running processes.
-///
-/// `None` when the app is not running. The process table is read once per
-/// call and the snapshot is reused for a short while, so the wait loop
-/// behind "open X" does not scan /proc a dozen times in a row.
+/// Linux: the process names the app can run under.
 #[cfg(target_os = "linux")]
-fn linux_running_pids(entry: &AppEntry) -> Option<Vec<u32>> {
-    let exec = entry_exec(entry)?;
-    let names = app_registry_linux::exec_process_names(exec);
-    if names.is_empty() {
-        return None;
-    }
-    let pids = app_registry_linux::process_snapshot().pids_for(&names);
-    if pids.is_empty() {
-        None
-    } else {
-        Some(pids)
+fn linux_process_names(entry: &AppEntry) -> Vec<String> {
+    match entry_exec(entry) {
+        Some(exec) => app_registry_linux::exec_process_names(exec),
+        None => Vec::new(),
     }
 }
 
@@ -925,14 +928,25 @@ fn linux_running_pids(entry: &AppEntry) -> Option<Vec<u32>> {
 /// `None` when the app is not running, or when it runs without a window of
 /// its own — the caller then tries the name-based paths.
 #[cfg(target_os = "linux")]
-fn linux_focus_running_window(entry: &AppEntry) -> Option<FocusOutcome> {
-    let pids = linux_running_pids(entry)?;
+fn linux_focus_running_window(
+    entry: &AppEntry,
+    snapshot: Option<&app_registry_linux::ProcessSnapshot>,
+) -> Option<FocusOutcome> {
+    let names = linux_process_names(entry);
+    if names.is_empty() {
+        return None;
+    }
+    let snapshot = snapshot?;
+    // The window pick needs an EXACT process-name match. The loose rule
+    // ("code" inside "code-insiders") decides only whether the app is
+    // running; using it here would raise the wrong window.
+    let exact_pids = snapshot.pids_for_exact(&names);
     let windows: Vec<(u64, u32)> = WINDOW_CACHE
         .read()
         .iter()
         .map(|w| (w.hwnd.max(0) as u64, w.pid))
         .collect();
-    let id = app_registry_linux::window_id_for_pids(&windows, &pids)?;
+    let id = app_registry_linux::window_id_for_pids(&windows, &exact_pids)?;
     if focus_window(id as isize) {
         return Some(FocusOutcome::Focused);
     }
@@ -949,8 +963,19 @@ fn linux_focus_running_window(entry: &AppEntry) -> Option<FocusOutcome> {
 /// The window may simply not be mapped yet — the app is still starting — so
 /// the caller waits for it instead of starting a second copy.
 #[cfg(target_os = "linux")]
-fn linux_window_not_ready(entry: &AppEntry) -> Option<FocusOutcome> {
-    let _pids = linux_running_pids(entry)?;
+fn linux_window_not_ready(
+    entry: &AppEntry,
+    snapshot: Option<&app_registry_linux::ProcessSnapshot>,
+) -> Option<FocusOutcome> {
+    let names = linux_process_names(entry);
+    if names.is_empty() {
+        return None;
+    }
+    // The loose rule is enough here: it only decides "is it running".
+    let running = snapshot.map(|s| s.pids_for(&names)).unwrap_or_default();
+    if running.is_empty() {
+        return None;
+    }
     // Last chance to raise it: the display-name regex.
     if app_registry_linux::focus_by_title(&entry.display_name) {
         return Some(FocusOutcome::Focused);

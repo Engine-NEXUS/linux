@@ -46,14 +46,18 @@ The whole Linux platform layer, declared from the parent module
 * **Which window?** The window title rarely equals the `.desktop` name
   ("Text Editor" vs "gedit", "Firefox" vs "Mozilla Firefox"), so the window
   of the app is located by the **PID** the `wmctrl -l -p` output carries and
-  raised with `wmctrl -i -a <id>`. The display-name regex is only the last
+  raised with `wmctrl -i -a <id>`. The pid must match the process name
+  **exactly** for that pick — with `code` and `code-insiders` both running,
+  the loose "contains" rule would raise the wrong window. The loose rule is
+  used only to decide running/not-running. The display-name regex is the last
   fallback.
 * **"Is it already running?"** — the process table answers this where the
   window list does not exist (Wayland). The table is read **once per
-  attempt** and the snapshot is reused for a second, so the wait loop behind
-  "open X" does not scan `/proc` a dozen times in a row. Shells, interpreters
-  and terminal emulators are excluded on purpose: running them again *is* how
-  the user asks for a new window.
+  `focus_existing` call** and that one snapshot is passed down; there is no
+  global cache, because a cached table would report "not running" for an app
+  that started a moment ago and the caller would launch a second copy of it.
+  Shells, interpreters and terminal emulators are excluded on purpose:
+  running them again *is* how the user asks for a new window.
 
 ### `src-tauri/src/app_registry.rs`
 
@@ -88,8 +92,9 @@ The whole Linux platform layer, declared from the parent module
 * The Linux branch of `check_running_and_focus` used to spawn `wmctrl` and
   throw the result away while claiming success — and on returning `None` it
   made the caller launch a **second copy** of an app that was already running
-  (the "7 Notepad windows" regression). It now waits for the truth, and when
-  the session cannot raise windows at all it returns the spoken reason.
+  (the "7 Notepad windows" regression). The decision is now the pure
+  `legacy_focus_action(focused, blocked)`, unit-tested so that a blocked
+  session can never again resolve to "launch a copy".
 * The Linux legacy `.desktop` grep now goes through the real scanner, so the
   filters apply to it too.
 
