@@ -23,6 +23,130 @@
 //! its failures instead, because "no text" and "the OCR server is not
 //! installed" are different answers.
 
+// ─── Shared text-box plumbing ─────────────────────────────────────────────
+//
+// The box shape and the snapping rule are platform-independent: the Linux
+// RapidOCR sidecar produces the boxes today, and the Windows OCR engine
+// produces the same shape (one rect per line). Keeping them HERE means both
+// platforms feed the same rule, and the rule is unit-tested on every
+// platform.
+//
+// `score_match` is a private helper on purpose. The fuzzy-match rule lives
+// in `screen.rs`, which belongs to another team, so it is carried here
+// rather than borrowed across the boundary.
+
+/// One OCR text box, in screen pixels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OcrBox {
+    pub text: String,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// The engine's 0..1 confidence for this text. The Windows line engine
+    /// exposes no score, so its boxes carry a fixed `1.0`; a value outside
+    /// 0..1 is a malformed reply and is never used as a snap target.
+    pub conf: f32,
+}
+
+impl OcrBox {
+    /// The centre of the box, in the same pixel space as the box.
+    pub fn center(&self) -> (f64, f64) {
+        (
+            self.x as f64 + self.w as f64 / 2.0,
+            self.y as f64 + self.h as f64 / 2.0,
+        )
+    }
+}
+
+/// Pure: fuzzy match score 0.0-1.0 of a locate query against a UI name.
+/// Exact > substring > all-words > any-word. Locate hits need >= 0.5.
+fn score_match(query: &str, name: &str) -> f32 {
+    let norm = |s: &str| {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let q = norm(query);
+    let n = norm(name);
+    if q.is_empty() || n.is_empty() {
+        return 0.0;
+    }
+    if q == n {
+        return 1.0;
+    }
+    if n.contains(&q) || q.contains(&n) {
+        return 0.8;
+    }
+    // Space-insensitive containment: OCR routinely drops inter-word
+    // spaces ("Closewindow", "Signin"). Scores just below substring.
+    let nospace = |s: &str| s.split_whitespace().collect::<String>();
+    let (nq, nn) = (nospace(&q), nospace(&n));
+    if nn.contains(&nq) || nq.contains(&nn) {
+        return 0.75;
+    }
+    let qw: Vec<&str> = q.split(' ').collect();
+    let nw: Vec<&str> = n.split(' ').collect();
+    let hits = qw.iter().filter(|w| nw.contains(w)).count();
+    if hits == qw.len() {
+        return 0.7;
+    }
+    if hits > 0 {
+        return 0.4;
+    }
+    0.0
+}
+
+/// Snap a vision point onto the best-matching OCR text box.
+///
+/// Candidates score `score_match(query, box.text) >= 0.5`; the highest score
+/// wins, ties break by distance to the vision point. Rejects when the winner
+/// is farther than `max_dist` (px) — a far snap is worse than the model's own
+/// coordinates. Boxes whose confidence is not a 0..1 engine score are ignored
+/// as a malformed reply. Returns the box centre.
+///
+/// `boxes` and the point MUST be in the same pixel space (screen pixels),
+/// otherwise the distance comparison compares two different pictures.
+pub fn snap_to_text(
+    boxes: &[OcrBox],
+    query: &str,
+    px: f64,
+    py: f64,
+    max_dist: f64,
+) -> Option<(f64, f64)> {
+    let mut best: Option<(f32, f64, (f64, f64))> = None;
+    for b in boxes {
+        // Confidence is the one field the two engines do not share: the
+        // Linux sidecar reports the model's 0..1 score, the Windows line
+        // engine exposes no score and carries a fixed 1.0. Anything outside
+        // that range is a malformed reply, so the box cannot be trusted.
+        // This is an input check, not a ranking rule: valid boxes are ranked
+        // exactly as before.
+        if !(0.0..=1.0).contains(&b.conf) {
+            continue;
+        }
+        let score = score_match(query, &b.text);
+        if score < 0.5 {
+            continue;
+        }
+        let (cx, cy) = b.center();
+        let dist = ((cx - px).powi(2) + (cy - py).powi(2)).sqrt();
+        let replace = match &best {
+            None => true,
+            Some((s, d, _)) => score > *s || (score == *s && dist < *d),
+        };
+        if replace {
+            best = Some((score, dist, (cx, cy)));
+        }
+    }
+    match best {
+        Some((_, dist, center)) if dist <= max_dist => Some(center),
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod windows_ocr {
     //! Windows.Media.Ocr — zero-RAM local screen text extraction (Feature 86).
@@ -168,6 +292,35 @@ mod windows_ocr {
         capture_screen_text().map(|(t, _)| t)
     }
 
+    /// The visible screen text as snap-able boxes, one per line.
+    ///
+    /// The engine reports the joined text plus one rect per line, so the
+    /// lines are zipped back onto their rects. The rects are PHYSICAL px on
+    /// the primary monitor — the same space the vision tier reports a point
+    /// in, which is what makes the two comparable.
+    pub fn screen_text_boxes() -> Vec<super::OcrBox> {
+        let Some((text, rects)) = capture_screen_text() else {
+            return Vec::new();
+        };
+        text.lines()
+            .zip(rects.iter())
+            .filter_map(|(line, (x, y, w, h))| {
+                let t = line.trim();
+                if t.is_empty() || *w <= 0 || *h <= 0 {
+                    return None;
+                }
+                Some(super::OcrBox {
+                    text: t.to_string(),
+                    x: *x,
+                    y: *y,
+                    w: *w,
+                    h: *h,
+                    conf: 1.0,
+                })
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -202,16 +355,7 @@ mod linux_ocr {
 
     use std::time::Duration;
 
-    /// One OCR text box in original image pixels.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct OcrBox {
-        pub text: String,
-        pub x: i32,
-        pub y: i32,
-        pub w: i32,
-        pub h: i32,
-        pub conf: f32,
-    }
+    use super::OcrBox;
 
     /// Merge OCR word boxes into text lines: group boxes with vertically
     /// overlapping bands, then split runs separated by a gap wider than 3x
@@ -428,3 +572,104 @@ pub use windows_ocr::*;
 
 #[cfg(target_os = "linux")]
 pub use linux_ocr::*;
+
+// ─── Tests for the shared (platform-independent) rules ─────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn score_match_exact_beats_substring() {
+        assert_eq!(score_match("save", "Save"), 1.0);
+        assert_eq!(score_match("save button", "Save Button"), 1.0);
+    }
+
+    #[test]
+    fn score_match_substring_hits() {
+        assert!(((score_match("save", "Save As")) - 0.8).abs() < 1e-6);
+        // Not contiguous ("address and search bar") → all-words score 0.7.
+        assert!(((score_match("address bar", "Address and search bar")) - 0.7).abs() < 1e-6);
+        assert!(((score_match("search bar", "Address and search bar")) - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_match_ignores_dropped_ocr_spaces() {
+        // RapidOCR emits "Closewindow" for "Close window" — must still hit.
+        assert!(((score_match("close window", "Closewindow")) - 0.75).abs() < 1e-6);
+        assert!(((score_match("sign in", "Signin")) - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn score_match_word_overlap_ranks() {
+        // All query words present, different order → 0.7 (above threshold).
+        assert!(((score_match("button save", "Save Button")) - 0.7).abs() < 1e-6);
+        // One word only → 0.4 (below threshold, correctly rejected).
+        assert!(((score_match("save file", "Save Button")) - 0.4).abs() < 1e-6);
+        assert_eq!(score_match("eiffel tower", "Save Button"), 0.0);
+        assert_eq!(score_match("", "Save"), 0.0);
+    }
+
+    fn box_at(text: &str, x: i32, y: i32, w: i32, h: i32) -> OcrBox {
+        OcrBox {
+            text: text.into(),
+            x,
+            y,
+            w,
+            h,
+            conf: 0.9,
+        }
+    }
+
+    #[test]
+    fn snap_to_text_picks_the_matching_box() {
+        let boxes = vec![
+            box_at("Cancel", 10, 10, 60, 20),
+            box_at("Save", 100, 10, 60, 20),
+        ];
+        let (x, y) = snap_to_text(&boxes, "save", 130.0, 20.0, 120.0).expect("the Save box");
+        assert!((x - 130.0).abs() < 1e-6);
+        assert!((y - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn snap_to_text_ignores_a_box_that_does_not_match() {
+        let boxes = vec![box_at("Cancel", 10, 10, 60, 20)];
+        assert!(snap_to_text(&boxes, "save button", 40.0, 20.0, 120.0).is_none());
+    }
+
+    #[test]
+    fn snap_to_text_refuses_a_far_snap() {
+        // A distant box is worse than the model's own coordinates.
+        let boxes = vec![box_at("Save", 900, 800, 60, 20)];
+        assert!(snap_to_text(&boxes, "save", 20.0, 20.0, 120.0).is_none());
+    }
+
+    #[test]
+    fn snap_to_text_prefers_the_better_match_over_the_nearer_box() {
+        let boxes = vec![
+            box_at("Save As", 10, 10, 60, 20), // score 0.8
+            box_at("Save", 100, 10, 60, 20),   // score 1.0
+        ];
+        let (x, _) = snap_to_text(&boxes, "save", 40.0, 20.0, 120.0).expect("a snap");
+        assert!((x - 130.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn snap_to_text_of_nothing_is_nothing() {
+        assert!(snap_to_text(&[], "save", 10.0, 10.0, 120.0).is_none());
+    }
+
+    #[test]
+    fn snap_to_text_ignores_a_malformed_confidence() {
+        // Both engines produce 0..1 scores (Windows carries a fixed 1.0);
+        // anything else is a malformed reply and must not become a target.
+        let mut boxes = vec![box_at("Save", 100, 10, 60, 20)];
+        boxes[0].conf = f32::NAN;
+        assert!(snap_to_text(&boxes, "save", 130.0, 20.0, 120.0).is_none());
+        boxes[0].conf = 1.5;
+        assert!(snap_to_text(&boxes, "save", 130.0, 20.0, 120.0).is_none());
+        boxes[0].conf = 1.0;
+        assert!(snap_to_text(&boxes, "save", 130.0, 20.0, 120.0).is_some());
+    }
+}
