@@ -4,14 +4,16 @@
 //! that "scratch that" can take it back. Rules (each is a refusal reason that is spoken, never silent):
 //! - never type into a protected window (banking / password manager / crypto wallet, the denylist in
 //!   `live::safety`), into NEXUS's own windows, into an elevated window we cannot type into, or into
-//!   a password field;
+//!   a password field (on a native Wayland session the focused window cannot be identified, so that
+//!   rule cannot be enforced there — see `foreground_target`);
 //! - never press Enter on its own: utterances are joined with a space, line breaks only come from
 //!   the user saying "new line" / "new paragraph";
 //! - undo only when the same window is still in front, otherwise Ctrl+Z.
 //!
 //! On Linux there is one more case: a native Wayland window cannot be typed into at all (the
 //! synthetic key events never reach it), so the text goes on the clipboard and the user pastes it
-//! — see [`fallback_line`].
+//! — see [`fallback_line`]. Each utterance replaces the previous one there, so the clipboard holds
+//! the latest line only.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -191,7 +193,7 @@ pub enum Outcome {
     ///
     /// On Linux the text may have gone to the clipboard instead (a native
     /// Wayland window cannot be typed into), so the sentence can also be
-    /// "copied, paste it with Ctrl+V".
+    /// "copied to the clipboard — it holds only this last line".
     Refused(String),
 }
 
@@ -201,9 +203,10 @@ pub enum Outcome {
 /// `None` means "typing was the right delivery, so report the typing error";
 /// `Some(line)` is what to say instead.
 ///
-/// Pure, so the choice can be tested without a display. `clipboard` says
-/// whether the text could be put on the clipboard — the caller has already put
-/// it there when this is true.
+/// Pure, so the choice can be tested without a display, and shared by every
+/// platform so the decision lives in one place. `clipboard` says whether the
+/// text could be put on the clipboard — the caller has already put it there
+/// when this is true.
 pub fn fallback_line(session: &InputSession, clipboard: bool) -> Option<String> {
     if !session.display {
         return Some("There is no display, sir — I cannot type anything.".to_string());
@@ -213,8 +216,14 @@ pub fn fallback_line(session: &InputSession, clipboard: bool) -> Option<String> 
         return None;
     }
     if clipboard {
-        // The text is on the clipboard; the user pastes it.
-        Some("Copied to the clipboard, sir — paste it with Ctrl+V.".to_string())
+        // The text is on the clipboard; the user pastes it. Each utterance
+        // replaces the previous one, so the clipboard holds the latest line
+        // only — say so, rather than let the user paste a fragment and think
+        // the rest was lost.
+        Some(
+            "Copied to the clipboard, sir — it holds only this last line, so paste it with Ctrl+V."
+                .to_string(),
+        )
     } else {
         Some(
             "I cannot type into native Wayland windows, sir, and there is no clipboard to fall back on."
@@ -226,10 +235,15 @@ pub fn fallback_line(session: &InputSession, clipboard: bool) -> Option<String> 
 /// Dictation text that could not be typed: what to do about it.
 ///
 /// Windows and macOS: typing was supposed to work, so the failure is the
-/// news.
+/// news. The shared decision is still asked, so both platforms agree on what
+/// "the fallback is" — on these platforms it is never the clipboard.
 #[cfg(not(target_os = "linux"))]
 fn typing_failed(_text: &str, err: &str) -> Outcome {
-    Outcome::Refused(format!("Typing failed: {err}"))
+    let session = crate::live::commands::keyboard::current_session();
+    match fallback_line(&session, false) {
+        Some(line) => Outcome::Refused(line),
+        None => Outcome::Refused(format!("Typing failed: {err}")),
+    }
 }
 
 /// Dictation text that could not be typed: what to do about it.
@@ -376,10 +390,16 @@ fn foreground_target() -> Target {
 
 #[cfg(target_os = "linux")]
 fn foreground_target() -> Target {
-    // The foreground window is knowable on X11 (xdotool). On native Wayland
-    // there is no portable way to ask, so the title stays empty and the
-    // refusal gate has nothing to match against — which is why the Linux
-    // typing path is honest about what it can and cannot do.
+    // The foreground window title is knowable on X11 only (xdotool). On a
+    // native Wayland session there is no portable way to ask the compositor
+    // which window has the focus, so the title stays empty.
+    //
+    // Consequence, stated plainly: on native Wayland the protected-window
+    // gate does NOT work. `refusal()` has no title to match against
+    // `live::safety::DENIED_TARGETS`, so a dictated password into a native
+    // Wayland password manager is copied to the clipboard unrefused. The gate
+    // is real on X11; on Wayland it is an open limitation of this port, not a
+    // solved problem.
     let title = crate::browser_url::foreground_window_title().unwrap_or_default();
     Target { title, ..Default::default() }
 }
@@ -491,6 +511,10 @@ mod tests {
         let line = fallback_line(&s, true).expect("a spoken line");
         assert!(line.to_lowercase().contains("clipboard"), "{line}");
         assert!(line.to_lowercase().contains("paste"), "{line}");
+        // Each utterance replaces the previous one on the clipboard, so the
+        // line has to say so — otherwise the user pastes a fragment and
+        // thinks the rest was lost.
+        assert!(line.to_lowercase().contains("last line"), "{line}");
 
         // No clipboard: a clear error, never a silent no-op.
         let line = fallback_line(&s, false).expect("a spoken line");

@@ -16,6 +16,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use super::InputSession;
 
@@ -26,6 +28,17 @@ static XDOTOOL_MISSING: AtomicBool = AtomicBool::new(false);
 
 /// `wl-copy` is optional in the same way.
 static WLCOPY_MISSING: AtomicBool = AtomicBool::new(false);
+
+/// How long a focus answer is reused.
+///
+/// One dictated line is many key presses ("scratch that" over a 50-character
+/// line is 50 backspaces), and the focused window cannot change inside one
+/// utterance. Re-asking the X server per key press meant two `xdotool`
+/// spawns per key — a hundred processes for one undo.
+const FOCUS_TTL: Duration = Duration::from_millis(750);
+
+/// The last focus answer and when it was taken.
+static FOCUS_CACHE: Mutex<Option<(Instant, Option<bool>)>> = Mutex::new(None);
 
 /// The facts for the input decision, read from the session and the X server.
 pub fn current_session() -> InputSession {
@@ -40,7 +53,7 @@ pub fn current_session() -> InputSession {
         crate::session::SessionKind::Wayland => InputSession {
             display: true,
             wayland: true,
-            xwayland_focus: xwayland_focus(),
+            xwayland_focus: cached_xwayland_focus(),
         },
         // Neither WAYLAND_DISPLAY nor DISPLAY: nothing to type into.
         crate::session::SessionKind::Headless => InputSession {
@@ -49,6 +62,23 @@ pub fn current_session() -> InputSession {
             xwayland_focus: None,
         },
     }
+}
+
+/// The focus answer, reused for [`FOCUS_TTL`] so one dictated line does not
+/// spawn a process per key press.
+fn cached_xwayland_focus() -> Option<bool> {
+    if let Ok(g) = FOCUS_CACHE.lock() {
+        if let Some((at, answer)) = g.as_ref() {
+            if at.elapsed() < FOCUS_TTL {
+                return *answer;
+            }
+        }
+    }
+    let fresh = xwayland_focus();
+    if let Ok(mut g) = FOCUS_CACHE.lock() {
+        *g = Some((Instant::now(), fresh));
+    }
+    fresh
 }
 
 /// Is the focused window an XWayland (X11) window?
@@ -96,33 +126,46 @@ fn xwayland_focus() -> Option<bool> {
             return None;
         }
     };
-    let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if pid.is_empty() {
-        // The X focus sits on the root window: no X client is focused, so the
-        // Wayland focus is on a native window.
+    if !out.status.success() {
+        // xdotool exits non-zero for a window with no owning X client (the
+        // root window). That is the PointerRoot case: the X focus is on
+        // nothing, so a native Wayland window has it. Reading this as "there
+        // is an X client" would have sent the keys nowhere while we reported
+        // success.
         return Some(false);
     }
-    if pid.parse::<u32>().is_ok() {
-        return Some(true);
+    let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match pid.parse::<u32>() {
+        // A pid of 0 means "no owning client" as well, so it is not one.
+        Ok(p) if p > 0 => Some(true),
+        Ok(_) => Some(false),
+        // Garbage: we cannot tell.
+        Err(_) => None,
     }
-    None
 }
 
 /// Put text on the clipboard so the user can paste it.
 ///
-/// `arboard` first (it is already a dependency), then `wl-copy` when it is
-/// installed. Returns whether the text is on the clipboard.
+/// Returns whether the text really is on a clipboard the focused application
+/// reads, because that is what "paste it with Ctrl+V" promises.
 ///
-/// On a Wayland session `arboard` writes the XWayland clipboard, which native
-/// Wayland apps never read, so `wl-copy` — which owns the Wayland clipboard —
-/// is used there as well when it is installed. Without that, "paste it with
-/// Ctrl+V" would be a promise the paste cannot keep.
+/// On an X11 session `arboard` (already a dependency) writes the clipboard the
+/// applications read, and `wl-copy` is the fallback.
+///
+/// On a native Wayland session `arboard` writes the XWayland clipboard, which
+/// a native Wayland application never reads — so `wl-copy`, which owns the
+/// Wayland clipboard, is the only thing that makes the promise true. The one
+/// exception is a focused window that is itself an XWayland window: it reads
+/// the X11 clipboard, so there `arboard` does count.
 pub fn copy_to_clipboard(text: &str) -> bool {
-    let mut copied = arboard_copy(text);
-    if !copied || crate::session::is_wayland() {
-        copied = wl_copy(text) || copied;
+    let arboard_ok = arboard_copy(text);
+    if !crate::session::is_wayland() {
+        return arboard_ok || wl_copy(text);
     }
-    copied
+    if wl_copy(text) {
+        return true;
+    }
+    arboard_ok && cached_xwayland_focus() == Some(true)
 }
 
 /// Copy through `arboard` (the X11 clipboard; on a Wayland session this is the

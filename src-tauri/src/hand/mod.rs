@@ -1181,9 +1181,11 @@ mod tests {
     }
 
     #[test]
-    fn the_live_pointer_is_windows_only() {
-        // Every other platform stays an honest preview: the pointer must never
-        // be moved (or claimed to have been moved) where no input path exists.
-        assert_eq!(live_supported(), cfg!(target_os = "windows"));
+    #[cfg(not(target_os = "windows"))]
+    fn the_pointer_output_is_refused_on_this_platform() {
+        // Behavioural, not a restatement of a constant: the guard is what
+        // actually keeps a click from reaching the OS, and off Windows it
+        // must always refuse.
+        assert_eq!(guard_now().as_deref(), Some("hand mouse output is Windows-only"));
     }
 }
