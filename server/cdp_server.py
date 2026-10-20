@@ -81,6 +81,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -144,6 +145,19 @@ def inspector_main_target(port: int) -> dict | None:
         if isinstance(t, dict) and t.get("type") == "node" and t.get("webSocketDebuggerUrl"):
             return t
     return None
+
+
+def browser_ws_url(port: int) -> str | None:
+    """The BROWSER-level websocket for a DevTools port.
+
+    `Browser.getVersion` and `SystemInfo.getInfo` are browser-level domains:
+    a page session answers "domain not found" for them.
+    """
+    try:
+        data = _http_json(f"http://127.0.0.1:{port}/json/version")
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+    return data.get("webSocketDebuggerUrl") if isinstance(data, dict) else None
 
 
 def reachable() -> dict:
@@ -414,6 +428,32 @@ class Electron:
         v = await self.main_eval(_MAIN_LIST_RENDERERS)
         return v if isinstance(v, list) else []
 
+    async def app_name(self) -> str:
+        """The Electron application's own name ("Visual Studio Code").
+
+        The main process knows it; nothing else does. It is what proves that
+        an inspector port belongs to the application the user has in front.
+        """
+        v = await self.main_eval(
+            "process.mainModule.require('electron').app.getName()"
+        )
+        return str(v or "")
+
+    @staticmethod
+    def pick_renderer_info(rs: list[dict], target: str | None) -> dict | None:
+        """The renderer to act on, from the renderer's own list."""
+        if not rs:
+            return None
+        if target:
+            for r in rs:
+                if target in (r.get("url") or "") or target == (r.get("title") or ""):
+                    return r
+            return None
+        for r in rs:
+            if r.get("type") == "window":
+                return r
+        return rs[0]
+
     async def main_eval(self, body: str) -> Any:
         """Evaluate in the main process, awaiting promises and JSON round-tripping.
 
@@ -436,17 +476,8 @@ class Electron:
 
     async def pick_renderer(self, target: str | None) -> int | None:
         rs = await self.renderers()
-        if not rs:
-            return None
-        if target:
-            for r in rs:
-                if target in (r.get("url") or "") or target == (r.get("title") or ""):
-                    return r["id"]
-            return None
-        for r in rs:
-            if r.get("type") == "window":
-                return r["id"]
-        return rs[0]["id"]
+        r = self.pick_renderer_info(rs, target)
+        return r["id"] if r is not None else None
 
     async def ax(self, wcid: int) -> list[dict]:
         """Fetch the accessibility tree, warming it if the first read is partial.
@@ -499,6 +530,114 @@ class Electron:
         if not isinstance(v, dict) or v.get("error"):
             return {"ok": False, "error": (v or {}).get("error", "fill failed")}
         return {"ok": v.get("observed") == text, "observed": v.get("observed")}
+
+
+# ── Endpoint identity ───────────────────────────────────────────────────────
+#
+# The CDP tier is scoped by DEBUG PORT, not by application: it sees whichever
+# app holds the lowest reachable port. That is not enough — a background app
+# launched with --inspect would answer a click meant for the app in front, and
+# the assistant would report success for an action in an application the user
+# never referenced.
+#
+# So every endpoint reports WHO it is, and a request that names the expected
+# application is refused unless the endpoint proves it belongs to it.
+
+def _app_name_from_command_line(cmdline: str) -> str:
+    """The application name from a browser command line.
+
+    "/usr/bin/brave --remote-debugging-port=9222" -> "brave"
+    """
+    first = (cmdline or "").strip().split(" ")[0]
+    if not first:
+        return ""
+    base = first.replace("\\", "/").rsplit("/", 1)[-1]
+    return base.removesuffix(".exe").lower()
+
+
+def _name_tokens(name: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", (name or "").lower()) if t}
+
+
+def app_names_match(expected: str, actual: str) -> bool:
+    """Whether two application names can refer to the same application.
+
+    "Visual Studio Code" and "code" are the same application; "brave" and
+    "code" are not. A shared word is enough, and so is one name contained in
+    the other ("code" inside "vscode").
+
+    An empty name on either side never matches: an unidentified application
+    is not evidence of anything.
+    """
+    e, a = _name_tokens(expected), _name_tokens(actual)
+    if not e or not a:
+        return False
+    if e & a:
+        return True
+    en = re.sub(r"[^a-z0-9]+", "", (expected or "").lower())
+    an = re.sub(r"[^a-z0-9]+", "", (actual or "").lower())
+    return bool(en) and bool(an) and (en in an or an in en)
+
+
+def title_matches(foreground_title: str, target_title: str) -> bool:
+    """Whether the target's title belongs to the foreground window.
+
+    A browser window is titled "<page title> - <app>", so the target's title
+    is contained in the window title. Two empty titles cannot contradict each
+    other, so they match; a mismatch in either direction does not.
+    """
+    f = (foreground_title or "").strip().lower()
+    t = (target_title or "").strip().lower()
+    if not f or not t:
+        return True
+    return f == t or t in f or f in t
+
+
+async def chromium_identity(port: int, target: str | None) -> dict:
+    """Who a Chromium debug port belongs to."""
+    out = {"kind": "chromium", "app": "", "title": "", "url": "", "product": ""}
+    t = _pick_page_target(http_list(port), target)
+    if t is not None:
+        out["title"] = str(t.get("title") or "")
+        out["url"] = str(t.get("url") or "")
+    ws = browser_ws_url(port)
+    if ws:
+        try:
+            async with Cdp(ws) as c:
+                try:
+                    info = await c.call("SystemInfo.getInfo")
+                    out["app"] = _app_name_from_command_line(str(info.get("commandLine") or ""))
+                except CdpError:
+                    pass
+                if not out["app"]:
+                    ver = await c.call("Browser.getVersion")
+                    out["product"] = str(ver.get("product") or "")
+                    out["app"] = out["product"].split("/")[0].lower()
+        except CdpError:
+            pass
+    return out
+
+
+async def electron_identity(port: int, target: str | None) -> dict:
+    """Who an Electron inspector port belongs to."""
+    out = {"kind": "electron", "app": "", "title": "", "url": "", "product": ""}
+    try:
+        async with Electron(port) as e:
+            out["app"] = str(await e.app_name() or "")
+            r = Electron.pick_renderer_info(await e.renderers(), target)
+            if r is not None:
+                out["title"] = str(r.get("title") or "")
+                out["url"] = str(r.get("url") or "")
+    except CdpError:
+        pass
+    return out
+
+
+async def endpoint_identity(port: int, kind: str, target: str | None) -> dict:
+    """The identity of one endpoint, by kind."""
+    if kind == "electron":
+        return await electron_identity(port, target)
+    return await chromium_identity(port, target)
 
 
 # ── Matching ─────────────────────────────────────────────────────────────────
@@ -662,7 +801,17 @@ async def find(request: Request) -> JSONResponse:
 
 @app.post("/activate")
 async def activate(request: Request) -> JSONResponse:
-    """Invoke an element's click. No pixels, no compositor, no portal."""
+    """Invoke an element's click. No pixels, no compositor, no portal.
+
+    The request may name the application and the window title the caller
+    believes are in front (`app`, `title`). The endpoint then acts ONLY on a
+    debug port that PROVES it belongs to that same application: it refuses
+    with 409 when no reachable endpoint can prove it, and it reports the
+    identity it acted on so the caller can check it too.
+
+    Without those fields the behaviour is the old one (the first reachable
+    port) — but every current caller sends them.
+    """
     if not HAVE_WEBSOCKETS:
         return _err("websockets not installed", 503)
     body = await _json(request)
@@ -672,13 +821,39 @@ async def activate(request: Request) -> JSONResponse:
     role = body.get("role") or None
     port = int(body.get("port") or 0)
     target = body.get("target")
+    expected_app = str(body.get("app") or "").strip()
+    expected_title = str(body.get("title") or "").strip()
     r = await run_in_threadpool(reachable)
     ports = [port] if port else (r["direct_ports"] + r["electron_ports"])
     if not ports:
         return _err("no CDP endpoint reachable", 503)
 
+    # Pick the endpoint that belongs to the application in front. When the
+    # caller did not say which application that is, the first reachable port
+    # is used (the legacy behaviour).
+    chosen: int | None = None
+    identity: dict = {}
+    for p in ports:
+        kind = "chromium" if p in r["direct_ports"] else "electron"
+        ident = await endpoint_identity(p, kind, target)
+        if not expected_app:
+            chosen, identity = p, ident
+            break
+        if app_names_match(expected_app, str(ident.get("app") or "")) and title_matches(
+            expected_title, str(ident.get("title") or "")
+        ):
+            chosen, identity = p, ident
+            break
+    if chosen is None:
+        return _err(
+            "no reachable debug endpoint belongs to the application in front",
+            409,
+            expected_app=expected_app,
+            expected_title=expected_title,
+        )
+    p = chosen
+
     t0 = time.monotonic()
-    p = ports[0]
     try:
         if p in r["direct_ports"]:
             out = await direct_activate(p, target, name, role)
@@ -695,6 +870,7 @@ async def activate(request: Request) -> JSONResponse:
         return _err(out.get("error", "click failed"), 404, name=name,
                     available=out.get("availableButtons"))
     out["port"] = p
+    out["identity"] = identity
     out["latency_ms"] = int((time.monotonic() - t0) * 1000)
     return JSONResponse(out)
 

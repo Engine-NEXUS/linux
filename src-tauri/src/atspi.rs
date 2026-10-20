@@ -96,6 +96,11 @@ pub struct AtspiEffect {
     pub app: String,
     #[serde(default)]
     pub name: String,
+    /// The role of the node that was acted on. The client re-checks it
+    /// against the policy (a credential field is never an acceptable target)
+    /// before treating the action as done.
+    #[serde(default)]
+    pub role: String,
     #[serde(default)]
     pub action: String,
     #[serde(default)]

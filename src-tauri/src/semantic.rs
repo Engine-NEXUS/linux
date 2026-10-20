@@ -375,6 +375,76 @@ pub fn list_actionables() -> Result<Vec<SemanticHit>, SemanticError> {
     }
 }
 
+/// Whether two application names can refer to the same application.
+///
+/// "Visual Studio Code" and "code" are the same application; "brave" and
+/// "code" are not. A shared word is enough, and so is one name contained in
+/// the other ("code" inside "vscode").
+///
+/// An empty name on either side never matches: an unidentified application is
+/// not evidence of anything.
+pub fn app_names_match(expected: &str, actual: &str) -> bool {
+    fn tokens(name: &str) -> Vec<String> {
+        name.to_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect()
+    }
+    let e = tokens(expected);
+    let a = tokens(actual);
+    if e.is_empty() || a.is_empty() {
+        return false;
+    }
+    if e.iter().any(|t| a.contains(t)) {
+        return true;
+    }
+    let en: String = expected.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let an: String = actual.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    !en.is_empty() && !an.is_empty() && (en.contains(&an) || an.contains(&en))
+}
+
+/// Whether a target's title belongs to the foreground window.
+///
+/// A browser window is titled "<page title> — <app>", so the target's title
+/// is contained in the window title. Two empty titles cannot contradict each
+/// other, so they match; a mismatch in either direction does not.
+pub fn title_matches(foreground_title: &str, target_title: &str) -> bool {
+    let f = foreground_title.trim().to_lowercase();
+    let t = target_title.trim().to_lowercase();
+    if f.is_empty() || t.is_empty() {
+        return true;
+    }
+    f == t || t.contains(&f) || f.contains(&t)
+}
+
+/// Whether a CDP endpoint may act on the observed foreground application.
+///
+/// The rule is **fail-closed**. The CDP tier is scoped by DEBUG PORT, not by
+/// application: it sees whichever app holds the lowest reachable port, and a
+/// background app launched with `--inspect` would answer a click meant for the
+/// app in front. So the endpoint has to PROVE three things:
+///
+/// 1. it is a Chromium or Electron endpoint (the only kinds that exist here,
+///    and the only ones whose AT-SPI tree is a skeleton);
+/// 2. it belongs to the observed foreground application;
+/// 3. the target it is showing is the foreground window.
+///
+/// Anything it cannot prove is a refusal.
+pub fn cdp_identity_matches_foreground(
+    foreground_app: &str,
+    foreground_title: &str,
+    id: &crate::cdp::CdpEndpointIdentity,
+) -> bool {
+    if id.kind != "chromium" && id.kind != "electron" {
+        return false;
+    }
+    if !app_names_match(foreground_app, &id.app) {
+        return false;
+    }
+    title_matches(foreground_title, &id.title)
+}
+
 /// Actuate a named element through the semantic tiers.
 ///
 /// Unlike [`resolve`], this needs no geometry: the element is addressed by
@@ -387,10 +457,13 @@ pub fn list_actionables() -> Result<Vec<SemanticHit>, SemanticError> {
 /// is in front — which is an action in an application the user never
 /// referenced.
 ///
-/// AT-SPI first (it is the tier that works everywhere), then CDP for
-/// Chromium/Electron, whose AT-SPI tree is a skeleton. The CDP tier is scoped
-/// by debug port rather than by application — it can only see the browser it
-/// is attached to.
+/// AT-SPI first (it is the tier that works everywhere). The CDP tier is the
+/// only one that can see a Chromium/Electron app's controls (their AT-SPI tree
+/// is a skeleton), so it is offered as a fallback — but ONLY to an endpoint
+/// that PROVES it belongs to the application in front: the server reports the
+/// endpoint's own identity and refuses with 409 when it does not match, and
+/// the identity is re-checked here before the action is reported as done.
+/// When it cannot be proven, the caller gets the AT-SPI refusal.
 pub fn activate(name: &str, role: Option<&str>) -> Result<ActivationOutcome, SemanticError> {
     let fg = observed_foreground();
 
@@ -403,6 +476,7 @@ pub fn activate(name: &str, role: Option<&str>) -> Result<ActivationOutcome, Sem
                 .to_string(),
         ));
     };
+    let title = fg.title().unwrap_or_default().to_string();
 
     match decision_for(crate::policy::Op::Activate, &fg) {
         d if d.may_proceed_unattended() => {}
@@ -413,24 +487,68 @@ pub fn activate(name: &str, role: Option<&str>) -> Result<ActivationOutcome, Sem
 
     let want = name.to_string();
     let want_role = role.map(|r| r.to_string());
+    let expect = crate::cdp::CdpExpectation {
+        app: app.clone(),
+        title: title.clone(),
+    };
     let outcome = run_isolated(move || async move {
         match crate::atspi::activate(&want, Some(app.as_str()), want_role.as_deref(), "click").await {
-            Ok(effect) => Ok(ActivationOutcome {
-                tier: Tier::AtSpi,
-                app: effect.app,
-                name: effect.name,
-                ok: effect.ok,
-            }),
+            Ok(effect) => {
+                // The role comes back with the node: re-check it here before
+                // the action is reported as done. The server refuses credential
+                // roles too — this is the same rule on this side.
+                if crate::policy::classify_node(&effect.role, &effect.name).is_some() {
+                    return Err("refusing to act on a credential field".to_string());
+                }
+                Ok(ActivationOutcome {
+                    tier: Tier::AtSpi,
+                    app: effect.app,
+                    name: effect.name,
+                    ok: effect.ok,
+                })
+            }
             Err(e) => {
-                tracing::info!("semantic: AT-SPI could not activate ({e}) — trying CDP");
-                match crate::cdp::activate(&want, want_role.as_deref(), None).await {
-                    Ok(effect) => Ok(ActivationOutcome {
-                        tier: Tier::Cdp,
-                        app: String::new(),
-                        name: effect.name,
-                        ok: effect.ok,
-                    }),
-                    Err(e) => Err(e),
+                // The AT-SPI tier cannot see a Chromium/Electron app's
+                // controls, so the CDP tier is the only one that can. It is
+                // offered ONLY to an endpoint that proves it belongs to the
+                // application in front.
+                match crate::cdp::activate(&want, want_role.as_deref(), None, Some(&expect)).await {
+                    Ok(effect) => {
+                        let Some(id) = effect.identity.as_ref() else {
+                            return Err(
+                                "the debug endpoint did not prove which application it belongs to"
+                                    .to_string(),
+                            );
+                        };
+                        if !cdp_identity_matches_foreground(&expect.app, &expect.title, id) {
+                            return Err(
+                                "the debug endpoint belongs to a different application".to_string()
+                            );
+                        }
+                        if crate::policy::classify_node(&effect.role, &effect.name).is_some() {
+                            return Err("refusing to act on a credential field".to_string());
+                        }
+                        tracing::info!(
+                            "semantic: the CDP tier acted on {} ({})",
+                            id.app,
+                            id.url
+                        );
+                        Ok(ActivationOutcome {
+                            tier: Tier::Cdp,
+                            app: id.app.clone(),
+                            name: effect.name,
+                            ok: effect.ok,
+                        })
+                    }
+                    Err(cdp_err) => {
+                        // Neither tier could act on the foreground
+                        // application. The refusal the caller hears is the
+                        // semantic one.
+                        tracing::info!(
+                            "semantic: the CDP tier declined ({cdp_err}) — the AT-SPI refusal stands"
+                        );
+                        Err(e)
+                    }
                 }
             }
         }
@@ -636,5 +754,92 @@ mod tests {
         let e = SemanticError::Unavailable("no a11y bus".into());
         assert!(e.spoken().contains("no a11y bus"));
         assert!(!e.spoken().is_empty());
+    }
+
+    // ── The CDP identity rule (fail-closed) ──────────────────────────────
+
+    fn endpoint(kind: &str, app: &str, title: &str) -> crate::cdp::CdpEndpointIdentity {
+        crate::cdp::CdpEndpointIdentity {
+            kind: kind.into(),
+            app: app.into(),
+            title: title.into(),
+            url: "https://example.com/".into(),
+        }
+    }
+
+    #[test]
+    fn app_names_match_across_spellings() {
+        assert!(app_names_match("code", "Visual Studio Code"));
+        assert!(app_names_match("Visual Studio Code", "code"));
+        assert!(app_names_match("brave", "brave"));
+        assert!(app_names_match("code", "vscode"));
+    }
+
+    #[test]
+    fn app_names_do_not_match_across_applications() {
+        assert!(!app_names_match("brave", "code"));
+        assert!(!app_names_match("code", "brave-browser"));
+    }
+
+    #[test]
+    fn an_unnamed_application_never_matches() {
+        // An unidentified application is not evidence of anything.
+        assert!(!app_names_match("", "brave"));
+        assert!(!app_names_match("brave", ""));
+        assert!(!app_names_match("", ""));
+    }
+
+    #[test]
+    fn title_matches_when_the_target_title_is_inside_the_window_title() {
+        assert!(title_matches("GitHub — Brave", "GitHub"));
+        assert!(title_matches("GitHub", "GitHub"));
+        assert!(title_matches("main.rs - nexus - Visual Studio Code", "main.rs - nexus"));
+    }
+
+    #[test]
+    fn title_matches_refuses_a_different_target() {
+        assert!(!title_matches("GitHub — Brave", "GitHub - Notifications"));
+    }
+
+    #[test]
+    fn an_empty_title_cannot_contradict_itself() {
+        assert!(title_matches("", "GitHub"));
+        assert!(title_matches("GitHub — Brave", ""));
+    }
+
+    #[test]
+    fn a_cdp_endpoint_may_act_only_when_it_proves_the_same_application() {
+        let id = endpoint("chromium", "brave", "GitHub");
+        assert!(cdp_identity_matches_foreground("brave", "GitHub — Brave", &id));
+    }
+
+    #[test]
+    fn a_cdp_endpoint_of_another_application_may_not_act() {
+        // The failure the audit found: a background VS Code holding a debug
+        // port, while Brave is in front.
+        let id = endpoint("chromium", "code", "main.rs — nexus");
+        assert!(!cdp_identity_matches_foreground("brave", "GitHub — Brave", &id));
+    }
+
+    #[test]
+    fn a_cdp_endpoint_of_an_unknown_kind_may_not_act() {
+        let id = endpoint("something-else", "brave", "GitHub");
+        assert!(!cdp_identity_matches_foreground("brave", "GitHub — Brave", &id));
+    }
+
+    #[test]
+    fn a_cdp_endpoint_showing_another_window_may_not_act() {
+        let id = endpoint("chromium", "brave", "GitHub - Notifications");
+        assert!(!cdp_identity_matches_foreground("brave", "GitHub — Brave", &id));
+    }
+
+    #[test]
+    fn an_electron_endpoint_may_act_for_its_own_application() {
+        let id = endpoint("electron", "Visual Studio Code", "main.rs — nexus");
+        assert!(cdp_identity_matches_foreground(
+            "code",
+            "main.rs — nexus - Visual Studio Code",
+            &id
+        ));
     }
 }

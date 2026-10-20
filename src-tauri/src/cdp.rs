@@ -71,6 +71,43 @@ pub struct CdpEffect {
     pub threw: bool,
     #[serde(default)]
     pub observed: Option<String>,
+    /// The identity of the endpoint that acted. The server reports it so the
+    /// caller can check that it really was the application in front.
+    #[serde(default)]
+    pub identity: Option<CdpEndpointIdentity>,
+}
+
+/// The identity of a CDP endpoint, as the server reports it.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct CdpEndpointIdentity {
+    /// "chromium" or "electron" — the server knows which kind of endpoint it
+    /// is (an Electron inspector port answers to the Node main process, a
+    /// direct port to a page target).
+    #[serde(default)]
+    pub kind: String,
+    /// The application the endpoint belongs to ("brave", "Visual Studio Code").
+    #[serde(default)]
+    pub app: String,
+    /// The target's window/page title.
+    #[serde(default)]
+    pub title: String,
+    /// The target's URL.
+    #[serde(default)]
+    pub url: String,
+}
+
+/// What the caller believes is in front.
+///
+/// The CDP tier is scoped by DEBUG PORT, not by application: it sees
+/// whichever app holds the lowest reachable port. These two fields let the
+/// server refuse an endpoint that does not belong to the application the user
+/// is actually looking at.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CdpExpectation {
+    /// The observed foreground application.
+    pub app: String,
+    /// The observed foreground window title.
+    pub title: String,
 }
 
 /// Which debug endpoints are live.
@@ -175,7 +212,18 @@ pub async fn find(
 }
 
 /// Click an element by accessible name. No pixels, no compositor, no portal.
-pub async fn activate(name: &str, role: Option<&str>, port: Option<u16>) -> Result<CdpEffect, String> {
+///
+/// `expect` names the application and window title the caller believes are in
+/// front. The server then acts ONLY on a debug port that PROVES it belongs to
+/// that application, and refuses with 409 when none does — so a click meant
+/// for the window in front can never land in a background app that happens to
+/// hold a debug port.
+pub async fn activate(
+    name: &str,
+    role: Option<&str>,
+    port: Option<u16>,
+    expect: Option<&CdpExpectation>,
+) -> Result<CdpEffect, String> {
     crate::lazy_cdp::ensure_cdp_running();
     crate::lazy_cdp::mark_cdp_request();
 
@@ -185,6 +233,10 @@ pub async fn activate(name: &str, role: Option<&str>, port: Option<u16>) -> Resu
     }
     if let Some(p) = port {
         body["port"] = serde_json::json!(p);
+    }
+    if let Some(e) = expect {
+        body["app"] = serde_json::json!(e.app);
+        body["title"] = serde_json::json!(e.title);
     }
 
     let resp = client()?
@@ -197,6 +249,13 @@ pub async fn activate(name: &str, role: Option<&str>, port: Option<u16>) -> Resu
     match resp.status().as_u16() {
         200 => {}
         404 => return Err(format!("no clickable element named {name:?}")),
+        409 => {
+            // The endpoint could not prove it belongs to the application in
+            // front. This is a refusal, not a transport failure.
+            return Err(format!(
+                "the debug endpoint does not belong to the application in front ({name:?})"
+            ));
+        }
         503 => return Err("no CDP endpoint reachable".into()),
         s => return Err(format!("cdp HTTP {s}")),
     }

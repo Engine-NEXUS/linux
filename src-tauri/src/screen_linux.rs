@@ -72,6 +72,56 @@ pub fn list_actionables() -> Vec<UiElement> {
     }
 }
 
+/// The ONE rule for "is this element actionable?", shared by the click path
+/// and the inspect path.
+///
+/// * a **credential field** is never actionable — the policy layer knows these
+///   by their ROLE (a password entry says so), which a name-based check cannot
+///   be trusted to catch;
+/// * the element must be **enabled** (the toolkit reports no
+///   STATE_ENABLED / STATE_SENSITIVE for an insensitive widget);
+/// * it must be **shown** — the sidecar reports STATE_SHOWING for a widget
+///   that is actually RENDERED. A widget scrolled out of a viewport, or
+///   inside a collapsed container, is still laid out (GTK gives it real
+///   extents, so `extents_of` accepts them) but it is not shown: it cannot
+///   be clicked, and offering it as "the 3rd option" sends the pointer into
+///   the void. The sidecar does not report STATE_VISIBLE, so the ABSENCE of
+///   "showing" is the signal. A toolkit that reports no states at all is not
+///   disqualifying every element;
+/// * it must be something the toolkit can act on: it exposes an action, or it
+///   is an editable field (a text field is a legitimate click target). The
+///   server applies the same rule; repeating it here keeps the guarantee on
+///   this side of the wire;
+/// * and the shared acceptance rule (`screen::accept_actionable`) has the
+///   last word: named, sized, not a password field by name.
+pub fn is_actionable_hit(h: &crate::semantic::SemanticHit) -> bool {
+    if crate::policy::classify_node(&h.role, &h.name).is_some() {
+        return false;
+    }
+    let Some(b) = h.bounds else { return false };
+    if !b.is_real() {
+        return false;
+    }
+    let enabled = h.states.is_empty()
+        || h
+            .states
+            .iter()
+            .any(|s| s.as_str() == "enabled" || s.as_str() == "sensitive");
+    let offscreen = !h.states.is_empty() && !h.states.iter().any(|s| s.as_str() == "showing");
+    let actionable = !h.actions.is_empty()
+        || h.states.iter().any(|s| s.as_str() == "editable");
+    if !actionable {
+        return false;
+    }
+    if h.chromium_skeleton_risk {
+        // A Chromium/Electron tree is a skeleton unless the renderer was
+        // launched with --force-renderer-accessibility, so this element may
+        // be all this tier can see of that application.
+        tracing::debug!("screen: {:?} comes from a Chromium/Electron tree", h.name);
+    }
+    crate::screen::accept_actionable(enabled, offscreen, &h.name, b.w, b.h)
+}
+
 /// The actionable elements of the foreground window, with the refusal reason.
 ///
 /// The reason matters: "I could not identify the window" and "this window has
@@ -90,56 +140,30 @@ pub fn list_actionables_with_reason() -> Result<Vec<UiElement>, String> {
 
 /// Turn semantic hits into the actionable list, in reading order.
 ///
-/// Pure, so the rules are unit-tested without a live accessibility bus:
-///
-/// * a **credential field** is never a candidate — the policy layer knows
-///   these by their ROLE (a password entry says so), which a name-based
-///   check cannot be trusted to catch;
-/// * the **acceptance rule** is the same one the Windows path uses
-///   (`screen::accept_actionable`): enabled, on screen, named, sized, and not
-///   a password field by name;
-/// * the result is in **reading order**, so "the 3rd button" is the 3rd
-///   button the user sees rather than the 3rd node in the tree.
+/// Pure, so the rules are unit-tested without a live accessibility bus.
 pub fn to_actionable_list(hits: Vec<crate::semantic::SemanticHit>) -> Vec<UiElement> {
-    let mut out: Vec<UiElement> = Vec::new();
-    for h in hits {
-        if crate::policy::classify_node(&h.role, &h.name).is_some() {
-            continue;
-        }
-        let Some(b) = h.bounds else { continue };
-        if !b.is_real() {
-            continue;
-        }
-        // The toolkit's state set is its own verdict on the element:
-        //   STATE_ENABLED / STATE_SENSITIVE — the widget responds to input.
-        //   STATE_VISIBLE without STATE_SHOWING — the widget is laid out but
-        //   not rendered (scrolled out of view, or in a collapsed container):
-        //   it cannot be clicked, and offering it as "the 3rd option" sends
-        //   the pointer into the void.
-        // A toolkit that reports no states at all is not disqualifying every
-        // element, so both checks only fire on a positive marker.
-        let enabled = h.states.is_empty()
-            || h
-                .states
-                .iter()
-                .any(|s| s.as_str() == "enabled" || s.as_str() == "sensitive");
-        let offscreen = h.states.iter().any(|s| s.as_str() == "visible")
-            && !h.states.iter().any(|s| s.as_str() == "showing");
-        if !crate::screen::accept_actionable(enabled, offscreen, &h.name, b.w, b.h) {
-            continue;
-        }
-        out.push(UiElement {
-            name: h.name,
-            // The role is the Linux equivalent of the Windows UIA
-            // control type, so downstream filtering on `kind` works.
-            kind: h.role,
-            x: b.x,
-            y: b.y,
-            w: b.w,
-            h: b.h,
-        });
+    let kept: Vec<crate::semantic::SemanticHit> =
+        hits.into_iter().filter(is_actionable_hit).collect();
+    let els: Vec<UiElement> = kept.iter().filter_map(ui_element).collect();
+    crate::screen::sort_reading_order(els)
+}
+
+/// The shared element shape for one hit, when it has usable geometry.
+pub fn ui_element(h: &crate::semantic::SemanticHit) -> Option<UiElement> {
+    let b = h.bounds?;
+    if !b.is_real() {
+        return None;
     }
-    crate::screen::sort_reading_order(out)
+    Some(UiElement {
+        name: h.name.clone(),
+        // The role is the Linux equivalent of the Windows UIA
+        // control type, so downstream filtering on `kind` works.
+        kind: h.role.clone(),
+        x: b.x,
+        y: b.y,
+        w: b.w,
+        h: b.h,
+    })
 }
 
 /// Find an element by name through the semantic cascade.
@@ -580,14 +604,25 @@ mod tests {
 
     #[test]
     fn an_element_that_is_not_shown_is_not_offered() {
-        // Laid out (VISIBLE) but not rendered (no SHOWING): scrolled out of
-        // view or inside a collapsed container. It cannot be clicked.
+        // The sidecar reports STATE_SHOWING for a widget that is actually
+        // rendered. A widget scrolled out of a viewport still has real
+        // extents, so only the missing "showing" marks it as unclickable.
         let els = to_actionable_list(vec![
-            hit("Hidden", "push button", 10, 10, &["enabled", "sensitive", "visible"]),
-            hit("Shown", "push button", 10, 100, &["enabled", "sensitive", "visible", "showing"]),
+            hit("Hidden", "push button", 10, 10, &["enabled", "sensitive"]),
+            hit("Shown", "push button", 10, 100, &["enabled", "sensitive", "showing"]),
         ]);
         assert_eq!(els.len(), 1);
         assert_eq!(els[0].name, "Shown");
+    }
+
+    #[test]
+    fn an_element_with_no_reported_states_is_not_judged_off_screen() {
+        // A toolkit that reports nothing must not disqualify every element.
+        let els = to_actionable_list(vec![
+            hit("Save", "push button", 10, 10, &[]),
+        ]);
+        assert_eq!(els.len(), 1);
+        assert_eq!(els[0].name, "Save");
     }
 
     #[test]

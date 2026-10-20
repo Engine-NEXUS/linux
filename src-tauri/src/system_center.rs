@@ -225,22 +225,31 @@ pub fn inspect_window_native(_title_query: Option<&str>) -> Value {
 /// the policy gate exactly like every other semantic read. An unidentified
 /// window is refused rather than reported as "no controls" — those are very
 /// different answers, and only one of them is safe to act on.
+///
+/// The list is filtered through the **same rule** the click path uses
+/// (`screen::is_actionable_hit`, the predicate `to_actionable_list` applies),
+/// so a credential field is never offered as an actionable item here either.
 #[cfg(target_os = "linux")]
 pub fn inspect_window_semantic() -> Value {
     match crate::semantic::list_actionables() {
         Ok(hits) => {
+            let hits: Vec<crate::semantic::SemanticHit> = hits
+                .into_iter()
+                .filter(crate::screen::is_actionable_hit)
+                .collect();
             let elements: Vec<Value> = hits
                 .iter()
                 .map(|h| {
                     json!({
                         "name": h.name,
                         "role": h.role,
-                        "tier": h.tier.as_str(),
                         "actions": h.actions,
+                        "tier": h.tier.as_str(),
                         "bounds": h.bounds.map(|b| json!({
                             "left": b.x, "top": b.y, "width": b.w, "height": b.h
                         })).unwrap_or(Value::Null),
                         "center": h.center().map(|(x, y)| json!({"x": x, "y": y})).unwrap_or(Value::Null),
+                        "skeleton_risk": h.chromium_skeleton_risk,
                     })
                 })
                 .collect();

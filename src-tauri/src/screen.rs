@@ -348,8 +348,9 @@ mod screen_linux;
 // pre-capture privacy gate.
 #[cfg(target_os = "linux")]
 pub use screen_linux::{
-    capture_jpeg_base64, capture_png_blocking, find_by_name, list_actionables,
-    list_actionables_with_reason, primary_monitor_size,
+    capture_jpeg_base64, capture_png_blocking, find_by_name, is_actionable_hit,
+    list_actionables, list_actionables_with_reason, primary_monitor_size, to_actionable_list,
+    ui_element,
 };
 
 /// Switch browser tab by index (1-based): Ctrl+1..8, Ctrl+9 = last.

@@ -90,3 +90,29 @@ def test_cosmic_detection_is_case_insensitive():
         assert atspi_server.is_cosmic_session() is True
     finally:
         os.environ.pop("XDG_CURRENT_DESKTOP", None)
+
+
+# ── Credential roles: never actuated ────────────────────────────────────────
+
+
+def test_a_password_entry_is_a_credential_role():
+    # The role is the trustworthy signal: a vault that renames its window
+    # still renders a "password text" role.
+    assert atspi_server.is_credential_role("password text")
+    assert atspi_server.is_credential_role("Password Text")
+    assert atspi_server.is_credential_role("otp input")
+    assert atspi_server.is_credential_role("pin entry")
+    assert atspi_server.is_credential_role("secure text")
+
+
+def test_an_ordinary_control_is_not_a_credential_role():
+    assert not atspi_server.is_credential_role("push button")
+    assert not atspi_server.is_credential_role("text")
+    assert not atspi_server.is_credential_role("entry")
+    assert not atspi_server.is_credential_role("")
+
+
+def test_a_renamed_password_field_is_still_caught():
+    # A field merely NAMED "Password" is not caught by the role rule — and
+    # must not be: the name is attacker-controlled, the role is not.
+    assert not atspi_server.is_credential_role("text")

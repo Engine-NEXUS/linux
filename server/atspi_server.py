@@ -857,6 +857,27 @@ class WindowIdentity(NamedTuple):
     title: str
 
 
+# Roles that must never be actuated.
+#
+# A password entry is an EDITABLE node, so the "actionable" filter offers it —
+# and a click on a password field is an action on a secret. The rule is the
+# role, not the name: a vault that renames its window still renders a
+# "password text" role. Mirrors `policy::CREDENTIAL_ROLES` in the Rust tree.
+CREDENTIAL_ROLES: tuple[str, ...] = (
+    "password text",
+    "password",
+    "otp input",
+    "pin entry",
+    "secure text",
+)
+
+
+def is_credential_role(role: str) -> bool:
+    """Whether an element's role denotes a credential field."""
+    r = (role or "").lower()
+    return any(r == c or c in r for c in CREDENTIAL_ROLES)
+
+
 def is_cosmic_session() -> bool:
     """True on the COSMIC desktop (Pop!_OS)."""
     desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
@@ -1251,6 +1272,22 @@ def _activate_blocking(name: str, role: str | None, app_name: str | None, action
         return _err(f"not found: {name}", 404, name=name)
     root, node = hit if isinstance(hit, tuple) else (hit, hit)
 
+    # The matched node's ROLE, checked before anything is actuated. A password
+    # entry is an editable node, so it passes the "actionable" filter, and a
+    # click on a credential field is an action on a secret. The role is the
+    # trustworthy signal: a vault that renames its window still renders a
+    # "password text" role.
+    node_role = _safe(lambda n=node: n.get_role_name(), "") or ""
+    if is_credential_role(node_role):
+        log.warning("activate %r refused: credential role %r", name, node_role)
+        return _err(
+            "refusing to act on a credential field",
+            409,
+            role=node_role,
+            name=name,
+            app=_safe(lambda a=root: a.get_name(), "") or "",
+        )
+
     target = find_invokeable(node, action)
     if target is None:
         # GtkMenuButton exposes an outer button with NActions=0 and the real
@@ -1261,7 +1298,7 @@ def _activate_blocking(name: str, role: str | None, app_name: str | None, action
             409,
             requested=action,
             available=action_names(node),
-            role=_safe(lambda n=node: n.get_role_name(), "") or "",
+            role=node_role,
             app=_safe(lambda a=root: a.get_name(), "") or "",
             hint="Chromium/Electron expose actions as 'doDefault'; try action=doDefault",
         )
@@ -1285,6 +1322,9 @@ def _activate_blocking(name: str, role: str | None, app_name: str | None, action
         "ok": ok,
         "app": _safe(lambda a=root: a.get_name(), "") or "",
         "name": name,
+        # The matched node's role, so the client can re-check it against the
+        # policy before treating the action as done.
+        "role": _safe(lambda n=target: n.get_role_name(), "") or "",
         "action": names[idx] if ok and idx < len(names) else action,
         "states_before": before,
         "states_after": after,
