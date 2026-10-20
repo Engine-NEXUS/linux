@@ -43,6 +43,18 @@ import {
   revokeProfileCascade, revokeDevice, setEntitlement, listProfileEvents,
   type AdminBody,
 } from "./admin";
+// SECURITY (Linux port J1): the deny-by-default device gate. `auth.ts` was
+// written against a `user_devices` table the branch dropped; it is re-pointed
+// at the Feature-88 `devices` table (see the header comment there).
+import {
+  authenticateDevice,
+  consumeOAuthState,
+  corsHeaders,
+  createOAuthState,
+  isPublicRoute,
+  parseAllowedOrigins,
+  resolveAuthUserId,
+} from "./auth";
 // NOTE: ./models was deleted (audit M3) — it was imported but every symbol
 // was shadowed by local consts below, so edits to it silently did nothing.
 
@@ -63,6 +75,7 @@ interface Env {
   NEXUS_ADMIN_TOKEN?: string;  // gates POST /models/nlu/publish
   NEXUS_ADMIN_IDENTITY_TOKEN?: string;  // gates /v1/admin/* (Feature 88, W2)
   MIGRATION_MODE?: string;     // identity migration: off | strict | revoke-legacy (Feature 88)
+  ALLOWED_ORIGINS?: string;    // extra CORS origins, comma-separated (Linux port J1)
 }
 
 // ---- OAuth configuration ----
@@ -1848,22 +1861,61 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
+    // SECURITY (Linux port J1): the request origin is REFLECTED, never "*",
+    // and only when it is on the allowlist. `Access-Control-Allow-Origin: *`
+    // let any web page read the token routes cross-origin. `Vary: Origin` is
+    // always set so a shared cache never serves one origin's response to
+    // another. CORS is not authentication — the device gate below is.
+    const cors = corsHeaders(
+      request.headers.get("Origin"),
+      parseAllowedOrigins(env.ALLOWED_ORIGINS),
+    );
+
     const json = (data: unknown, status = 200) =>
       new Response(JSON.stringify(data), {
         status,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        headers: { "Content-Type": "application/json", ...cors },
       });
 
     // ---- CORS preflight ----
     if (method === "OPTIONS") {
       return new Response(null, {
         headers: {
-          "Access-Control-Allow-Origin": "*",
+          ...cors,
           "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Nexus-Device-Token",
+          "Access-Control-Max-Age": "600",
         },
       });
     }
+
+    // ---- Deny-by-default device gate ----
+    //
+    // SECURITY (Linux port J1): before this, the admin plane was the only
+    // gated surface and the three routes that return live OAuth access tokens
+    // were not gated at all — `?user_id=X` was the only thing standing between
+    // a stranger and somebody's Gmail, Calendar and private-repo token.
+    //
+    // Anything not on the public allowlist now requires a valid device
+    // credential. `/models/nlu/publish` and `/v1/admin/*` keep their own
+    // admin-token gate and are reached before this check.
+    //
+    // `authUserId` is the ONLY user identity a handler below is allowed to
+    // trust. A `user_id` query parameter or body field is a routing hint,
+    // never an authorization input — that was the root cause of the leak.
+    let authUserId: string | null = null;
+    if (!isPublicRoute(method, path)) {
+      const auth = await authenticateDevice(request, env, json);
+      if ("error" in auth) return auth.error;
+      // Transition: a client may still send `user_id` alongside its bearer
+      // during the grace period. The id is ignored; the device decides.
+      authUserId = resolveAuthUserId(auth.device, url.searchParams.get("user_id"));
+    }
+    /** Handlers call this instead of reading `user_id` off the request. */
+    const requireAuthUserId = (): string | Response => {
+      if (!authUserId) return json({ error: "unauthorized" }, 401);
+      return authUserId;
+    };
 
     // ---- Health ----
     if (path === "/health" && method === "GET") {
@@ -2013,31 +2065,44 @@ export default {
       return json({ error: "not found" }, 404);
     }
 
-    // ---- User registration ----
     // ---- OAuth: get auth URL ----
     if (path === "/oauth/auth-url" && method === "GET") {
-      return handleAuthUrl(url, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleAuthUrl(url, env, json, userId);
     }
 
-    // ---- OAuth: browser callback (for testing — exchanges code automatically) ----
+    // ---- OAuth: browser callback (the provider redirects the browser here) ----
+    // Public on purpose: the browser cannot attach a device credential. It is
+    // protected by the single-use, hashed, TTL-bound `state` instead.
     if (path === "/oauth/callback" && method === "GET") {
       return handleOAuthBrowserCallback(url, env, json);
     }
 
     // ---- OAuth: exchange code for tokens ----
     if (path === "/oauth/exchange" && method === "POST") {
-      return handleOAuthExchange(request, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleOAuthExchange(request, env, json, userId);
     }
 
     // ---- OAuth: status ----
     if (path === "/oauth/status" && method === "GET") {
-      return handleOAuthStatus(url, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleOAuthStatus(userId, env, json);
     }
 
     // ---- OAuth: get github token (for architect) ----
+    //
+    // SECURITY (Linux port J1): these three endpoints used to key purely on
+    // `?user_id=`, returning a live access token to anyone who supplied a
+    // string. The user is now taken from the authenticated device.
+    // `user_id` is no longer read from the query at all — a device can only
+    // ever mint a token for the account it registered as.
     if (path === "/oauth/github-token" && method === "GET") {
-      const userId = url.searchParams.get("user_id") || "";
-      if (!userId) return json({ error: "user_id required" }, 400);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
       const token = await getValidGithubToken(env, userId);
       if (!token) return json({ error: "GitHub not connected" }, 404);
       return json({ token });
@@ -2046,8 +2111,8 @@ export default {
     // ---- OAuth: get google token (for MCP vault: Gmail/Calendar/
     // Contacts/Drive/Sheets/Meet — one union consent, refreshed here) ----
     if (path === "/oauth/google-token" && method === "GET") {
-      const userId = url.searchParams.get("user_id") || "";
-      if (!userId) return json({ error: "user_id required" }, 400);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
       const token = await getValidGoogleToken(env, userId);
       if (!token) return json({ error: "Google not connected" }, 404);
       return json({ token });
@@ -2055,8 +2120,8 @@ export default {
 
     // ---- OAuth: get swiggy token (for MCP vault — silently refreshed) ----
     if (path === "/oauth/swiggy-token" && method === "GET") {
-      const userId = url.searchParams.get("user_id") || "";
-      if (!userId) return json({ error: "user_id required" }, 400);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
       const token = await getValidSwiggyToken(env, userId);
       if (!token) return json({ error: "Swiggy not connected" }, 404);
       return json({ token });
@@ -2064,22 +2129,30 @@ export default {
 
     // ---- OAuth: disconnect ----
     if (path === "/oauth/disconnect" && method === "DELETE") {
-      return handleOAuthDisconnect(request, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleOAuthDisconnect(request, env, json, userId);
     }
 
     // ---- API keys: add ----
     if (path === "/apikeys/add" && method === "POST") {
-      return handleAddApiKey(request, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleAddApiKey(request, env, json, userId);
     }
 
     // ---- API keys: remove ----
     if (path === "/apikeys/remove" && method === "DELETE") {
-      return handleRemoveApiKey(request, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleRemoveApiKey(request, env, json, userId);
     }
 
     // ---- API keys: list ----
     if (path === "/apikeys/list" && method === "GET") {
-      return handleListApiKeys(url, env, json);
+      const userId = requireAuthUserId();
+      if (typeof userId !== "string") return userId;
+      return handleListApiKeys(env, json, userId);
     }
 
     // ---- NLU model distribution (family devices) ----
@@ -2094,7 +2167,7 @@ export default {
       const manifest = await env.CACHE.get("nlu_model_latest");
       if (!manifest) return json({ error: "no model published yet" }, 404);
       return new Response(manifest, {
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        headers: { "Content-Type": "application/json", ...cors },
       });
     }
 
@@ -2114,7 +2187,7 @@ export default {
       return new Response(obj.body, {
         headers: {
           "Content-Type": "application/octet-stream",
-          "Access-Control-Allow-Origin": "*",
+          ...cors,
         },
       });
     }
@@ -2157,18 +2230,31 @@ async function handleAuthUrl(
   url: URL,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  userId: string,
 ): Promise<Response> {
   const provider = (url.searchParams.get("provider") || "").toLowerCase();
-  const userId = url.searchParams.get("user_id") || "";
   const codeChallenge = url.searchParams.get("code_challenge") || "";
   const workerOrigin = url.origin;
   const callbackUrl = `${workerOrigin}/oauth/callback`;
 
-  // State format: provider:userId
-  const state = `${provider}:${userId}`;
+  // Provider and client id are checked BEFORE the state is minted, so a bogus
+  // provider cannot litter the state table.
+  if (provider === "google" && !env.GOOGLE_CLIENT_ID) return json({ error: "Google OAuth not configured" }, 500);
+  if (provider === "github" && !env.GITHUB_CLIENT_ID) return json({ error: "GitHub OAuth not configured" }, 500);
+  if (provider === "swiggy" && !env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
+  if (provider !== "google" && provider !== "github" && provider !== "swiggy") {
+    return json({ error: `unsupported provider: ${provider}` }, 400);
+  }
+
+  // SECURITY (Linux port J1): the state used to be the literal string
+  // "provider:userId" — not random (so not a CSRF token) and it published the
+  // user id in the provider redirect URL, the browser history and every proxy
+  // log. It is now 32 random bytes, stored only as a hash, single-use and
+  // TTL-bound; the user is bound to the state ROW, which the callback
+  // redeems. `user_id` from the query is ignored entirely.
+  const state = await createOAuthState(env, userId, provider, Date.now() / 1000);
 
   if (provider === "google") {
-    if (!env.GOOGLE_CLIENT_ID) return json({ error: "Google OAuth not configured" }, 500);
     const authUrl = (
       `https://accounts.google.com/o/oauth2/v2/auth`
       + `?client_id=${encodeURIComponent(env.GOOGLE_CLIENT_ID)}`
@@ -2184,7 +2270,6 @@ async function handleAuthUrl(
   }
 
   if (provider === "github") {
-    if (!env.GITHUB_CLIENT_ID) return json({ error: "GitHub OAuth not configured" }, 500);
     const authUrl = (
       `https://github.com/login/oauth/authorize`
       + `?client_id=${encodeURIComponent(env.GITHUB_CLIENT_ID)}`
@@ -2195,35 +2280,46 @@ async function handleAuthUrl(
     return json({ url: authUrl, redirect_uri: callbackUrl });
   }
 
-  if (provider === "swiggy") {
-    if (!env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
-    const authUrl = (
-      `${SWIGGY_AUTH_URL}`
-      + `?client_id=${encodeURIComponent(env.SWIGGY_CLIENT_ID)}`
-      + `&redirect_uri=${encodeURIComponent(callbackUrl)}`
-      + `&response_type=code`
-      + `&scope=${encodeURIComponent(SWIGGY_SCOPES)}`
-      + (codeChallenge ? `&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256` : "")
-      + `&resource=${encodeURIComponent(SWIGGY_RESOURCE)}`
-      + `&state=${encodeURIComponent(state)}`
-      + `&access_type=offline`
-      + `&prompt=consent`
-    );
-    return json({ url: authUrl, redirect_uri: callbackUrl });
-  }
+  const authUrl = (
+    `${SWIGGY_AUTH_URL}`
+    + `?client_id=${encodeURIComponent(env.SWIGGY_CLIENT_ID)}`
+    + `&redirect_uri=${encodeURIComponent(callbackUrl)}`
+    + `&response_type=code`
+    + `&scope=${encodeURIComponent(SWIGGY_SCOPES)}`
+    + (codeChallenge ? `&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256` : "")
+    + `&resource=${encodeURIComponent(SWIGGY_RESOURCE)}`
+    + `&state=${encodeURIComponent(state)}`
+    + `&access_type=offline`
+    + `&prompt=consent`
+  );
+  return json({ url: authUrl, redirect_uri: callbackUrl });
+}
 
-  return json({ error: `unsupported provider: ${provider}` }, 400);
+/**
+ * One-line, length-capped error text for a deep link.
+ *
+ * The deep link ends up in the OS URL handler, the browser history and every
+ * log line that records it, so it carries a short reason — never a user id.
+ */
+function deepLinkErrorText(message: string): string {
+  return (message || "").replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
 function renderOAuthHtml(
   provider: string,
   success: boolean,
   errorMsg: string,
-  userId: string,
   accountId = "",
 ): string {
   const providerDisplay = provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider.toLowerCase() === "swiggy" ? "Swiggy" : provider;
-  const deepLink = `nexus://oauth/callback?provider=${encodeURIComponent(provider.toLowerCase())}&user_id=${encodeURIComponent(userId)}&status=${success ? "success" : "error"}`;
+  // SECURITY (Linux port J1): the deep link used to carry `user_id`, which put
+  // the owner's identity into the browser history, the OS deep-link handler
+  // and every log line that recorded the URL. It now carries the provider and
+  // the outcome only.
+  const errorParam = success
+    ? ""
+    : `&error=${encodeURIComponent(deepLinkErrorText(errorMsg))}`;
+  const deepLink = `nexus://oauth/callback?provider=${encodeURIComponent(provider.toLowerCase())}&status=${success ? "success" : "error"}${errorParam}`;
 
   if (!success) {
     return `<!DOCTYPE html>
@@ -2298,25 +2394,35 @@ async function handleOAuthBrowserCallback(
   const workerOrigin = url.origin;
   const callbackUrl = `${workerOrigin}/oauth/callback`;
 
-  // Parse state: "provider:userId" or legacy "userId"
-  let provider = "";
-  let userId = state;
-  if (state.includes(":")) {
-    const parts = state.split(":");
-    provider = parts[0].toLowerCase();
-    userId = parts.slice(1).join(":");
-  } else {
-    provider = (url.searchParams.get("scope")?.includes("google") || url.searchParams.get("scope")?.includes("calendar")) ? "google" : "github";
+  // SECURITY (Linux port J1): the state is the only credential the browser
+  // can present — 32 random bytes, hashed at rest, single-use, TTL-bound. It
+  // resolves to the user and the provider that started the flow. An unknown,
+  // expired or already-redeemed state is REFUSED, never guessed at: the old
+  // code parsed "provider:userId" straight out of the parameter, which is
+  // exactly the CSRF hole a random state closes.
+  const redeemed = await consumeOAuthState(env, state, Date.now() / 1000);
+  if (!redeemed) {
+    return new Response(
+      renderOAuthHtml(
+        "Service",
+        false,
+        "This authorization link is invalid or has expired. Please start the connection again from NEXUS.",
+      ),
+      { headers: { "Content-Type": "text/html; charset=utf-8" } },
+    );
   }
 
+  const userId = redeemed.user_id;
+  const provider = (redeemed.provider || "").toLowerCase();
+
   if (error) {
-    return new Response(renderOAuthHtml(provider || "Service", false, `Authorization error: ${error}`, userId), {
+    return new Response(renderOAuthHtml(provider || "Service", false, `Authorization error: ${error}`), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
 
   if (!code) {
-    return new Response(renderOAuthHtml(provider || "Service", false, "Missing authorization code from provider.", userId), {
+    return new Response(renderOAuthHtml(provider || "Service", false, "Missing authorization code from provider."), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
@@ -2325,7 +2431,9 @@ async function handleOAuthBrowserCallback(
     let accessToken = "";
     let refreshToken: string | null = null;
     let expiresIn = 0;
-    let accountId = userId;
+    // The account label shown on the completion page. It is the PROVIDER's
+    // account (Google email / GitHub login) — never the owner's id.
+    let accountId = "";
 
     if (provider === "google") {
       const resp = await fetch(GOOGLE_TOKEN_URL, {
@@ -2342,7 +2450,7 @@ async function handleOAuthBrowserCallback(
 
       if (!resp.ok) {
         const errText = await resp.text();
-        return new Response(renderOAuthHtml("Google", false, `Google token exchange failed: ${resp.status} ${errText}`, userId), {
+        return new Response(renderOAuthHtml("Google", false, `Google token exchange failed: ${resp.status} ${errText}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
@@ -2359,7 +2467,7 @@ async function handleOAuthBrowserCallback(
         });
         if (userInfoResp.ok) {
           const uInfo = await userInfoResp.json() as any;
-          accountId = uInfo.email || userId;
+          accountId = uInfo.email || "";
         }
       } catch { /* ignore */ }
 
@@ -2377,14 +2485,14 @@ async function handleOAuthBrowserCallback(
 
       if (!resp.ok) {
         const errText = await resp.text();
-        return new Response(renderOAuthHtml("GitHub", false, `GitHub token exchange failed: ${resp.status} ${errText}`, userId), {
+        return new Response(renderOAuthHtml("GitHub", false, `GitHub token exchange failed: ${resp.status} ${errText}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
 
       const tokens = await resp.json() as any;
       if (!tokens.access_token) {
-        return new Response(renderOAuthHtml("GitHub", false, `GitHub exchange error: ${tokens.error_description || tokens.error || "No access token"}`, userId), {
+        return new Response(renderOAuthHtml("GitHub", false, `GitHub exchange error: ${tokens.error_description || tokens.error || "No access token"}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
@@ -2400,11 +2508,11 @@ async function handleOAuthBrowserCallback(
         });
         if (ghResp.ok) {
           const ghUser = await ghResp.json() as any;
-          accountId = ghUser.login || userId;
+          accountId = ghUser.login || "";
         }
       } catch { /* ignore */ }
     } else if (provider === "swiggy") {
-      if (!env.SWIGGY_CLIENT_ID) return new Response(renderOAuthHtml("Swiggy", false, "Swiggy OAuth not configured", userId), {
+      if (!env.SWIGGY_CLIENT_ID) return new Response(renderOAuthHtml("Swiggy", false, "Swiggy OAuth not configured"), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
       const resp = await fetch(SWIGGY_TOKEN_URL, {
@@ -2422,14 +2530,14 @@ async function handleOAuthBrowserCallback(
 
       if (!resp.ok) {
         const errText = await resp.text();
-        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy token exchange failed: ${resp.status} ${errText}`, userId), {
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy token exchange failed: ${resp.status} ${errText}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
 
       const tokens = await resp.json() as any;
       if (!tokens.access_token) {
-        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy exchange error: ${tokens.error_description || tokens.error || "No access token"}`, userId), {
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy exchange error: ${tokens.error_description || tokens.error || "No access token"}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
@@ -2439,9 +2547,9 @@ async function handleOAuthBrowserCallback(
       expiresIn = tokens.expires_in || 3600;
 
       // Swiggy doesn't have a standard userinfo endpoint we can use
-      accountId = userId;
+      accountId = "";
     } else {
-      return new Response(renderOAuthHtml(provider || "Unknown", false, `Unsupported provider: ${provider}`, userId), {
+      return new Response(renderOAuthHtml(provider || "Unknown", false, `Unsupported provider: ${provider}`), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     }
@@ -2459,11 +2567,11 @@ async function handleOAuthBrowserCallback(
     ).run();
 
     const displayProvider = provider === "google" ? "Google" : provider === "github" ? "GitHub" : "Swiggy";
-    return new Response(renderOAuthHtml(displayProvider, true, "", userId, accountId), {
+    return new Response(renderOAuthHtml(displayProvider, true, "", accountId), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   } catch (err) {
-    return new Response(renderOAuthHtml(provider || "Service", false, `OAuth Error: ${(err as Error).message}`, userId), {
+    return new Response(renderOAuthHtml(provider || "Service", false, `OAuth Error: ${(err as Error).message}`), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
@@ -2475,6 +2583,7 @@ async function handleOAuthExchange(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  userId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
@@ -2482,15 +2591,18 @@ async function handleOAuthExchange(
   const provider = (body.provider || "").toLowerCase();
   const code = body.code || "";
   const codeVerifier = body.code_verifier || "";
-  const userId = body.user_id || "";
   const workerOrigin = new URL(request.url).origin;
   const redirectUri = body.redirect_uri || `${workerOrigin}/oauth/callback`;
 
-  if (!provider || !code || !userId) return json({ error: "missing required fields" }, 400);
+  // SECURITY (Linux port J1): `body.user_id` is IGNORED (transition period).
+  // The owner is the authenticated device — never a client-supplied id.
+  if (!provider || !code) return json({ error: "missing required fields" }, 400);
 
   try {
     let tokens: any;
-    let accountId = userId;
+    // The provider's account label (Google email / GitHub login) — never the
+    // owner's id.
+    let accountId = "";
 
     if (provider === "google") {
       const resp = await fetch(GOOGLE_TOKEN_URL, {
@@ -2514,7 +2626,7 @@ async function handleOAuthExchange(
         });
         if (userInfoResp.ok) {
           const uInfo = await userInfoResp.json() as any;
-          accountId = uInfo.email || userId;
+          accountId = uInfo.email || "";
         }
       } catch { /* ignore */ }
     } else if (provider === "github") {
@@ -2539,7 +2651,7 @@ async function handleOAuthExchange(
         });
         if (ghResp.ok) {
           const ghUser = await ghResp.json() as any;
-          accountId = ghUser.login || userId;
+          accountId = ghUser.login || "";
         }
       } catch { /* ignore */ }
     } else if (provider === "swiggy") {
@@ -2561,7 +2673,7 @@ async function handleOAuthExchange(
       tokens = await resp.json();
       if (!tokens.access_token) return json({ error: tokens.error_description || tokens.error || "exchange failed" }, 400);
       // Swiggy has no userinfo endpoint for account display
-      accountId = userId;
+      accountId = "";
     } else {
       return json({ error: `unsupported provider: ${provider}` }, 400);
     }
@@ -2588,13 +2700,10 @@ async function handleOAuthExchange(
 // ---- OAuth status handler ----
 
 async function handleOAuthStatus(
-  url: URL,
+  userId: string,
   env: Env,
   json: (d: unknown, s?: number) => Response,
 ): Promise<Response> {
-  const userId = url.searchParams.get("user_id") || "";
-  if (!userId) return json({ error: "user_id required" }, 400);
-
   const connected: Record<string, any> = {};
   const now = Date.now() / 1000;
   // We need refresh_token to determine if an expired token can be refreshed
@@ -2626,12 +2735,14 @@ async function handleOAuthDisconnect(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  userId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-  const userId = body.user_id || "";
+  // SECURITY (Linux port J1): `body.user_id` is IGNORED — the owner is the
+  // authenticated device. A device can only disconnect its own connections.
   const provider = body.provider || "";
-  if (!userId || !provider) return json({ error: "user_id and provider required" }, 400);
+  if (!provider) return json({ error: "provider required" }, 400);
 
   await env.DB.prepare(
     "DELETE FROM oauth_tokens WHERE user_id = ? AND provider = ?"
@@ -2646,13 +2757,15 @@ async function handleAddApiKey(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  userId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-  const userId = body.user_id || "";
+  // SECURITY (Linux port J1): `body.user_id` is IGNORED — the owner is the
+  // authenticated device.
   const provider = body.provider || "";
   const apiKey = body.api_key || "";
-  if (!userId || !provider || !apiKey) return json({ error: "missing required fields" }, 400);
+  if (!provider || !apiKey) return json({ error: "missing required fields" }, 400);
 
   // Base64 obfuscation only (NOT encryption — Worker has no Fernet; D1 is
   // already encrypted at rest, which is the actual protection). The
@@ -2670,22 +2783,23 @@ async function handleRemoveApiKey(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  userId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+  // SECURITY (Linux port J1): `body.user_id` is IGNORED — the owner is the
+  // authenticated device.
   await env.DB.prepare(
     "DELETE FROM api_keys WHERE user_id = ? AND provider = ?"
-  ).bind(body.user_id || "", body.provider || "").run();
+  ).bind(userId, body.provider || "").run();
   return json({ ok: true, removed: body.provider });
 }
 
 async function handleListApiKeys(
-  url: URL,
   env: Env,
   json: (d: unknown, s?: number) => Response,
+  userId: string,
 ): Promise<Response> {
-  const userId = url.searchParams.get("user_id") || "";
-  if (!userId) return json({ error: "user_id required" }, 400);
   const result = await env.DB.prepare(
     "SELECT provider FROM api_keys WHERE user_id = ?"
   ).bind(userId).all();

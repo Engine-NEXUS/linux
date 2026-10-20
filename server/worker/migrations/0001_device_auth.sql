@@ -2,6 +2,12 @@
 -- Date: 2026-10-02
 -- Target: D1 database `nexus-db` (id 4bca5d1b-55e1-4a30-bbf9-ca28cf96e3ea)
 --
+-- ⚠️ SUPERSEDED by `migrations/0002_device_gate.sql` (Linux port J1, 2026-10-20).
+-- DO NOT apply this file to a database created from the current `schema.sql`:
+-- it ALTERs a `user_devices` table that the branch dropped in favour of the
+-- Feature-88 `devices` table, so the ALTERs fail with "no such table".
+-- `0002` creates the same `oauth_states` table idempotently and does the rest.
+--
 -- WHY: the Worker returned live OAuth access tokens from /oauth/github-token,
 -- /oauth/google-token and /oauth/swiggy-token keyed only on a client-supplied
 -- `?user_id=`, with no authentication. `device_token` existed but was never

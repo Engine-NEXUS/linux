@@ -5,6 +5,18 @@
 **Closes:** the live credential-disclosure vulnerability documented in
 [`45-competitive-and-platform-audit-2026-10.md`](45-competitive-and-platform-audit-2026-10.md).
 
+> ⚠️ **Corrected 2026-10-20 (Linux port J1).** When this file was written, the
+> helpers in `server/worker/src/auth.ts` and the tests in
+> `server/worker/src/__tests__/auth.test.ts` were committed — but **nothing
+> imported `./auth`**, so the gate described in §3.2 was never wired and the
+> Worker kept serving live OAuth tokens to anybody who supplied a `user_id`.
+> `auth.ts` also read a `user_devices` table that `schema.sql` drops, so
+> shipping it as written would have 401'd every request. The Worker side is
+> now actually wired, against the Feature-88 `devices` table, in
+> [`linux-port-j1-worker-deny-by-default-device-gate.md`](linux-port-j1-worker-deny-by-default-device-gate.md).
+> §3.4–§3.6 (the Rust `device_auth.rs` / `worker_proxy.rs` and the frontend
+> rewrite) are **still not in the tree** — they are Linux port J2 and J3.
+
 ---
 
 ## 1. The vulnerability, restated

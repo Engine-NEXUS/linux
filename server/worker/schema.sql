@@ -12,6 +12,12 @@
 -- The Worker reads/writes this database. No server needed.
 
 -- OAuth tokens (Google, GitHub)
+--
+-- `user_id` holds the OWNER key of the connected account. Since the Linux port
+-- J1 device gate it is the canonical Feature-88 `profile_id` of the device
+-- that performed the connection — never a client-supplied id. The column name
+-- is historical (it predates the canonical identity); renaming it would break
+-- deployed databases.
 CREATE TABLE IF NOT EXISTS oauth_tokens (
   user_id TEXT NOT NULL,
   provider TEXT NOT NULL,
@@ -27,6 +33,7 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 -- API keys (Claude, Devin, etc.) — base64-obfuscated in the column
 -- (NOT encrypted; protection is D1 encryption at rest). The key_encrypted
 -- column name is historical; renaming it would break deployed databases.
+-- `user_id` holds the canonical owner key (see oauth_tokens above).
 CREATE TABLE IF NOT EXISTS api_keys (
   user_id TEXT NOT NULL,
   provider TEXT NOT NULL,
@@ -35,34 +42,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
   PRIMARY KEY (user_id, provider)
 );
 
--- Device registration.
---
--- SECURITY (2026-10-02): the plaintext `device_token` column was never written
--- by any client and never read by any code path — a control that did nothing.
--- It is replaced by a SHA-256 hash plus expiry/revocation so that a leaked
--- database row cannot be replayed as a credential, and so a device can be
--- rotated without touching OAuth tokens.
---
--- The bearer credential is presented as `Authorization: Bearer <token>`.
--- Only the hash is stored. Lookup is by hash, so the plaintext token never
--- touches disk or the database.
-CREATE TABLE IF NOT EXISTS user_devices (
-  user_id TEXT NOT NULL,
-  device_id TEXT NOT NULL,
-  device_name TEXT,
-  os TEXT,
-  device_token_hash TEXT,          -- hex SHA-256 of the bearer token (never the token)
-  device_token_expires_at REAL,    -- unix ts; NULL = no expiry
-  device_revoked_at REAL,          -- unix ts; NULL = active
-  created_at REAL NOT NULL,
-  PRIMARY KEY (user_id, device_id)
-);
-
 -- Index for fast lookups
 CREATE INDEX IF NOT EXISTS idx_oauth_user ON oauth_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_apikeys_user ON api_keys(user_id);
-CREATE INDEX IF NOT EXISTS idx_devices_user ON user_devices(user_id);
-CREATE INDEX IF NOT EXISTS idx_devices_token ON user_devices(device_token_hash);
 
 -- OAuth CSRF state (2026-10-02).
 --
@@ -72,6 +54,9 @@ CREATE INDEX IF NOT EXISTS idx_devices_token ON user_devices(device_token_hash);
 -- only thing protecting the OAuth token endpoints.
 --
 -- It is now 32 random bytes, stored here as a hash, single-use, with a TTL.
+-- `user_id` here holds the canonical owner key (the Feature-88 `profile_id`),
+-- so the callback can bind the provider's tokens to the right owner without
+-- the id ever travelling through the browser.
 CREATE TABLE IF NOT EXISTS oauth_states (
   state_hash TEXT PRIMARY KEY,      -- hex SHA-256 of the state value
   user_id TEXT NOT NULL,
@@ -127,6 +112,12 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 -- Devices bound to a profile. Device token stored ONLY as SHA-256 hash;
 -- the plaintext token lives in each laptop's OS credential store.
+--
+-- This is the credential the Worker authenticates against (Linux port J1):
+-- `Authorization: Bearer <token>` (or `X-Nexus-Device-Token`) is hashed and
+-- looked up here, so a leaked database row cannot be replayed as a
+-- credential. The device's `profile_id` is the canonical owner key of every
+-- OAuth token, API key and OAuth state the device creates.
 CREATE TABLE IF NOT EXISTS devices (
   device_id         TEXT PRIMARY KEY,       -- "dev_" + 128-bit base64url
   profile_id        TEXT NOT NULL REFERENCES profiles(profile_id),
@@ -174,9 +165,14 @@ CREATE TABLE IF NOT EXISTS identity_migration (
 );
 
 CREATE INDEX IF NOT EXISTS idx_devices_profile ON devices(profile_id);
+-- Hot path of the device gate: every authenticated request looks the
+-- credential up by its SHA-256 hash (Linux port J1).
+CREATE INDEX IF NOT EXISTS idx_devices_token_hash ON devices(device_token_hash);
 CREATE INDEX IF NOT EXISTS idx_events_profile  ON profile_events(profile_id);
 CREATE INDEX IF NOT EXISTS idx_events_at       ON profile_events(at);
 
--- user_devices was defined but never read or written by any code path
--- (verified 2026-10-03) — superseded by the Feature 88 `devices` table.
+-- `user_devices` was defined but never read or written by any code path
+-- (verified 2026-10-03) — superseded by the Feature 88 `devices` table, which
+-- is now the credential the Worker authenticates against. The table is
+-- dropped so it can never be resurrected by a stale migration.
 DROP TABLE IF EXISTS user_devices;
