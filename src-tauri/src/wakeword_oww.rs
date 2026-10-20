@@ -4710,6 +4710,38 @@ fn start_audio_capture(
         return Err("no input devices available".to_string());
     }
 
+    // Linux: keep only the names. cpal's enumeration holds every listed PCM
+    // open for as long as its `Device` lives, and a held raw DMIC (`hw:…`)
+    // keeps PipeWire's own microphone source from opening the hardware, so
+    // every capture through `default` / `pulse` stalls (see
+    // `audio_linux::reopen_input_device`). Each candidate is reopened on its
+    // own right before its probe.
+    #[cfg(target_os = "linux")]
+    let try_names: Vec<String> = try_order
+        .iter()
+        .map(|d| d.name().unwrap_or_else(|_| "unknown".into()))
+        .collect();
+    #[cfg(target_os = "linux")]
+    {
+        drop(try_order);
+        drop(devices);
+        drop(default_device);
+    }
+    #[cfg(target_os = "linux")]
+    let total = try_names.len();
+    #[cfg(not(target_os = "linux"))]
+    let total = try_order.len();
+    #[cfg(target_os = "linux")]
+    let candidates = try_names.iter().enumerate().filter_map(|(i, name)| {
+        let device = crate::audio_linux::reopen_input_device(&host, name);
+        if device.is_none() {
+            tracing::warn!("audio: device '{}' is gone — skipping it", name);
+        }
+        device.map(|d| (i, d))
+    });
+    #[cfg(not(target_os = "linux"))]
+    let candidates = try_order.iter().cloned().enumerate();
+
     // Try each device until we find one that produces non-zero audio.
     // We start the stream, wait for the first callback (the window depends
     // on the device — PipeWire's ALSA bridge is slow to start), and check
@@ -4726,11 +4758,12 @@ fn start_audio_capture(
     #[cfg(target_os = "linux")]
     let mut probed: Vec<(usize, String, f32)> = Vec::new();
 
-    for (attempt, device) in try_order.iter().enumerate() {
+    for (attempt, device) in candidates {
+        let device = &device;
         let dev_name = device.name().unwrap_or_else(|_| "unknown".into());
         tracing::info!(
             "audio: trying device [{}] '{}' (attempt {}/{})",
-            attempt, dev_name, attempt + 1, try_order.len()
+            attempt, dev_name, attempt + 1, total
         );
 
         // Linux: PipeWire's ALSA bridge delivers its first callback late, so
@@ -4859,8 +4892,10 @@ fn start_audio_capture(
             .iter()
             .map(|(_, name, rms)| (name.as_str(), *rms))
             .collect();
-        crate::audio_linux::silent_fallback_index(&candidates)
-            .map(|i| (try_order[probed[i].0].clone(), probed[i].2))
+        crate::audio_linux::silent_fallback_index(&candidates).and_then(|i| {
+            crate::audio_linux::reopen_input_device(&host, &try_names[probed[i].0])
+                .map(|d| (d, probed[i].2))
+        })
     };
     #[cfg(not(target_os = "linux"))]
     let fallback = best_device;

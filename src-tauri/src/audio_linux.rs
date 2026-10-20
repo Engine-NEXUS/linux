@@ -421,6 +421,32 @@ where
     }
 }
 
+/// Open ONE capture device by name, without keeping any other device open.
+///
+/// cpal's ALSA enumeration opens every listed PCM (both directions) and keeps
+/// it open for as long as the `Device` lives. A held raw DMIC (`hw:…`) keeps
+/// PipeWire's own microphone source from opening the hardware, so capture
+/// through `default` / `pulse` then stalls inside `snd_pcm_prepare` and
+/// delivers nothing (reproduced on the target machine: PipeWire's `Mic1`
+/// source is `hw:sofhdadsp,6`). Probing therefore keeps only names and
+/// reopens each candidate right before its probe; `Iterator::find` drops
+/// (closes) every other device of this enumeration as it goes. `default`
+/// needs no enumeration at all: cpal opens it lazily.
+pub fn reopen_input_device(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    if name == "default" {
+        if let Some(d) = host.default_input_device() {
+            if d.name().map(|n| n == "default").unwrap_or(false) {
+                return Some(d);
+            }
+        }
+    }
+    host.input_devices()
+        .ok()?
+        .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+}
+
 /// The Linux microphone permission verdict.
 ///
 /// Linux has **no per-app microphone prompt** (PipeWire/PulseAudio grant
@@ -467,8 +493,21 @@ pub fn capture_permission_state() -> &'static str {
         }
     }
 
-    for d in ordered {
-        let name = d.name().unwrap_or_else(|_| "unknown".into());
+    // Keep only the names: the enumerated devices hold every PCM open (see
+    // `reopen_input_device`), which would keep PipeWire off the microphone
+    // while `default` is being opened.
+    let ordered_names: Vec<String> = ordered
+        .iter()
+        .map(|d| d.name().unwrap_or_else(|_| "unknown".into()))
+        .collect();
+    drop(ordered);
+    drop(remaining);
+    drop(devices);
+
+    for name in ordered_names {
+        let Some(d) = reopen_input_device(&host, &name) else {
+            continue;
+        };
         // Opening a device is a probe too: `default_input_config()` and
         // `build_input_stream()` can block forever inside ALSA (the raw
         // `pipewire` PCM did), and this runs during app setup. Bound it with
