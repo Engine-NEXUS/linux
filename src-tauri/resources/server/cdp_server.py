@@ -81,6 +81,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -144,6 +145,19 @@ def inspector_main_target(port: int) -> dict | None:
         if isinstance(t, dict) and t.get("type") == "node" and t.get("webSocketDebuggerUrl"):
             return t
     return None
+
+
+def browser_ws_url(port: int) -> str | None:
+    """The BROWSER-level websocket for a DevTools port.
+
+    `Browser.getVersion` and `SystemInfo.getInfo` are browser-level domains:
+    a page session answers "domain not found" for them.
+    """
+    try:
+        data = _http_json(f"http://127.0.0.1:{port}/json/version")
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None
+    return data.get("webSocketDebuggerUrl") if isinstance(data, dict) else None
 
 
 def reachable() -> dict:
@@ -227,6 +241,219 @@ def _pick_page_target(tgts: list[dict], want: str | None) -> dict | None:
     return pages[0]
 
 
+_FOCUS_STATE_JS = (
+    "JSON.stringify({focus: document.hasFocus(), vis: document.visibilityState})"
+)
+
+# The focus sweep: a port's candidate targets are probed under ONE deadline
+# for the WHOLE sweep. HOW they are probed depends on the transport:
+#
+#   * Chromium — CONCURRENTLY. Every probe opens its OWN CDP connection, so
+#     a browser with N tabs costs one sweep rather than N sequential probes.
+#     A background tab the browser has FROZEN (Chrome/Brave Memory Saver
+#     freezes background tabs, and they stop answering `Runtime.evaluate`)
+#     can therefore never hold the request hostage.
+#
+#   * Electron — ONE AFTER ANOTHER, because every probe shares the single
+#     inspector websocket, and a socket without reply demultiplexing cannot
+#     serve two requests at once (the replies would be stolen). Each
+#     candidate gets its OWN SLICE of the remaining budget —
+#     `remaining / candidates_left`, recomputed before every probe — so a
+#     frozen window can only eat its own share and the window the user is
+#     actually looking at is still probed.
+FOCUS_SWEEP_DEADLINE = float(os.environ.get("CDP_FOCUS_SWEEP", "6"))
+
+# The whole request, across every reachable port.
+#
+# The Rust client gives the request 20 s (`src-tauri/src/cdp.rs`), and the
+# request has to finish inside 15 s: the sweep is repeated per port, so the
+# ports share one budget.
+ACTIVATE_BUDGET = float(os.environ.get("CDP_ACTIVATE_BUDGET", "12"))
+
+# "I could not tell": the probe did not answer, or the transport failed.
+_FOCUS_UNKNOWN = {
+    "focus": False,
+    "visible": False,
+    "known": False,
+    "timed_out": False,
+}
+
+# "The probe did not answer IN TIME" — a probe that never finished has proved
+# nothing, exactly like a vanished target.
+_FOCUS_TIMED_OUT = {
+    "focus": False,
+    "visible": False,
+    "known": False,
+    "timed_out": True,
+}
+
+
+async def _page_focus_state_inner(t: dict) -> dict:
+    """The probe itself — see `_page_focus_state` for the contract."""
+    async with Cdp(t["webSocketDebuggerUrl"]) as c:
+        r = await c.call(
+            "Runtime.evaluate",
+            {"expression": _FOCUS_STATE_JS, "returnByValue": True},
+        )
+    v = (r.get("result") or {}).get("value")
+    try:
+        d = json.loads(v) if isinstance(v, str) else (v or {})
+    except (TypeError, ValueError):
+        return dict(_FOCUS_UNKNOWN)
+    if not isinstance(d, dict):
+        return dict(_FOCUS_UNKNOWN)
+    return {
+        "focus": bool(d.get("focus")),
+        "visible": d.get("vis") == "visible",
+        "known": True,
+        "timed_out": False,
+    }
+
+
+async def _page_focus_state(t: dict, deadline: float = FOCUS_SWEEP_DEADLINE) -> dict:
+    """`hasFocus()` / `visibilityState` for one page target.
+
+    A BACKGROUND tab of the same browser answers hasFocus() = false and
+    visibilityState = "hidden"; the tab the user is looking at answers
+    true / "visible". That is how the foreground target is found.
+
+    The probe is BOUNDED and never fails the request: a frozen target, a
+    vanished target or a refused connection are all "I cannot tell", which
+    is reported as `known: False`.
+    """
+    try:
+        return await asyncio.wait_for(
+            _page_focus_state_inner(t), timeout=deadline
+        )
+    except asyncio.TimeoutError:
+        # A frozen background tab, or a busy renderer that did not answer in
+        # time. It has proved nothing.
+        return dict(_FOCUS_TIMED_OUT)
+    except CdpError:
+        # The target is gone, or the transport failed.
+        return dict(_FOCUS_UNKNOWN)
+    except Exception as e:  # noqa: BLE001 — a connect failure is "unknown" too
+        # `websockets.connect` raises OSError / WebSocketException, neither of
+        # which is a CdpError. Those must not escape and turn the intended
+        # 409 into a 500.
+        log.warning("focus probe failed for %s: %s", t.get("url", ""), e)
+        return dict(_FOCUS_UNKNOWN)
+
+
+async def _probe_all(targets: list[dict], deadline: float) -> list[dict]:
+    """Probe every candidate CONCURRENTLY, under ONE deadline for the sweep.
+
+    The probes run in parallel, so the sweep costs one deadline and not one
+    deadline per candidate. Whatever answered in time is kept; a probe that
+    did not finish is unknown.
+    """
+    if not targets:
+        return []
+
+    async def one(t: dict) -> dict:
+        return await _page_focus_state(t, deadline)
+
+    tasks = [asyncio.ensure_future(one(t)) for t in targets]
+    try:
+        gathered = list(
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=deadline
+            )
+        )
+        # A cancelled child comes back as an exception, not a state: it is
+        # "I could not tell", like any other non-answer.
+        return [
+            s if isinstance(s, dict) else dict(_FOCUS_UNKNOWN)
+            for s in gathered
+        ]
+    except asyncio.TimeoutError:
+        pass
+
+    # The sweep ran out of time: whatever answered is kept, the rest never
+    # finished and has proved nothing.
+    states: list[dict] = []
+    for t, task in zip(targets, tasks):
+        if task.done() and not task.cancelled():
+            exc = task.exception()
+            if exc is None:
+                states.append(task.result())
+            else:
+                states.append(dict(_FOCUS_UNKNOWN))
+        else:
+            task.cancel()
+            states.append(dict(_FOCUS_TIMED_OUT))
+    return states
+
+
+def narrow_by_title(candidates: list[dict], expected_title: str) -> list[dict]:
+    """The candidate set: the targets whose title matches the expected
+    foreground window.
+
+    The predicate is the SAME one the identity gate uses (`title_matches`),
+    so the narrowing can never be stricter than the gate it pre-filters: a
+    candidate whose own title is EMPTY cannot contradict the expected one, so
+    it is kept and the focus probe decides.
+
+    Pure, so the rule is unit-tested with fakes.
+    """
+    if not (expected_title or "").strip():
+        return list(candidates)
+    return [
+        t
+        for t in candidates
+        if title_matches(expected_title, str(t.get("title") or ""))
+    ]
+
+
+async def chromium_foreground_target(
+    port: int,
+    want: str | None,
+    expected_title: str = "",
+    deadline: float = FOCUS_SWEEP_DEADLINE,
+) -> tuple[dict | None, str]:
+    """The page target the user is actually looking at, and why not.
+
+    The accessibility tree is per TARGET, so the identity check and the
+    action have to use the SAME one: the first non-blank page target is
+    usually a BACKGROUND tab, and clicking in it is exactly the bug the
+    identity check exists to prevent.
+
+    The rule (see `choose_focused_target`): the candidate set is the targets
+    whose title matches the expected foreground title, ALL of them are probed
+    concurrently under one deadline, and a target is chosen ONLY when exactly
+    one of them proved it has the focus.
+
+    The probes may run concurrently here because EACH ONE opens its own CDP
+    connection: there is no shared socket whose replies could be mixed up
+    (the Electron transport shares one — see `Electron._probe_renderers`).
+
+    Returns (None, reason) when the foreground cannot be established.
+    """
+    pages = [
+        t
+        for t in http_list(port)
+        if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
+    ]
+    if not pages:
+        return None, "the browser exposes no page target"
+    if want:
+        pages = [
+            t
+            for t in pages
+            if want in (t.get("url") or "") or want == (t.get("title") or "")
+        ]
+        if not pages:
+            return None, "the requested target is not open"
+    candidates = narrow_by_title(pages, expected_title)
+    if not candidates:
+        return None, "no target matched the application in front"
+    states = await _probe_all(candidates, deadline)
+    chosen = choose_focused_target(candidates, states)
+    if chosen is None:
+        return None, foreground_reason(candidates, states)
+    return chosen, ""
+
+
 async def direct_ax(port: int, target: str | None) -> list[dict]:
     tgts = http_list(port)
     t = _pick_page_target(tgts, target)
@@ -241,11 +468,13 @@ async def direct_ax(port: int, target: str | None) -> list[dict]:
     return r.get("nodes", []) or []
 
 
-async def direct_activate(port: int, target: str | None, name: str, role: str | None) -> dict:
-    tgts = http_list(port)
-    t = _pick_page_target(tgts, target)
-    if t is None:
-        raise CdpError(f"no page target on port {port}")
+async def direct_activate(t: dict, name: str, role: str | None) -> dict:
+    """Click by name inside a RESOLVED page target.
+
+    The target is passed in, not chosen here: the caller resolved the
+    foreground target first so that the identity check and this action
+    operate on the same one.
+    """
     async with Cdp(t["webSocketDebuggerUrl"]) as c:
         try:
             await c.call("Accessibility.enable")
@@ -392,6 +621,17 @@ _JS_FIND = (
 )
 
 
+_MAIN_FOCUS = """
+  const { webContents } = process.mainModule.require('electron');
+  const w = webContents.getAllWebContents().find(x => x.id === __WCID__);
+  if (!w) return null;
+  const raw = await w.executeJavaScript(
+    "JSON.stringify({focus: document.hasFocus(), vis: document.visibilityState})"
+  );
+  return JSON.parse(raw);
+"""
+
+
 class Electron:
     """A connection to an Electron main process, with renderer operations."""
 
@@ -413,6 +653,32 @@ class Electron:
     async def renderers(self) -> list[dict]:
         v = await self.main_eval(_MAIN_LIST_RENDERERS)
         return v if isinstance(v, list) else []
+
+    async def app_name(self) -> str:
+        """The Electron application's own name ("Visual Studio Code").
+
+        The main process knows it; nothing else does. It is what proves that
+        an inspector port belongs to the application the user has in front.
+        """
+        v = await self.main_eval(
+            "process.mainModule.require('electron').app.getName()"
+        )
+        return str(v or "")
+
+    @staticmethod
+    def pick_renderer_info(rs: list[dict], target: str | None) -> dict | None:
+        """The renderer to act on, from the renderer's own list."""
+        if not rs:
+            return None
+        if target:
+            for r in rs:
+                if target in (r.get("url") or "") or target == (r.get("title") or ""):
+                    return r
+            return None
+        for r in rs:
+            if r.get("type") == "window":
+                return r
+        return rs[0]
 
     async def main_eval(self, body: str) -> Any:
         """Evaluate in the main process, awaiting promises and JSON round-tripping.
@@ -436,17 +702,132 @@ class Electron:
 
     async def pick_renderer(self, target: str | None) -> int | None:
         rs = await self.renderers()
-        if not rs:
-            return None
-        if target:
-            for r in rs:
-                if target in (r.get("url") or "") or target == (r.get("title") or ""):
-                    return r["id"]
-            return None
-        for r in rs:
-            if r.get("type") == "window":
-                return r["id"]
-        return rs[0]["id"]
+        r = self.pick_renderer_info(rs, target)
+        return r["id"] if r is not None else None
+
+    async def renderer_focus(self, wcid: int, deadline: float = FOCUS_SWEEP_DEADLINE) -> dict:
+        """`hasFocus()` / `visibilityState` for one renderer.
+
+        A renderer of a background window answers hasFocus() = false; the
+        window the user is looking at answers true / "visible".
+
+        Bounded, like the Chromium probe: a renderer that does not answer
+        (a frozen window, a vanished target, a refused connection) is
+        "I cannot tell", never a stall and never a failed request.
+        """
+        body = _MAIN_FOCUS.replace("__WCID__", str(wcid))
+        try:
+            v = await asyncio.wait_for(
+                self.main_eval(body), timeout=deadline
+            )
+        except asyncio.TimeoutError:
+            # A busy renderer that did not answer in time. It has proved
+            # nothing.
+            return dict(_FOCUS_TIMED_OUT)
+        except CdpError:
+            # The renderer is gone, or the transport failed.
+            return dict(_FOCUS_UNKNOWN)
+        except Exception as e:  # noqa: BLE001 — a connect failure is "unknown" too
+            log.warning("renderer focus probe failed for %s: %s", wcid, e)
+            return dict(_FOCUS_UNKNOWN)
+        if not isinstance(v, dict):
+            return dict(_FOCUS_UNKNOWN)
+        return {
+            "focus": bool(v.get("focus")),
+            "visible": v.get("vis") == "visible",
+            "known": True,
+            "timed_out": False,
+        }
+
+    async def foreground_renderer(
+        self,
+        want: str | None,
+        expected_title: str = "",
+        deadline: float = FOCUS_SWEEP_DEADLINE,
+    ) -> tuple[dict | None, str]:
+        """The renderer the user is actually looking at, and why not.
+
+        The accessibility tree is per RENDERER, so the identity check and
+        the action have to use the same one: the first renderer of type
+        "window" is the first VS Code window, not the front one.
+
+        The rule is the same as for Chromium (see `choose_focused_target`):
+        the candidate set is the renderers whose title matches the expected
+        foreground title, ALL of them are probed under ONE deadline, and a
+        renderer is chosen ONLY when exactly one of them proved it has the
+        focus.
+
+        The probes run ONE AFTER ANOTHER, not concurrently: they share a
+        single CDP websocket that cannot demultiplex two replies (see
+        `_probe_renderers`). Each candidate gets its own slice of the
+        remaining budget, so a frozen window cannot starve the one in front.
+
+        Returns (None, reason) when the foreground cannot be established.
+        """
+        rs = await self.renderers()
+        windows = [r for r in rs if r.get("type") == "window"] or rs
+        if not windows:
+            return None, "the application exposes no window"
+        if want:
+            windows = [
+                r
+                for r in windows
+                if want in (r.get("url") or "") or want == (r.get("title") or "")
+            ]
+            if not windows:
+                return None, "the requested window is not open"
+        candidates = narrow_by_title(windows, expected_title)
+        if not candidates:
+            return None, "no window matched the application in front"
+        states = await self._probe_renderers(candidates, deadline)
+        chosen = choose_focused_target(candidates, states)
+        if chosen is None:
+            return None, foreground_reason(candidates, states)
+        return chosen, ""
+
+    async def _probe_renderers(self, candidates: list[dict], deadline: float) -> list[dict]:
+        """Probe the candidate renderers ONE AFTER ANOTHER, under one deadline.
+
+        The Electron transport shares ONE CDP websocket with the whole
+        process (`self._cdp`), and `Cdp.call` has NO reply demultiplexing:
+        a message whose id is not the caller's is DISCARDED, and the
+        websockets library refuses two concurrent `recv()`s on one
+        connection. Two probes in flight at once would therefore steal each
+        other's replies — the first waiter would consume the other probe's
+        answer, throw it away, and wait for a reply that no longer exists.
+        Both would be reported unknown, `choose_focused_target` would
+        return nothing, and the click would be refused even though the
+        control IS in the focused window.
+
+        So the probes run sequentially, under the SAME overall sweep
+        deadline: the moment the deadline is reached, the remaining
+        candidates are unknown — nothing is proved — and the sweep is over.
+
+        Each candidate gets its OWN SLICE of what is left —
+        `remaining / candidates_left`, recomputed before every probe. The
+        candidates are NOT focus-ordered (`webContents.getAllWebContents()`
+        is not), so without a slice the FIRST candidate would take the whole
+        budget: one hung window would starve every window after it, and the
+        window the user is actually looking at would never be probed. With a
+        slice, a frozen window can only eat its own share.
+        """
+        if not candidates:
+            return []
+
+        end = time.monotonic() + deadline
+        states: list[dict] = []
+        for index, r in enumerate(candidates):
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                # Out of time: this candidate and every one after it are
+                # unknown. Nothing is proved about them.
+                rest = candidates[len(states):]
+                states.extend(dict(_FOCUS_TIMED_OUT) for _ in rest)
+                break
+            # This candidate's own share of what is left.
+            left = len(candidates) - index
+            states.append(await self.renderer_focus(r["id"], remaining / left))
+        return states
 
     async def ax(self, wcid: int) -> list[dict]:
         """Fetch the accessibility tree, warming it if the first read is partial.
@@ -499,6 +880,260 @@ class Electron:
         if not isinstance(v, dict) or v.get("error"):
             return {"ok": False, "error": (v or {}).get("error", "fill failed")}
         return {"ok": v.get("observed") == text, "observed": v.get("observed")}
+
+
+# ── Endpoint identity ───────────────────────────────────────────────────────
+#
+# The CDP tier is scoped by DEBUG PORT, not by application: it sees whichever
+# app holds the lowest reachable port. That is not enough — a background app
+# launched with --inspect would answer a click meant for the app in front, and
+# the assistant would report success for an action in an application the user
+# never referenced.
+#
+# So every endpoint reports WHO it is, and a request that names the expected
+# application is refused unless the endpoint proves it belongs to it.
+
+def _app_name_from_command_line(cmdline: str) -> str:
+    """The application name from a browser command line.
+
+        /usr/bin/brave --remote-debugging-port=9222            -> "brave"
+        /home/me/My Apps/brave --remote-debugging-port=9222    -> "brave"
+        "C:\\Program Files\\Brave\\brave.exe" --inspect=9229    -> "brave"
+
+    The executable is the path up to the first ARGUMENT (a token that starts
+    with "--"), NOT up to the first space: a path may contain spaces, and
+    splitting on the first space would yield "C:\\Program" or "/home/me/My".
+    A double-quoted path is taken as-is, quotes included.
+    """
+    s = (cmdline or "").strip()
+    if not s:
+        return ""
+    if s.startswith('"'):
+        # A quoted path: the executable is what is inside the quotes.
+        end = s.find('"', 1)
+        exe = s[1:end] if end > 0 else s[1:]
+    else:
+        # The executable is everything before the first "--" argument.
+        cut = len(s)
+        idx = 0
+        while True:
+            idx = s.find("--", idx)
+            if idx < 0:
+                break
+            # Only a token START counts: the "--" has to begin a word.
+            if idx == 0 or s[idx - 1].isspace():
+                cut = idx
+                break
+            idx += 1
+        exe = s[:cut].strip()
+    base = exe.replace("\\", "/").rsplit("/", 1)[-1]
+    return base.removesuffix(".exe").lower()
+
+
+def _name_tokens(name: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", (name or "").lower()) if t}
+
+
+def app_names_match(expected: str, actual: str) -> bool:
+    """Whether two application names can refer to the same application.
+
+    "Visual Studio Code" and "code" are the same application; "brave" and
+    "code" are not. A shared word is enough, and so is one name contained in
+    the other ("code" inside "vscode").
+
+    An empty name on either side never matches: an unidentified application
+    is not evidence of anything.
+    """
+    e, a = _name_tokens(expected), _name_tokens(actual)
+    if not e or not a:
+        return False
+    if e & a:
+        return True
+    en = re.sub(r"[^a-z0-9]+", "", (expected or "").lower())
+    an = re.sub(r"[^a-z0-9]+", "", (actual or "").lower())
+    return bool(en) and bool(an) and (en in an or an in en)
+
+
+def title_matches(foreground_title: str, target_title: str) -> bool:
+    """Whether the target's title belongs to the foreground window.
+
+    A browser window is titled "<page title> - <app>", so the target's title
+    is contained in the window title. Two empty titles cannot contradict each
+    other, so they match; a mismatch in either direction does not.
+    """
+    f = (foreground_title or "").strip().lower()
+    t = (target_title or "").strip().lower()
+    if not f or not t:
+        return True
+    return f == t or t in f or f in t
+
+
+def choose_focused_target(candidates: list[dict], states: list[dict]) -> dict | None:
+    """The target the user is looking at: the one that PROVED it has focus.
+
+    The rule is deliberately narrow, because every extra heuristic opened a
+    new background-window case:
+
+      * exactly one candidate answered `known` AND `focus` → that one;
+      * zero focused, more than one focused, or everything unknown → None,
+        and the caller refuses with 409.
+
+    Two things that are NOT evidence of being in front:
+
+      * "visible" — a background window's active tab is visible, it is just
+        not focused. Selecting on visibility is what put a click in a
+        background window;
+      * a probe that timed out — it proved nothing at all.
+
+    Pure, so the rule is unit-tested with fakes.
+    """
+    focused = [
+        t
+        for t, st in zip(candidates, states)
+        if st.get("known") and st.get("focus")
+    ]
+    if len(focused) == 1:
+        return focused[0]
+    return None
+
+
+def foreground_reason(candidates: list[dict], states: list[dict]) -> str:
+    """Why no foreground target could be chosen — for the refusal message."""
+    if not candidates:
+        return "no target matched the application in front"
+    focused = [
+        t for t, st in zip(candidates, states) if st.get("known") and st.get("focus")
+    ]
+    if len(focused) > 1:
+        return f"{len(focused)} targets claim the focus"
+    if not any(st.get("known") for st in states):
+        if all(st.get("timed_out") for st in states):
+            return "no target answered the focus probe in time"
+        return "no target answered the focus probe"
+    return "no target reports the focus"
+
+
+def app_matches(expected_app: str, identity: dict) -> bool:
+    """Whether a debug endpoint PROVES it belongs to the application in front.
+
+    The endpoint has to name itself, and the name has to match. An endpoint
+    that cannot name itself proves nothing and matches nothing.
+
+    This is the cheap half of the gate: it does not need a renderer, so it
+    runs BEFORE the focus sweep and an endpoint belonging to another program
+    is never probed.
+    """
+    if not expected_app:
+        return True
+    return app_names_match(expected_app, str(identity.get("app") or ""))
+
+
+def endpoint_matches(
+    expected_app: str,
+    expected_title: str,
+    identity: dict,
+    target: dict | None,
+) -> bool:
+    """Whether an endpoint, and the target resolved on it, may act.
+
+    `target` is None when the foreground target could not be established,
+    which is a refusal.
+    """
+    if target is None:
+        return False
+    if not app_matches(expected_app, identity):
+        return False
+    if expected_title and not title_matches(expected_title, str(target.get("title") or "")):
+        return False
+    return True
+
+
+async def chromium_identity(port: int, target: str | None) -> dict:
+    """Who a Chromium debug port belongs to.
+
+    The APPLICATION part only: the title and URL belong to a target, and the
+    target is resolved separately (the foreground one).
+    """
+    out = {"kind": "chromium", "app": "", "title": "", "url": "", "product": ""}
+    ws = browser_ws_url(port)
+    if ws:
+        try:
+            async with Cdp(ws) as c:
+                try:
+                    info = await c.call("SystemInfo.getInfo")
+                    out["app"] = _app_name_from_command_line(str(info.get("commandLine") or ""))
+                except CdpError:
+                    pass
+                if not out["app"]:
+                    ver = await c.call("Browser.getVersion")
+                    out["product"] = str(ver.get("product") or "")
+                    out["app"] = out["product"].split("/")[0].lower()
+        except CdpError:
+            pass
+        except Exception as e:  # noqa: BLE001 — a connect failure is "unknown"
+            # `websockets.connect` raises OSError / WebSocketException, and
+            # neither is a CdpError. An endpoint we cannot even connect to
+            # cannot prove anything, and it must not turn the intended 409
+            # into a 500.
+            log.warning("could not read the browser identity on port %s: %s", port, e)
+    return out
+
+
+async def electron_identity(port: int, target: str | None) -> dict:
+    """Who an Electron inspector port belongs to.
+
+    The APPLICATION part only: the app name comes from the main process, and
+    the target (renderer) is resolved separately.
+    """
+    out = {"kind": "electron", "app": "", "title": "", "url": "", "product": ""}
+    try:
+        async with Electron(port) as e:
+            out["app"] = str(await e.app_name() or "")
+    except CdpError:
+        pass
+    except Exception as e:  # noqa: BLE001 — a connect failure is "unknown"
+        log.warning("could not read the electron identity on port %s: %s", port, e)
+    return out
+
+
+async def endpoint_identity(port: int, kind: str, target: str | None) -> dict:
+    """The identity of one endpoint, by kind.
+
+    The APPLICATION part does not depend on the target: it is the browser
+    process itself. The TARGET part is filled in by the caller, which
+    resolves the foreground target first.
+    """
+    if kind == "electron":
+        return await electron_identity(port, target)
+    return await chromium_identity(port, target)
+
+
+async def foreground_target(
+    port: int,
+    kind: str,
+    want: str | None,
+    expected_title: str = "",
+    deadline: float = FOCUS_SWEEP_DEADLINE,
+) -> tuple[dict | None, str]:
+    """The target the user is actually looking at, on this endpoint, and why not.
+
+    (None, reason) means "not established" — zero or more than one candidate
+    qualifies, or no candidate answered. The caller must treat that as a
+    refusal.
+
+    `deadline` is the budget for the WHOLE sweep on this port: every
+    candidate is probed concurrently under it.
+    """
+    if kind == "electron":
+        try:
+            async with Electron(port) as e:
+                return await e.foreground_renderer(want, expected_title, deadline)
+        except CdpError:
+            return None, "the inspector endpoint could not be reached"
+        except Exception as e:  # noqa: BLE001 — a connect failure is "unknown"
+            log.warning("electron foreground lookup failed on port %s: %s", port, e)
+            return None, "the inspector endpoint could not be reached"
+    return await chromium_foreground_target(port, want, expected_title, deadline)
 
 
 # ── Matching ─────────────────────────────────────────────────────────────────
@@ -662,7 +1297,39 @@ async def find(request: Request) -> JSONResponse:
 
 @app.post("/activate")
 async def activate(request: Request) -> JSONResponse:
-    """Invoke an element's click. No pixels, no compositor, no portal."""
+    """Invoke an element's click. No pixels, no compositor, no portal.
+
+    The request may name the application and the window title the caller
+    believes are in front (`app`, `title`). The endpoint then acts ONLY on a
+    debug port that PROVES it belongs to that same application: it refuses
+    with 409 when no reachable endpoint can prove it, and it reports the
+    identity it acted on so the caller can check it too.
+
+    THE RULE (no heuristics, because every heuristic opened a new
+    background-window case):
+
+      1. the endpoint must name itself and the name must match the expected
+         application (`app_matches`) — checked FIRST, because it is cheap and
+         an endpoint of another program is never probed;
+      2. the candidate set is the targets whose title matches the expected
+         foreground title (`narrow_by_title`, the same `title_matches` rule
+         the identity gate uses, so an EMPTY title cannot contradict the
+         expected one and is kept);
+      3. all candidates are probed under ONE deadline for the whole sweep
+         per port — CONCURRENTLY for Chromium, where every probe has its
+         own connection, and ONE AFTER ANOTHER for Electron, where the
+         probes share a single CDP websocket that cannot demultiplex two
+         replies (each candidate there gets its own slice of the remaining
+         budget, so a frozen window cannot starve the one in front) — and
+         the ports share one total budget (`ACTIVATE_BUDGET`) so the
+         request stays inside 15 s;
+      4. a target is chosen ONLY when EXACTLY ONE candidate answered
+         `known` and `focus` — zero focused, more than one focused, or
+         everything unknown all REFUSE with 409 and a reason.
+
+    Without those fields the behaviour is the old one (the first reachable
+    port) — but every current caller sends them.
+    """
     if not HAVE_WEBSOCKETS:
         return _err("websockets not installed", 503)
     body = await _json(request)
@@ -672,29 +1339,108 @@ async def activate(request: Request) -> JSONResponse:
     role = body.get("role") or None
     port = int(body.get("port") or 0)
     target = body.get("target")
+    expected_app = str(body.get("app") or "").strip()
+    expected_title = str(body.get("title") or "").strip()
     r = await run_in_threadpool(reachable)
     ports = [port] if port else (r["direct_ports"] + r["electron_ports"])
     if not ports:
         return _err("no CDP endpoint reachable", 503)
 
+    # Pick the endpoint AND the target that belong to the application in front.
+    #
+    # The order matters: the FOREGROUND TARGET is resolved FIRST, and the
+    # same target is used for the identity check and for the action. The
+    # accessibility tree is per target, so checking the title of one target
+    # and clicking another is not a check at all.
+    #
+    # The ports share ONE budget (`ACTIVATE_BUDGET`): the focus sweep is
+    # repeated per port, and the whole request has to finish inside 15 s
+    # (the Rust client gives up at 20 s). Each port's sweep gets what is
+    # left of the budget, capped at one sweep deadline.
+    budget_deadline = time.monotonic() + ACTIVATE_BUDGET
+    chosen: int | None = None
+    fg_target: dict | None = None
+    identity: dict = {}
+    reason = "no reachable debug endpoint belongs to the application in front"
+    for p in ports:
+        remaining = budget_deadline - time.monotonic()
+        if remaining <= 0:
+            reason = (
+                "the request ran out of time before an endpoint could be checked"
+            )
+            break
+        sweep = min(FOCUS_SWEEP_DEADLINE, remaining)
+        kind = "chromium" if p in r["direct_ports"] else "electron"
+        try:
+            ident = await endpoint_identity(p, kind, target)
+        except Exception as e:  # noqa: BLE001 — one bad endpoint is not fatal
+            # A port that cannot be reached or driven is skipped, not fatal:
+            # the next port may be the one in front, and if none is, the
+            # refusal below is the answer.
+            log.warning("skipping endpoint on port %s: %s", p, e)
+            continue
+        # The APPLICATION check comes first: it is cheap, and an endpoint
+        # that belongs to another program must never be probed.
+        if not app_matches(expected_app, ident):
+            reason = (
+                f"the debug endpoint on port {p} belongs to "
+                f"{ident.get('app') or 'another application'}, not {expected_app}"
+            )
+            continue
+        try:
+            fg, why = await foreground_target(p, kind, target, expected_title, sweep)
+        except Exception as e:  # noqa: BLE001 — one bad endpoint is not fatal
+            log.warning("skipping endpoint on port %s: %s", p, e)
+            continue
+        if fg is None:
+            # No target proved it is in front: a refusal, never a guess.
+            reason = why or "the foreground target could not be established"
+            continue
+        # The TARGET must prove it is the one in front. It came from the
+        # title-matched candidate set and it proved the focus; the title is
+        # checked once more against the expected window.
+        if not endpoint_matches(expected_app, expected_title, ident, fg):
+            reason = "the focused target is not the window in front"
+            continue
+        chosen = p
+        fg_target = fg
+        identity = {
+            **ident,
+            "title": str(fg.get("title") or ""),
+            "url": str(fg.get("url") or ""),
+        }
+        break
+    if chosen is None or fg_target is None:
+        return _err(
+            "no reachable debug endpoint proves it is the application in front",
+            409,
+            expected_app=expected_app,
+            expected_title=expected_title,
+            reason=reason,
+        )
+    p = chosen
+
     t0 = time.monotonic()
-    p = ports[0]
     try:
         if p in r["direct_ports"]:
-            out = await direct_activate(p, target, name, role)
+            out = await direct_activate(fg_target, name, role)
         else:
             async with Electron(p) as e:
-                wcid = await e.pick_renderer(target)
+                wcid = fg_target.get("id")
                 if wcid is None:
                     return _err("no renderer", 502)
                 out = await e.click(wcid, name, role)
     except CdpError as e:
         return _err(str(e), 502)
+    except Exception as e:  # noqa: BLE001 — a transport failure is a 502, not a 500
+        log.warning("activate failed on port %s: %s", p, e)
+        return _err(f"the debug endpoint could not be driven: {e}", 502)
 
     if not out.get("ok"):
         return _err(out.get("error", "click failed"), 404, name=name,
                     available=out.get("availableButtons"))
     out["port"] = p
+    out["identity"] = identity
     out["latency_ms"] = int((time.monotonic() - t0) * 1000)
     return JSONResponse(out)
 

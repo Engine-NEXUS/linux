@@ -140,7 +140,7 @@ mod vision;
 mod webhook;
 mod youtube_center;
 // Windows.Media.Ocr — zero-RAM local screen text extraction (Feature 86).
-#[cfg(target_os = "windows")]
+// On Linux the same module hosts the local RapidOCR sidecar client.
 pub(crate) mod ocr;
 // Animation calibration (drag + scroll-wheel placement designer).
 pub(crate) mod calibration;
@@ -156,6 +156,30 @@ pub(crate) mod session;
 // Called from main() before Tauri/GTK starts — see the module docs.
 #[cfg(target_os = "linux")]
 pub mod gdk_backend_linux;
+
+// ── Linux semantic tier + policy gate ─────────────────────────────────────
+//
+// The Linux counterpart of UI Automation: the accessibility tree (AT-SPI),
+// the Chromium accessibility tree (CDP), and the identity-based policy gate
+// that every semantic operation passes through. `semantic` is the one entry
+// point; `policy` is the decision function; `pointer` owns the pre-capture
+// privacy gate.
+#[cfg(target_os = "linux")]
+pub(crate) mod atspi;
+#[cfg(target_os = "linux")]
+mod lazy_atspi;
+#[cfg(target_os = "linux")]
+pub(crate) mod cdp;
+#[cfg(target_os = "linux")]
+mod lazy_cdp;
+#[cfg(target_os = "linux")]
+pub(crate) mod semantic;
+#[cfg(target_os = "linux")]
+pub(crate) mod policy;
+#[cfg(target_os = "linux")]
+pub(crate) mod pointer;
+#[cfg(target_os = "linux")]
+mod lazy_ocr;
 
 use tauri::{Emitter, Listener, Manager};
 #[cfg(not(target_os = "windows"))]

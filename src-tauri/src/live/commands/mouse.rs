@@ -539,13 +539,32 @@ mod windows_impl {
 
 #[cfg(not(target_os = "windows"))]
 mod unix_stub {
-    /// Non-Windows: mouse ghost is Windows-only for now (Ghost plan).
-    pub fn current_pos() -> Option<(i32, i32)> {
-        None
+    /// Center point of an element for clicking.
+    pub fn element_center(el: &crate::screen::UiElement) -> (i32, i32) {
+        (el.x + el.w / 2, el.y + el.h / 2)
     }
 
-    pub fn resolve_element(_name: &str) -> Option<crate::screen::UiElement> {
-        None
+    /// Resolve an element name to a click point.
+    ///
+    /// Linux: the semantic tier (AT-SPI, then CDP) resolves a name exactly,
+    /// with geometry, in about a hundred milliseconds — and it is the only
+    /// tier that works on a native Wayland session, where UI Automation does
+    /// not exist.
+    ///
+    /// The lookup is **scoped to the observed foreground application**, so it
+    /// cannot return a control out of a background window (VS Code's "Save"
+    /// while Brave is in front), and when the foreground cannot be identified
+    /// it returns nothing at all rather than a wrong element.
+    pub fn resolve_element(name: &str) -> Option<crate::screen::UiElement> {
+        #[cfg(target_os = "linux")]
+        {
+            return crate::screen::find_by_name(name);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = name;
+            None
+        }
     }
 
     pub async fn ghost_click<R: tauri::Runtime>(
@@ -558,7 +577,7 @@ mod unix_stub {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub use unix_stub::{current_pos, ghost_click, resolve_element};
+pub use unix_stub::{element_center, ghost_click, resolve_element};
 
 #[cfg(test)]
 mod tests {

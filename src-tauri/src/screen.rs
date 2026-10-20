@@ -341,8 +341,17 @@ pub use win_extra::primary_monitor_size;
 #[path = "screen_linux.rs"]
 mod screen_linux;
 
+// On Linux the element lookup goes through the semantic tiers (AT-SPI, then
+// CDP) instead of UI Automation — the accessibility tree is the same
+// instrument, and on a native Wayland session it is the only one that works.
+// The capture helpers are the xdg-desktop-portal route, and they carry the
+// pre-capture privacy gate.
 #[cfg(target_os = "linux")]
-pub use screen_linux::{list_actionables, primary_monitor_size};
+pub use screen_linux::{
+    capture_jpeg_base64, capture_png_blocking, find_by_name, is_actionable_hit,
+    list_actionables, list_actionables_with_reason, primary_monitor_size, to_actionable_list,
+    ui_element,
+};
 
 /// Switch browser tab by index (1-based): Ctrl+1..8, Ctrl+9 = last.
 /// Hotkeys beat grounding for tabs — 100% reliable, instant.

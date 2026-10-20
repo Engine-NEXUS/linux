@@ -81,6 +81,107 @@ impl SessionKind {
     }
 }
 
+/// Where a trustworthy "which window is in front" answer can come from.
+///
+/// This is NOT the same question as [`SessionKind`]. `SessionKind` answers
+/// "which input backend can I use"; this answers "can I name the foreground
+/// window, and from what". The distinction matters because a Wayland session
+/// that also exports an X11 display (XWayland) is an X11 *input* session whose
+/// X11 *window list* is a lie: `xdotool` and `wmctrl` see only the X11
+/// compatibility windows, so a native Wayland window in front of them is
+/// invisible, and their "active window" is not the foreground.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForegroundSource {
+    /// A real X server: X11 tools see every window in the session.
+    X11,
+    /// XWayland — a Wayland compositor exporting an X11 compatibility display.
+    /// X11 tools see only the X11 windows, so they cannot name the foreground.
+    XWayland,
+    /// Native Wayland. Only the compositor (or AT-SPI) can name the foreground.
+    Wayland,
+    /// No display at all.
+    Headless,
+}
+
+impl ForegroundSource {
+    /// Whether an X11 tool (`xdotool`, `wmctrl`) can be trusted to report the
+    /// foreground window.
+    ///
+    /// `false` for XWayland on purpose: those tools answer with the active
+    /// *X11* window, which on an XWayland session is frequently not the window
+    /// the user is looking at. The policy gate compares the OBSERVED identity
+    /// against a deny-list, so a wrong identity is a wrong decision.
+    pub fn trusts_x11_tools(self) -> bool {
+        matches!(self, ForegroundSource::X11)
+    }
+
+    /// Whether the compositor itself has to be asked for the foreground
+    /// (there is no portable X11 shortcut on those sessions).
+    pub fn needs_compositor(self) -> bool {
+        matches!(self, ForegroundSource::Wayland | ForegroundSource::XWayland)
+    }
+}
+
+/// Classify where the foreground identity can come from. Pure + unit-tested.
+///
+/// The rules, in order:
+/// 1. `XDG_SESSION_TYPE=wayland` → native Wayland, whatever else is set.
+/// 2. A Wayland socket AND an X display → XWayland. The display manager says
+///    "x11" there, but a compositor is running: the X11 tools only see the
+///    compatibility windows.
+/// 3. An X display only → a real X server.
+/// 4. A Wayland socket only → native Wayland.
+pub fn classify_foreground_source(
+    session_type: Option<&str>,
+    wayland_display: Option<&str>,
+    display: Option<&str>,
+) -> ForegroundSource {
+    let non_empty = |v: Option<&str>| v.map(str::trim).filter(|s| !s.is_empty()).is_some();
+
+    if session_type
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.eq_ignore_ascii_case("wayland"))
+        .unwrap_or(false)
+    {
+        return ForegroundSource::Wayland;
+    }
+    let has_wl = non_empty(wayland_display);
+    let has_x11 = non_empty(display);
+    match (has_wl, has_x11) {
+        (true, true) => ForegroundSource::XWayland,
+        (true, false) => ForegroundSource::Wayland,
+        (false, true) => ForegroundSource::X11,
+        (false, false) => ForegroundSource::Headless,
+    }
+}
+
+static FOREGROUND_SOURCE: OnceLock<ForegroundSource> = OnceLock::new();
+
+/// Where this session's foreground identity can come from. Detected once.
+pub fn foreground_source() -> ForegroundSource {
+    *FOREGROUND_SOURCE.get_or_init(|| {
+        classify_foreground_source(
+            std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+            std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+            std::env::var("DISPLAY").ok().as_deref(),
+        )
+    })
+}
+
+/// True on the COSMIC desktop (Pop!_OS), where the compositor publishes the
+/// activated toplevel through `ext-foreign-toplevel-list-v1` +
+/// `zcosmic_toplevel_info_v1` rather than through AT-SPI.
+///
+/// COSMIC's own applications are absent from the accessibility bus, so on
+/// that desktop AT-SPI cannot name the foreground at all — the compositor is
+/// the only source. See `server/atspi_server.py::cosmic_active_toplevel`.
+pub fn is_cosmic() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|d| d.to_ascii_uppercase().contains("COSMIC"))
+        .unwrap_or(false)
+}
+
 /// Detect the session kind from the environment.
 ///
 /// `XDG_SESSION_TYPE` is authoritative when set — it is what the display
@@ -153,8 +254,9 @@ pub fn has_x11_input() -> bool {
 /// One-line diagnostic, appended to `nexus check` output.
 pub fn diagnostic_line() -> String {
     let k = kind();
+    let src = foreground_source();
     format!(
-        "display session: {} ({}) [XDG_SESSION_TYPE={} WAYLAND_DISPLAY={} DISPLAY={}]",
+        "display session: {} ({}) [XDG_SESSION_TYPE={} WAYLAND_DISPLAY={} DISPLAY={}{}{}]",
         match k {
             SessionKind::Wayland => "wayland",
             SessionKind::X11 => "x11",
@@ -164,6 +266,16 @@ pub fn diagnostic_line() -> String {
         env_or_dash("XDG_SESSION_TYPE"),
         env_or_dash("WAYLAND_DISPLAY"),
         env_or_dash("DISPLAY"),
+        if is_cosmic() {
+            " desktop=COSMIC"
+        } else {
+            ""
+        },
+        if src.needs_compositor() {
+            " foreground=compositor-only"
+        } else {
+            ""
+        },
     )
 }
 
@@ -265,5 +377,66 @@ mod tests {
         for needle in ["XDG_SESSION_TYPE", "WAYLAND_DISPLAY", "DISPLAY", "display session"] {
             assert!(line.contains(needle), "missing {needle} in {line}");
         }
+    }
+
+    // ── Foreground source: which tool may name the foreground window ──────
+
+    #[test]
+    fn plain_x11_session_trusts_x11_tools() {
+        let s = classify_foreground_source(Some("x11"), None, Some(":0"));
+        assert_eq!(s, ForegroundSource::X11);
+        assert!(s.trusts_x11_tools());
+        assert!(!s.needs_compositor());
+    }
+
+    #[test]
+    fn native_wayland_never_trusts_x11_tools() {
+        let s = classify_foreground_source(Some("wayland"), Some("wayland-0"), Some(":0"));
+        assert_eq!(s, ForegroundSource::Wayland);
+        assert!(!s.trusts_x11_tools());
+        assert!(s.needs_compositor());
+    }
+
+    #[test]
+    fn xwayland_is_not_plain_x11() {
+        // The case that matters: a Wayland session that ALSO exports DISPLAY.
+        // `xdotool` answers with the active X11 window, which is not the
+        // foreground of the session — the compositor or AT-SPI is.
+        let s = classify_foreground_source(Some("x11"), Some("wayland-0"), Some(":0"));
+        assert_eq!(s, ForegroundSource::XWayland);
+        assert!(
+            !s.trusts_x11_tools(),
+            "XWayland must not be treated as a plain X11 session for foreground identity"
+        );
+        assert!(s.needs_compositor());
+    }
+
+    #[test]
+    fn xwayland_is_detected_without_a_session_type() {
+        let s = classify_foreground_source(None, Some("wayland-0"), Some(":0"));
+        assert_eq!(s, ForegroundSource::XWayland);
+    }
+
+    #[test]
+    fn wayland_socket_without_x11_is_native_wayland() {
+        let s = classify_foreground_source(None, Some("wayland-0"), None);
+        assert_eq!(s, ForegroundSource::Wayland);
+        assert!(!s.trusts_x11_tools());
+    }
+
+    #[test]
+    fn headless_has_no_foreground_source() {
+        let s = classify_foreground_source(None, None, None);
+        assert_eq!(s, ForegroundSource::Headless);
+        assert!(!s.trusts_x11_tools());
+        assert!(!s.needs_compositor());
+    }
+
+    #[test]
+    fn foreground_source_session_type_is_case_insensitive() {
+        assert_eq!(
+            classify_foreground_source(Some("WayLand"), None, Some(":0")),
+            ForegroundSource::Wayland
+        );
     }
 }

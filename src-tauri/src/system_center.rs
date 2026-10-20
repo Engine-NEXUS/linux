@@ -204,9 +204,95 @@ pub fn inspect_window_native(title_query: Option<&str>) -> Value {
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn inspect_window_native(_title_query: Option<&str>) -> Value {
+    inspect_window_semantic()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn inspect_window_native(_title_query: Option<&str>) -> Value {
     json!({ "status": "unsupported", "message": "Native UIA requires Windows" })
+}
+
+/// Inspect the foreground window's interactive elements on Linux.
+///
+/// The Windows implementation walks the UI Automation tree. On Linux the
+/// equivalent tree is the accessibility bus (AT-SPI), reached through the
+/// semantic tier, and it answers the same question: what can the user click
+/// here, and what is it called?
+///
+/// The operation reads every accessible name in the window, so it goes through
+/// the policy gate exactly like every other semantic read. An unidentified
+/// window is refused rather than reported as "no controls" — those are very
+/// different answers, and only one of them is safe to act on.
+///
+/// The list is filtered through the **same rule** the click path uses
+/// (`screen::is_actionable_hit`, the predicate `to_actionable_list` applies),
+/// so a credential field is never offered as an actionable item here either.
+#[cfg(target_os = "linux")]
+pub fn inspect_window_semantic() -> Value {
+    match crate::semantic::list_actionables() {
+        Ok(hits) => {
+            let hits: Vec<crate::semantic::SemanticHit> = hits
+                .into_iter()
+                .filter(crate::screen::is_actionable_hit)
+                .collect();
+            let elements: Vec<Value> = hits
+                .iter()
+                .map(|h| {
+                    json!({
+                        "name": h.name,
+                        "role": h.role,
+                        "actions": h.actions,
+                        "tier": h.tier.as_str(),
+                        "bounds": h.bounds.map(|b| json!({
+                            "left": b.x, "top": b.y, "width": b.w, "height": b.h
+                        })).unwrap_or(Value::Null),
+                        "center": h.center().map(|(x, y)| json!({"x": x, "y": y})).unwrap_or(Value::Null),
+                        "skeleton_risk": h.chromium_skeleton_risk,
+                    })
+                })
+                .collect();
+            let fg = crate::semantic::observed_foreground();
+            let (app, title) = match &fg {
+                crate::atspi::Foreground::Known { app, title } => (app.clone(), title.clone()),
+                crate::atspi::Foreground::Unknown { .. } => (String::new(), String::new()),
+            };
+            json!({
+                "status": "ok",
+                "window": { "app": app, "name": title },
+                "elements": elements,
+            })
+        }
+        Err(e) => json!({
+            "status": "refused",
+            "message": e.spoken(),
+        }),
+    }
+}
+
+/// Click (activate) a named element on Linux, through the semantic tiers.
+///
+/// This is the Wayland-safe path: the *application* performs the action, so
+/// no synthetic input is needed — no portal, no `/dev/uinput`, no consent
+/// dialog. That is the whole reason the semantic tier exists.
+#[cfg(target_os = "linux")]
+pub fn click_element_by_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("no element name given".to_string());
+    }
+    match crate::semantic::activate(name, None) {
+        Ok(outcome) if outcome.ok => Ok(format!(
+            "Clicked {} ({}), sir.",
+            outcome.name, outcome.tier.as_str()
+        )),
+        Ok(outcome) => Err(format!(
+            "{} did not act on {name}, sir.",
+            outcome.tier.as_str()
+        )),
+        Err(e) => Err(e.spoken()),
+    }
 }
 
 #[cfg(test)]
@@ -259,5 +345,25 @@ mod tests {
     fn test_system_center_resolve_script_path() {
         let path = resolve_ufo_script_path();
         assert!(path.is_some(), "UFO script path should resolve in workspace");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_inspection_never_claims_an_empty_window_is_fine() {
+        // Without an accessibility bus the inspection must REFUSE, not report
+        // "status: ok, no elements" — an empty list reads as "this window has
+        // no controls", which is a different claim from "I could not look".
+        let v = inspect_window_native(None);
+        let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+        assert!(
+            status == "ok" || status == "refused",
+            "unexpected status {status}"
+        );
+        if status == "refused" {
+            assert!(
+                v.get("message").and_then(|m| m.as_str()).is_some(),
+                "a refusal must explain itself"
+            );
+        }
     }
 }

@@ -1,21 +1,27 @@
-//! Screen pointer — Phase 2 of the clicky-style screen agent (Route C).
+//! Screen pointer and the pre-capture privacy gate.
 //!
-//! The marker renders inside the always-alive main stage window (no new
-//! window, no extra WebView RAM, no creation latency — the stage is
-//! transparent + click-through at idle and is never natively hidden).
-//! Rust evaluates the Table-B visibility conditions ([`decide`], pure +
-//! unit-tested) and emits `pointer:show` / `pointer:hide`; the frontend
-//! owns CSS positioning (devicePixelRatio-aware), dwell timing, and fade.
+//! Two jobs live here, and they share one fact: **who is in front**.
+//!
+//! 1. The pointer marker (Phase 2 of the clicky-style screen agent). The
+//!    marker renders inside the always-alive main stage window (no new window,
+//!    no extra WebView RAM, no creation latency — the stage is transparent +
+//!    click-through at idle and is never natively hidden). Rust evaluates the
+//!    Table-B visibility conditions ([`decide`], pure + unit-tested) and emits
+//!    `pointer:show` / `pointer:hide`; the frontend owns CSS positioning
+//!    (devicePixelRatio-aware), dwell timing, and fade.
+//!
+//! 2. The **pre-capture gate** ([`capture_gate`]). Every screen capture — for
+//!    vision, for the narrated tour, for the screen context — passes through
+//!    it first. It refuses when the foreground window cannot be identified,
+//!    because "I could not tell" is not "there is nothing to redact": a
+//!    privacy control that quietly fails is worse than one that visibly
+//!    refuses.
+//!
+//! The identity used everywhere is the **observed** one, reported by the
+//! platform. Never the name the model supplied — a prompt injection can
+//! rename its target, but it cannot change what the toolkit reports.
 
-use tauri::{AppHandle, Emitter, Runtime};
-
-/// Model point in 0-1000 normalized coordinates (from `vision.rs`).
-#[derive(Debug, Clone)]
-pub struct NormPoint {
-    pub x: u16,
-    pub y: u16,
-    pub label: String,
-}
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// Payload of the `pointer:show` event. Coordinates are PHYSICAL screen
 /// pixels on the captured (primary) monitor; the frontend divides by
@@ -28,7 +34,8 @@ pub struct PointerShow {
     pub dwell_ms: u64,
 }
 
-/// Resolved pointer settings (settings.json, clamped).
+/// Resolved pointer settings (clamped).
+#[derive(Debug, Clone)]
 pub struct PointerSettings {
     pub enabled: bool,
     pub dwell_ms: u64,
@@ -36,18 +43,102 @@ pub struct PointerSettings {
     pub suppress_fullscreen: bool,
 }
 
+impl Default for PointerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dwell_ms: 6000,
+            excluded_apps: Vec::new(),
+            suppress_fullscreen: true,
+        }
+    }
+}
+
+/// The on-disk name of the pointer/capture settings file.
+///
+/// It lives beside `settings.json` but is a **separate** file on purpose:
+/// `save_settings` rewrites `settings.json` wholesale from the typed
+/// `NexusSettings` struct, so any key it does not know about is dropped on the
+/// next save. A dedicated file survives that, and it keeps this Linux-only
+/// surface out of the shared settings struct.
+const POINTER_SETTINGS_FILE: &str = "pointer.json";
+
+/// The app's data directory, without an `AppHandle`.
+///
+/// `AppHandle::path()` is the authoritative source, but the capture gate also
+/// runs inside the capture primitive, which has no handle. Tauri's Linux app
+/// data directory is `$XDG_DATA_HOME/<identifier>`, and `dirs-next` is already
+/// a dependency.
+fn app_data_dir_fallback() -> Option<std::path::PathBuf> {
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(dirs_next::data_dir)?;
+    Some(base.join("com.nexus.assistant"))
+}
+
+/// Read the pointer/capture settings.
+///
+/// The exclusion list is empty by default, which does **not** weaken the gate:
+/// the always-on protections (unknown foreground, sensitive window) do not
+/// depend on it. It only adds the user's own list on top.
+///
+/// The file is hand-editable JSON:
+///
+/// ```json
+/// { "excludedApps": ["bank", "1password"], "dwellSeconds": 6 }
+/// ```
 pub fn read_settings<R: Runtime>(app: &AppHandle<R>) -> PointerSettings {
-    let s = crate::commands::get_settings(app.clone()).unwrap_or_default();
+    read_settings_from(app.path().app_data_dir().ok())
+}
+
+/// The same settings, read without an `AppHandle`.
+///
+/// Used by the capture primitive, which has no handle: the gate must be
+/// enforceable at the point where the pixels are produced, not only where a
+/// handle happens to be available.
+pub fn read_settings_no_app() -> PointerSettings {
+    read_settings_from(app_data_dir_fallback())
+}
+
+fn read_settings_from(dir: Option<std::path::PathBuf>) -> PointerSettings {
+    let Some(dir) = dir else {
+        return PointerSettings::default();
+    };
+    let path = dir.join(POINTER_SETTINGS_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return PointerSettings::default();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return PointerSettings::default();
+    };
+    let d = PointerSettings::default();
     PointerSettings {
-        enabled: s.pointer_enabled,
-        dwell_ms: s.pointer_dwell_seconds.clamp(3, 15) as u64 * 1000,
-        excluded_apps: s
-            .pointer_excluded_apps
-            .split(',')
-            .map(|p| p.trim().to_lowercase())
-            .filter(|p| !p.is_empty())
-            .collect(),
-        suppress_fullscreen: s.pointer_suppress_fullscreen,
+        enabled: v
+            .get("enabled")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(d.enabled),
+        dwell_ms: v
+            .get("dwellSeconds")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(d.dwell_ms / 1000)
+            .clamp(3, 15)
+            * 1000,
+        excluded_apps: v
+            .get("excludedApps")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.as_str())
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        suppress_fullscreen: v
+            .get("suppressFullscreen")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(d.suppress_fullscreen),
     }
 }
 
@@ -81,16 +172,14 @@ pub fn decide(ctx: &PointerContext, settings: &PointerSettings) -> PointerDecisi
     if !ctx.response_is_locate || !ctx.has_point {
         return PointerDecision::Hide { reason: "not a locate response" };
     }
-    match &ctx.foreground_title {
-        ForegroundTitle::Known(title) => {
-            if exclusion_hit(title, &settings.excluded_apps).is_some() {
-                return PointerDecision::Hide { reason: "foreground app is excluded" };
-            }
-        }
-        // Unidentified is not "unexcluded". Drawing a pointer over a window we
-        // cannot vet leaks its layout to the screenshot behind it.
-        ForegroundTitle::Unknown => {
-            return PointerDecision::Hide { reason: "foreground window unidentified" };
+    // Unidentified is not "unexcluded". Drawing a pointer over a window we
+    // cannot vet leaks its layout to the screenshot behind it.
+    if ctx.foreground_title.is_unknown() {
+        return PointerDecision::Hide { reason: "foreground window unidentified" };
+    }
+    if let ForegroundTitle::Known(title) = &ctx.foreground_title {
+        if exclusion_hit(title, &settings.excluded_apps).is_some() {
+            return PointerDecision::Hide { reason: "foreground app is excluded" };
         }
     }
     if settings.suppress_fullscreen && ctx.fullscreen_active {
@@ -112,14 +201,42 @@ pub enum ForegroundTitle {
 }
 
 impl ForegroundTitle {
-    pub fn as_option(&self) -> Option<&str> {
-        match self {
-            ForegroundTitle::Known(t) => Some(t.as_str()),
-            ForegroundTitle::Unknown => None,
-        }
-    }
     pub fn is_unknown(&self) -> bool {
         matches!(self, ForegroundTitle::Unknown)
+    }
+}
+
+/// The observed foreground window, as the platform reports it.
+///
+/// `Known` and `Unknown` are deliberately distinct. Collapsing them is the bug
+/// `docs/features/research/22` listed as severity 1: the privacy gate returned
+/// "no match" for "I could not tell", and bank windows got screenshotted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForegroundIdentity {
+    Known { app: String, title: String },
+    /// No mechanism available, or the platform reported an ambiguous answer.
+    Unknown { reason: String },
+}
+
+impl ForegroundIdentity {
+    pub fn is_known(&self) -> bool {
+        matches!(self, ForegroundIdentity::Known { .. })
+    }
+    /// The app name, the title, or both — whichever the platform gave us.
+    pub fn labels(&self) -> Vec<String> {
+        match self {
+            ForegroundIdentity::Known { app, title } => {
+                let mut v = Vec::new();
+                if !app.trim().is_empty() {
+                    v.push(app.clone());
+                }
+                if !title.trim().is_empty() {
+                    v.push(title.clone());
+                }
+                v
+            }
+            ForegroundIdentity::Unknown { .. } => Vec::new(),
+        }
     }
 }
 
@@ -127,16 +244,16 @@ impl ForegroundTitle {
 ///
 /// Windows: `GetForegroundWindow` + `GetWindowTextW`.
 ///
-/// Linux/X11 (including XWayland): `xdotool getactivewindow getwindowname`. This
+/// Linux/X11 (a real X server): `xdotool getactivewindow getwindowname`. This
 /// is the same mechanism `architect.rs` already uses, so it introduces no new
 /// dependency — but it needs `$DISPLAY`, which native Wayland does not provide.
 ///
-/// Linux/native Wayland: **`Unknown`.** There is no portable compositor API for
-/// this. `org.gnome.Shell.Eval` has been disabled since GNOME 41, and there is
-/// no "get active window" XDG portal. The portable route is the AT-SPI focused
-/// accessible, which is Step 2 of the computer-control work order. Until then
-/// this returns `Unknown` and `exclusion_gate` **refuses to capture** rather than
-/// capturing a screen it cannot vet.
+/// Linux/Wayland **and Linux/XWayland**: the AT-SPI tier, because there is no
+/// portable compositor API (`org.gnome.Shell.Eval` has been disabled since
+/// GNOME 41, and there is no "get active window" XDG portal). On XWayland the
+/// X11 tools are *not* used even though `$DISPLAY` is set: they see only the
+/// X11 compatibility windows, so the "active window" they report is frequently
+/// not the window the user is looking at.
 #[cfg(target_os = "windows")]
 pub fn foreground_title() -> ForegroundTitle {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
@@ -161,87 +278,115 @@ pub fn foreground_title() -> ForegroundTitle {
 
 #[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
 pub fn foreground_title() -> ForegroundTitle {
-    if crate::session::is_wayland() {
-        // Native Wayland: no compositor API exists (Shell.Eval was disabled in
-        // GNOME 41, and there is no get-active-window portal), but AT-SPI knows
-        // which application holds the focused window.
-        //
-        // This is what lets the privacy gate stop refusing. Commit
-        // `fix(pointer): fail-closed privacy exclusion gate` made this function
-        // return `Unknown` here, which made screen vision refuse outright on
-        // Wayland — correct but useless. The semantic tier supplies the missing
-        // fact, so the guarantee is kept *and* the feature comes back.
-        return wayland_foreground_via_atspi();
+    match observed_identity() {
+        ForegroundIdentity::Known { app, title } => {
+            let label = if !title.trim().is_empty() {
+                title
+            } else {
+                app
+            };
+            if label.trim().is_empty() {
+                ForegroundTitle::Unknown
+            } else {
+                ForegroundTitle::Known(label)
+            }
+        }
+        ForegroundIdentity::Unknown { .. } => ForegroundTitle::Unknown,
     }
-    x11_foreground_title().map(ForegroundTitle::Known).unwrap_or(ForegroundTitle::Unknown)
 }
 
-/// Foreground window on native Wayland, via the AT-SPI tier.
+/// The observed foreground identity: application name and window title.
 ///
-/// Blocking by necessity: `exclusion_gate` is a sync function called from the
-/// orchestrator before capture, and the sidecar is a separate process. Kept off
-/// the async runtime so it cannot stall the executor, and cached briefly because
-/// the answer cannot change within a few milliseconds and the sidecar round trip
+/// This is the fact the whole privacy model rests on, so it is obtained the
+/// careful way:
+///
+/// 1. **AT-SPI first.** The accessibility bus knows which application holds
+///    the focused window, and it works on Wayland and X11 alike. It also
+///    refuses to answer when more than one window claims to be active, which
+///    is the correct answer rather than a guess.
+/// 2. **X11 tools only on a real X server.** On XWayland they cannot see the
+///    native Wayland windows at all.
+/// 3. **Otherwise: unknown.** Which makes the capture gate refuse.
+///
+/// Blocking by necessity: the gate is called from the orchestrator before
+/// capture, and the sidecar is a separate process. Cached briefly because the
+/// answer cannot change within a few milliseconds and the sidecar round trip
 /// is the most expensive thing on the pre-capture path.
 #[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
-fn wayland_foreground_via_atspi() -> ForegroundTitle {
+pub fn observed_identity() -> ForegroundIdentity {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     // (instant, answer) — a short cache, not a permanent one, so closing a
     // window is reflected promptly.
-    static CACHE: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
+    static CACHE: Mutex<Option<(Instant, ForegroundIdentity)>> = Mutex::new(None);
     const TTL: Duration = Duration::from_millis(1500);
 
     if let Ok(guard) = CACHE.lock() {
-        if let Some((at, title)) = guard.as_ref() {
+        if let Some((at, id)) = guard.as_ref() {
             if at.elapsed() < TTL {
-                return match title {
-                    Some(t) => ForegroundTitle::Known(t.clone()),
-                    None => ForegroundTitle::Unknown,
-                };
+                return id.clone();
             }
         }
     }
 
-    let answer = match tokio::runtime::Handle::try_current() {
-        // Already inside a runtime: hop to a blocking lane rather than nesting.
-        Ok(_) => tokio::task::block_in_place(|| blocking_focus_query()),
-        Err(_) => blocking_focus_query(),
-    };
+    // The query itself runs on a thread of its own (see `semantic`), so this
+    // is safe from any calling context — including inside an async task.
+    let answer = blocking_focus_query();
 
     if let Ok(mut guard) = CACHE.lock() {
         *guard = Some((Instant::now(), answer.clone()));
     }
+    answer
+}
 
-    match answer {
-        Some(t) if !t.trim().is_empty() => ForegroundTitle::Known(t),
-        _ => ForegroundTitle::Unknown,
+#[cfg(all(target_os = "linux", feature = "mock-wake"))]
+pub fn observed_identity() -> ForegroundIdentity {
+    ForegroundIdentity::Unknown {
+        reason: "mock wake build".into(),
     }
 }
 
-#[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
-fn blocking_focus_query() -> Option<String> {
-    use std::time::Duration;
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn observed_identity() -> ForegroundIdentity {
+    ForegroundIdentity::Unknown {
+        reason: "no foreground identity on this platform".into(),
+    }
+}
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    // The overall budget is enforced by the HTTP client's own timeout, so a
-    // wedged sidecar cannot hold the pre-capture path indefinitely.
-    let _ = Duration::from_secs(4);
-    let fg = rt.block_on(crate::atspi::focused()).ok()?;
-    match fg {
-        crate::atspi::Foreground::Known { title, .. } if !title.trim().is_empty() => Some(title),
-        // An identified app with an empty title is still an identification, and
-        // reporting Unknown would re-break the gate for titleless windows. The
-        // app name is a worse but usable proxy.
-        crate::atspi::Foreground::Known { app, .. } if !app.trim().is_empty() => Some(app),
-        // Identified, but with neither a title nor an app name: treat as unknown
-        // rather than inventing a value the gate would then fail to match.
-        crate::atspi::Foreground::Known { .. } => None,
-        crate::atspi::Foreground::Unknown { .. } => None,
+/// Ask the accessibility bus who is in front.
+///
+/// The reply is used verbatim, including its "ambiguous" verdict: several
+/// windows claiming to be active is NOT resolved by picking the first one.
+#[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
+fn blocking_focus_query() -> ForegroundIdentity {
+    match crate::semantic::observed_foreground() {
+        crate::atspi::Foreground::Known { app, title } => {
+            // An identified app with an empty title is still an identification:
+            // reporting Unknown would re-break the gate for titleless windows.
+            // The app name is a worse but usable proxy.
+            if app.trim().is_empty() && title.trim().is_empty() {
+                ForegroundIdentity::Unknown {
+                    reason: "the accessibility bus named no application".into(),
+                }
+            } else {
+                ForegroundIdentity::Known { app, title }
+            }
+        }
+        crate::atspi::Foreground::Unknown { reason } => {
+            // Second source: the X11 tools — but only on a REAL X server. On
+            // XWayland they see only the compatibility windows, so the window
+            // they call "active" is frequently not the one in front.
+            if crate::session::foreground_source().trusts_x11_tools() {
+                if let Some(title) = x11_foreground_title() {
+                    return ForegroundIdentity::Known {
+                        app: String::new(),
+                        title,
+                    };
+                }
+            }
+            ForegroundIdentity::Unknown { reason }
+        }
     }
 }
 
@@ -305,99 +450,121 @@ pub fn fullscreen_active() -> bool {
     false
 }
 
-/// Outcome of the pre-screenshot privacy gate.
-///
-/// This is an enum rather than `Option<String>` precisely so that "we could not
-/// identify the foreground window" cannot be collapsed into "nothing matched".
-/// That collapse is the bug this type exists to prevent.
+// ─── The capture gate ──────────────────────────────────────────────────────
+//
+// Everything above this line is the *pointer marker*. Everything below is the
+// gate that decides whether pixels may leave the machine at all, and it is the
+// part that matters on a desktop where the assistant shares the screen with
+// the user's bank.
+
+/// The verdict of the pre-capture gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExclusionVerdict {
-    /// No exclusion applies. Capture may proceed.
+pub enum CaptureGate {
+    /// Capture may proceed.
     Allow,
-    /// The foreground window matches an entry on the privacy list.
-    Blocked(String),
-    /// The foreground window could not be identified, so no match can be ruled
-    /// out. Callers must refuse capture.
+    /// The foreground window is on the user's privacy list.
+    Excluded(String),
+    /// The foreground window could not be identified, so nothing can be ruled
+    /// out. Capture must be refused.
     UnknownForeground,
+    /// The foreground window is a vault, a bank, a wallet or similar.
+    SensitiveWindow,
 }
 
-/// Pre-screenshot privacy gate.
-///
-/// Returns [`ExclusionVerdict::Blocked`] when the foreground window is on the
-/// privacy list, and [`ExclusionVerdict::UnknownForeground`] when we cannot
-/// identify it. Callers must refuse capture on both — no pixels, no element names.
-///
-/// ## Fail-closed by design
-///
-/// Before this change the gate short-circuited on `foreground_title()?`, so on
-/// every non-Windows platform it returned `None` — indistinguishable from
-/// "no match". `docs/features/research/22-…` recorded the consequence: banking
-/// and password-manager windows were screenshotted and OCR'd with the privacy
-/// list fully configured and silently doing nothing.
-///
-/// Refusing when the title is unknown trades a feature for a guarantee. On
-/// native Wayland that means screen vision is unavailable until the AT-SPI tier
-/// lands, which is the correct trade: a privacy control that quietly fails is
-/// worse than one that visibly refuses.
-pub fn exclusion_verdict<R: Runtime>(app: &AppHandle<R>) -> ExclusionVerdict {
-    let settings = read_settings(app);
-    if settings.excluded_apps.is_empty() {
-        return ExclusionVerdict::Allow;
+impl CaptureGate {
+    /// Whether the capture may proceed.
+    pub fn allows_capture(&self) -> bool {
+        matches!(self, CaptureGate::Allow)
     }
-    match foreground_title() {
-        ForegroundTitle::Unknown => ExclusionVerdict::UnknownForeground,
-        ForegroundTitle::Known(title) => match exclusion_hit(&title, &settings.excluded_apps) {
-            Some(hit) => ExclusionVerdict::Blocked(hit.clone()),
-            None => ExclusionVerdict::Allow,
-        },
-    }
-}
 
-/// Backwards-compatible convenience wrapper. `true` means capture must NOT
-/// proceed — including when the foreground window is unknown.
-pub fn exclusion_gate<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
-    match exclusion_verdict(app) {
-        ExclusionVerdict::Allow => None,
-        ExclusionVerdict::Blocked(app_name) => Some(app_name),
-        ExclusionVerdict::UnknownForeground => Some(UNKNOWN_FOREGROUND.to_string()),
+    /// A short sentence explaining the refusal, suitable for speaking.
+    ///
+    /// It names the user's own privacy-list entry (which the user typed) and
+    /// never the protected window's title: the reason a vault is refused is
+    /// the point, the vault's title is not.
+    pub fn spoken(&self) -> String {
+        match self {
+            CaptureGate::Allow => String::new(),
+            CaptureGate::Excluded(entry) => {
+                format!("That's on your privacy list, sir — I won't look at {entry}.")
+            }
+            CaptureGate::UnknownForeground => {
+                "I can't tell which window is in front, sir, so I won't risk looking at \
+                 the screen."
+                    .to_string()
+            }
+            CaptureGate::SensitiveWindow => {
+                "That window holds credentials or money, sir — I won't look at it.".to_string()
+            }
+        }
     }
 }
 
-pub const UNKNOWN_FOREGROUND: &str = "<foreground window unidentified>";
-
-/// Evaluate conditions and emit `pointer:show` when they pass. `norm`
-/// is the 0-1000 model point; `shot_w/h` the ORIGINAL capture dims.
-/// Returns true when the marker was shown.
-pub fn maybe_show<R: Runtime>(
-    app: &AppHandle<R>,
-    is_locate: bool,
-    point: Option<&crate::vision::PointNorm>,
-    shot_w: u32,
-    shot_h: u32,
-) -> bool {
-    let settings = read_settings(app);
-    let ctx = PointerContext {
-        response_is_locate: is_locate,
-        has_point: point.is_some(),
-        foreground_title: foreground_title(),
-        fullscreen_active: fullscreen_active(),
+/// Pure: the capture gate over an observed identity and a privacy list.
+///
+/// The order matters and is deliberate:
+///
+/// 1. **The policy layer decides.** The built-in rules — a sensitive window
+///    is refused, an unidentified window is refused — live in
+///    [`crate::policy::decide`] and nowhere else, so there is exactly one
+///    implementation of them.
+/// 2. **The user's own privacy list**, on top: a case-insensitive substring
+///    match against the OBSERVED app name and title.
+///
+/// The policy's `Decision` does not say WHICH rule fired, so the mapping back
+/// to a spoken reason uses the same facts the decision was made from.
+pub fn capture_gate_for(identity: &ForegroundIdentity, excluded: &[String]) -> CaptureGate {
+    let known = identity.is_known();
+    let sensitive = match identity {
+        ForegroundIdentity::Known { app, title } => crate::policy::classify_window(app, title),
+        ForegroundIdentity::Unknown { .. } => None,
     };
-    match decide(&ctx, &settings) {
-        PointerDecision::Hide { reason } => {
-            tracing::info!("pointer: hidden ({reason})");
-            false
+
+    // ONE implementation decides: the policy layer.
+    match crate::policy::decide(crate::policy::Op::Capture, known, sensitive, None) {
+        crate::policy::Decision::Allow => {}
+        crate::policy::Decision::Deny { .. } => {
+            return if sensitive.is_some() {
+                CaptureGate::SensitiveWindow
+            } else {
+                // The window could not be identified, so nothing can be ruled
+                // out. (A deny for any other reason is also treated as a
+                // refusal: the gate fails closed.)
+                CaptureGate::UnknownForeground
+            };
         }
-        PointerDecision::Show { dwell_ms } => {
-            let pt = point.expect("decide Show implies has_point");
-            let x = pt.x as f64 / 1000.0 * shot_w as f64;
-            let y = pt.y as f64 / 1000.0 * shot_h as f64;
-            emit_physical(app, dwell_ms, x, y, pt.label.clone())
+        crate::policy::Decision::Confirm { .. } => return CaptureGate::UnknownForeground,
+    }
+
+    // The user's own list, on top of the built-in rules.
+    for label in identity.labels() {
+        if let Some(hit) = exclusion_hit(&label, excluded) {
+            return CaptureGate::Excluded(hit.clone());
         }
     }
+    CaptureGate::Allow
 }
 
-/// Show the marker at exact physical pixels (Phase-3a UIA locate-first:
-/// no VLM call, no quota). Same Table-B conditions as the vision path.
+/// The capture gate as it applies right now.
+///
+/// Used by the capture primitives themselves, so no path can reach the pixels
+/// without passing the gate. The user's privacy list is read from disk when
+/// it can be found; the always-on protections (unknown identity, sensitive
+/// window) do not depend on it.
+pub fn capture_gate_now() -> CaptureGate {
+    let settings = read_settings_no_app();
+    capture_gate_for(&observed_identity(), &settings.excluded_apps)
+}
+
+/// The capture gate with an `AppHandle` in hand (same verdict, plus the
+/// user's list read from the app's own data directory).
+pub fn capture_gate<R: Runtime>(app: &AppHandle<R>) -> CaptureGate {
+    let settings = read_settings(app);
+    capture_gate_for(&observed_identity(), &settings.excluded_apps)
+}
+
+/// Show the marker at exact physical pixels (locate-first: no VLM call, no
+/// quota). Same Table-B conditions as the vision path.
 pub fn show_direct<R: Runtime>(app: &AppHandle<R>, x: f64, y: f64, label: String) -> bool {
     let settings = read_settings(app);
     let ctx = PointerContext {
@@ -441,12 +608,6 @@ fn emit_physical<R: Runtime>(
 
 /// Emit `pointer:hide` (tray/menu path; the frontend also hides on new
 /// turns and dwell expiry by itself).
-#[tauri::command]
-pub fn hide_pointer<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    emit_hide(&app)
-}
-
-/// Non-command hide for in-process callers (stop-speech, repeat flows).
 pub fn emit_hide<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     app.emit("pointer:hide", ()).map_err(|e| e.to_string())
 }
@@ -550,5 +711,101 @@ mod tests {
         );
         assert!(exclusion_hit("VS Code", &excluded).is_none());
         assert!(exclusion_hit("anything", &[]).is_none());
+    }
+
+    // ── The capture gate ──────────────────────────────────────────────────
+
+    fn known(app: &str, title: &str) -> ForegroundIdentity {
+        ForegroundIdentity::Known {
+            app: app.into(),
+            title: title.into(),
+        }
+    }
+
+    fn unknown() -> ForegroundIdentity {
+        ForegroundIdentity::Unknown {
+            reason: "no answer".into(),
+        }
+    }
+
+    #[test]
+    fn an_unknown_foreground_refuses_the_capture() {
+        // The whole point of the gate: "I could not tell" is not "nothing to
+        // redact". It must refuse, whatever the exclusion list says.
+        let g = capture_gate_for(&unknown(), &[]);
+        assert_eq!(g, CaptureGate::UnknownForeground);
+        assert!(!g.allows_capture());
+    }
+
+    #[test]
+    fn an_unknown_foreground_refuses_even_with_an_empty_privacy_list() {
+        // The old gate short-circuited on an empty list and returned "allow".
+        // That is the fail-open the audit found: the list was configured and
+        // silently doing nothing.
+        let g = capture_gate_for(&unknown(), &[]);
+        assert!(!g.allows_capture());
+    }
+
+    #[test]
+    fn a_sensitive_window_refuses_the_capture() {
+        for (app, title) in [
+            ("1Password", "Vault"),
+            ("firefox", "PayPal — Activity"),
+            ("brave", "Zerodha — Holdings"),
+        ] {
+            let g = capture_gate_for(&known(app, title), &[]);
+            assert_eq!(g, CaptureGate::SensitiveWindow, "{app}/{title}");
+            assert!(!g.allows_capture());
+        }
+    }
+
+    #[test]
+    fn a_sensitive_window_refuses_even_when_the_list_does_not_mention_it() {
+        // The built-in list is always on: it does not depend on the user
+        // having configured anything.
+        let g = capture_gate_for(&known("keepassxc", "My Vault"), &[]);
+        assert_eq!(g, CaptureGate::SensitiveWindow);
+    }
+
+    #[test]
+    fn the_users_own_privacy_list_refuses_the_capture() {
+        // "steam" is not one of the built-in sensitive patterns, so this
+        // exercises the user's own list rather than the built-in one.
+        let excluded = vec!["steam".to_string()];
+        let g = capture_gate_for(&known("firefox", "Steam — Community"), &excluded);
+        assert_eq!(g, CaptureGate::Excluded("steam".to_string()));
+        assert!(!g.allows_capture());
+    }
+
+    #[test]
+    fn the_privacy_list_entry_is_named_because_the_user_typed_it() {
+        // The user's own list is safe to echo; the window's title is not.
+        let excluded = vec!["steam".to_string()];
+        let g = capture_gate_for(&known("firefox", "Steam — Community"), &excluded);
+        assert!(g.spoken().contains("steam"));
+        assert!(!g.spoken().contains("Community"));
+    }
+
+    #[test]
+    fn an_ordinary_window_is_allowed() {
+        let g = capture_gate_for(&known("code", "main.rs — nexus"), &["bank".to_string()]);
+        assert_eq!(g, CaptureGate::Allow);
+        assert!(g.allows_capture());
+    }
+
+    #[test]
+    fn the_spoken_reason_never_names_the_protected_window() {
+        // The refusal must explain itself without disclosing the title of the
+        // window it is protecting.
+        let g = capture_gate_for(&known("1Password", "Vault — Chase"), &[]);
+        let spoken = g.spoken();
+        assert!(!spoken.is_empty());
+        assert!(!spoken.contains("Chase"));
+        assert!(!spoken.contains("1Password"));
+    }
+
+    #[test]
+    fn an_allowed_gate_says_nothing() {
+        assert!(CaptureGate::Allow.spoken().is_empty());
     }
 }

@@ -29,9 +29,22 @@ pub struct SemanticHit {
     pub name: String,
     /// AT-SPI role or CDP role. Comparable to a Windows UIA control type.
     pub role: String,
+    /// The application the element belongs to (the accessibility bus'
+    /// application name).
+    pub app: String,
     pub bounds: Option<crate::atspi::AtspiBounds>,
     /// Which tier answered. Useful for explaining latency and for diagnostics.
     pub tier: Tier,
+    /// The actions the toolkit exposes on this element ("click", "press", …).
+    /// Empty means the element exists but cannot be invoked.
+    pub actions: Vec<String>,
+    /// The toolkit's state set for the element (focused, editable, …).
+    pub states: Vec<String>,
+    /// True when the element lives in a Chromium/Electron app, whose AT-SPI
+    /// tree is a skeleton unless the renderer was launched with
+    /// `--force-renderer-accessibility`. A miss in such a tree is expected
+    /// rather than a fault — the CDP tier is the answer for those apps.
+    pub chromium_skeleton_risk: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +59,16 @@ impl Tier {
             Tier::AtSpi => "atspi",
             Tier::Cdp => "cdp",
         }
+    }
+}
+
+impl SemanticHit {
+    /// The centre of the element, when it has usable geometry.
+    ///
+    /// `None` for a hit that cannot be pointed at (the CDP tier's tree is
+    /// semantic, not spatial).
+    pub fn center(&self) -> Option<(i32, i32)> {
+        self.bounds.filter(|b| b.is_real()).map(|b| b.center())
     }
 }
 
@@ -64,14 +87,21 @@ pub enum Resolution {
 }
 
 impl Resolution {
-    pub fn hit(&self) -> Option<&SemanticHit> {
-        match self {
-            Resolution::Found(h) => Some(h),
-            _ => None,
-        }
-    }
     pub fn is_found(&self) -> bool {
         matches!(self, Resolution::Found(_))
+    }
+    /// The hit as a *pointing* result: only when it carries usable geometry.
+    ///
+    /// The CDP tier's accessibility tree is semantic, not spatial, so a CDP hit
+    /// has no rectangle. Reporting such a hit as "found" would hand the caller
+    /// a name with no position, and the caller would either invent one or
+    /// pretend it can act on it. This accessor makes the distinction explicit
+    /// so a caller that needs a point can ask for one.
+    pub fn pointing(&self) -> Option<&SemanticHit> {
+        match self {
+            Resolution::Found(h) if h.bounds.map(|b| b.is_real()).unwrap_or(false) => Some(h),
+            _ => None,
+        }
     }
     /// Whether the caller should fall through to the pixel tier.
     ///
@@ -84,16 +114,108 @@ impl Resolution {
     }
 }
 
-/// The observed foreground `(application, window title)`.
+/// Why a semantic operation was refused or could not run.
 ///
-/// `None` when the bus cannot say — which on this platform is common, and which
-/// the policy layer treats as "unknown", not as "safe".
-pub fn observed_window() -> Option<(String, String)> {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
-    let fg = rt.block_on(crate::atspi::focused()).ok()?;
-    match fg {
-        crate::atspi::Foreground::Known { app, title } => Some((app, title)),
+/// The distinction is the point: "the policy said no" and "no tier could
+/// answer" lead to different user-facing behaviour, and a bare `None` would
+/// collapse them into a shrug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SemanticError {
+    /// The policy gate refused. The reason is safe to speak: it never echoes
+    /// the protected content.
+    Denied(String),
+    /// No semantic tier was usable (no a11y bus, no debug port, sidecar down).
+    Unavailable(String),
+}
+
+impl SemanticError {
+    /// A short, user-facing explanation.
+    pub fn spoken(&self) -> String {
+        match self {
+            SemanticError::Denied(reason) => reason.clone(),
+            SemanticError::Unavailable(detail) => {
+                format!("I can't read the screen's structure right now, sir ({detail}).")
+            }
+        }
+    }
+}
+
+/// Run a semantic request to completion, from any context.
+///
+/// The semantic tier is reached from three kinds of place: a plain function,
+/// a `spawn_blocking` worker, and an async task. A tokio runtime cannot be
+/// nested inside a running one, and `block_in_place` needs a multi-threaded
+/// runtime, so every request gets a thread of its own. The cost is a few tens
+/// of microseconds; the alternative is a panic in production.
+fn run_isolated<T, F, Fut>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    T: Send + 'static,
+{
+    let worker = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("runtime: {e}"))?;
+        rt.block_on(f())
+    });
+    match worker.join() {
+        Ok(r) => r,
+        Err(_) => Err("the semantic worker thread panicked".to_string()),
+    }
+}
+
+/// The observed foreground, as the accessibility bus reports it.
+///
+/// This is the identity the policy gate acts on: it comes from the platform,
+/// not from anything the model said. A prompt injection can rename its
+/// target; it cannot change what the toolkit reports.
+pub fn observed_foreground() -> crate::atspi::Foreground {
+    match run_isolated(|| async { crate::atspi::focused().await }) {
+        Ok(fg) => fg,
+        Err(e) => crate::atspi::Foreground::Unknown { reason: e },
+    }
+}
+
+/// The policy decision for an operation, given an observation.
+///
+/// Every semantic operation passes through here. The identity checked is the
+/// OBSERVED one (from the accessibility bus), never the name the model
+/// supplied — a prompt injection can rename its target, but it cannot change
+/// what the toolkit reports the focused window to be.
+///
+/// Taking the observation as a parameter lets one lookup answer both the
+/// policy question and the "which application is in front?" question — they
+/// must agree, and a second lookup could disagree.
+pub fn decision_for(
+    op: crate::policy::Op,
+    fg: &crate::atspi::Foreground,
+) -> crate::policy::Decision {
+    let known = fg.is_known();
+    let sensitive = match fg {
+        crate::atspi::Foreground::Known { app, .. } => {
+            crate::policy::classify_window(app, fg.title().unwrap_or_default())
+        }
         crate::atspi::Foreground::Unknown { .. } => None,
+    };
+    crate::policy::decide(op, known, sensitive, None)
+}
+
+/// The observed foreground **application**, if it could be identified.
+///
+/// `None` means "I could not tell", and that is not a licence to search
+/// everywhere: the accessibility bus carries every application on the
+/// desktop, and an unscoped lookup finds a control with the right name in a
+/// BACKGROUND window — VS Code's "Save" while Brave is in front. Acting on
+/// that is an action in an application the user never referenced.
+///
+/// So every semantic query is scoped to this application, and an operation
+/// that would ACT on a control refuses outright when it is `None`.
+fn observed_foreground_app(fg: &crate::atspi::Foreground) -> Option<String> {
+    match fg {
+        crate::atspi::Foreground::Known { app, .. } if !app.trim().is_empty() => Some(app.clone()),
+        _ => None,
     }
 }
 
@@ -101,8 +223,12 @@ fn from_atspi(n: AtspiNode) -> Option<SemanticHit> {
     Some(SemanticHit {
         name: n.name,
         role: n.role,
+        app: n.app,
         bounds: n.bounds,
         tier: Tier::AtSpi,
+        actions: n.actions,
+        states: n.states,
+        chromium_skeleton_risk: n.chromium_skeleton_risk,
     })
 }
 
@@ -114,48 +240,50 @@ fn from_cdp(n: CdpNode) -> Option<SemanticHit> {
     Some(SemanticHit {
         name: n.name,
         role: n.role,
+        app: String::new(),
         bounds: None,
         tier: Tier::Cdp,
+        actions: Vec::new(),
+        states: Vec::new(),
+        chromium_skeleton_risk: false,
     })
 }
-
 /// Resolve `name`, optionally constrained to `role`, across both semantic tiers.
 ///
+/// The query is **scoped to the observed foreground application**. The
+/// accessibility bus carries every application on the desktop, so an unscoped
+/// search would find a control with the right name in a BACKGROUND window —
+/// VS Code's "Save" while Brave is in front — and report it as the user's
+/// target. When the foreground cannot be identified, nothing is searched and
+/// nothing is returned.
+///
 /// Blocking by design: the callers are the pre-capture privacy gate and the
-/// locate path, both of which are synchronous today. `block_in_place` keeps this
-/// off the async executor when a runtime is already running.
+/// locate path, both of which are synchronous today. The request itself runs
+/// on a thread of its own, so this is safe from any calling context.
 pub fn resolve(name: &str, role: Option<&str>) -> Resolution {
     if name.trim().is_empty() {
         return Resolution::NotFound;
     }
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(e) => {
-            return Resolution::NoTierAvailable { detail: format!("runtime: {e}") };
-        }
-    };
-    resolve_in(&rt, name, role)
-}
 
-fn resolve_in(rt: &tokio::runtime::Runtime, name: &str, role: Option<&str>) -> Resolution {
-    let mut asked_any = false;
-    let mut last_err: Option<String> = None;
+    // One observation answers both questions: the policy question and the
+    // "which application is in front?" question.
+    let fg = observed_foreground();
+
+    // Scope the lookup to the foreground application. Without a name to scope
+    // to, we would be searching every application on the bus.
+    let Some(app) = observed_foreground_app(&fg) else {
+        tracing::info!(
+            "semantic: the foreground application is unknown — not searching for {name:?}"
+        );
+        return Resolution::NotFound;
+    };
 
     // ── Policy gate ──────────────────────────────────────────────────────
     // Every semantic operation passes here first. The identity checked is the
     // OBSERVED one (from the accessibility bus), never the name the model
     // supplied — a prompt injection can rename its target, but it cannot change
     // what GNOME reports the focused window to be. See `policy` for why.
-    let observed = observed_window();
-    let window_sensitive = observed
-        .as_ref()
-        .and_then(|(a, t)| crate::policy::classify_window(a, t));
-    match crate::policy::decide(
-        crate::policy::Op::LocateGeometry,
-        observed.is_some(),
-        window_sensitive,
-        None,
-    ) {
+    match decision_for(crate::policy::Op::LocateGeometry, &fg) {
         d if d.may_proceed_unattended() => {}
         Decision::Confirm { reason } => {
             tracing::info!("semantic: {name:?} needs confirmation — {reason}");
@@ -168,46 +296,286 @@ fn resolve_in(rt: &tokio::runtime::Runtime, name: &str, role: Option<&str>) -> R
         _ => {}
     }
 
-    // ── Tier 1: AT-SPI ────────────────────────────────────────────────────
-    match rt.block_on(crate::atspi::find(name, None, role)) {
-        Ok(Some(n)) => {
-            if let Some(h) = from_atspi(n) {
-                return Resolution::Found(h);
+    let want = name.to_string();
+    let want_role = role.map(|r| r.to_string());
+    let outcome = run_isolated(move || async move {
+        // ── Tier 1: AT-SPI (scoped to the foreground application) ────────
+        let mut last_err: Option<String> = None;
+        match crate::atspi::find(&want, Some(app.as_str()), want_role.as_deref()).await {
+            Ok(Some(n)) => {
+                if let Some(h) = from_atspi(n) {
+                    return Ok((Some(h), last_err));
+                }
+            }
+            Ok(None) => {}
+            Err(e) => last_err = Some(e),
+        }
+
+        // ── Tier 2: CDP (Chromium/Electron) ──────────────────────────────
+        match crate::cdp::find(&want, want_role.as_deref(), None).await {
+            Ok(Some(n)) => {
+                if from_cdp(n).is_some() {
+                    // A CDP hit carries no geometry: the AX tree is semantic,
+                    // not spatial. Reporting it as a *pointing* result would
+                    // hand the caller a name with no position, so it is not
+                    // reported as one: the cascade falls through to the next
+                    // tier (pixels) instead, explicitly. The name is still
+                    // worth having for actuation, which is what `activate` is
+                    // for.
+                    tracing::debug!(
+                        "semantic: {want:?} found via the CDP tier but it has no geometry — \
+                         falling through to the pixel tier"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // A CDP miss is expected on most machines: apps are rarely
+                // launched with a debug port. Not an error, just the next
+                // tier's turn.
+                last_err = Some(e);
             }
         }
-        Ok(None) => {
-            asked_any = true;
-        }
-        Err(e) => {
-            last_err = Some(e);
-        }
+        Ok((None, last_err))
+    });
+
+    match outcome {
+        Ok((Some(hit), _)) => Resolution::Found(hit),
+        Ok((None, Some(err))) => Resolution::NoTierAvailable { detail: err },
+        Ok((None, None)) => Resolution::NotFound,
+        Err(e) => Resolution::NoTierAvailable { detail: e },
+    }
+}
+
+/// The actionable elements of the foreground window, through the semantic tiers.
+///
+/// This is the Linux answer to "what can I click?", and it goes through the
+/// policy gate exactly like every other semantic operation: listing the
+/// accessible names of a window *is* reading them.
+///
+/// The error carries the policy reason so a caller can say it out loud rather
+/// than reporting "I see nothing" — those are very different answers.
+pub fn list_actionables() -> Result<Vec<SemanticHit>, SemanticError> {
+    let fg = observed_foreground();
+    match decision_for(crate::policy::Op::ReadTree, &fg) {
+        d if d.may_proceed_unattended() => {}
+        Decision::Deny { reason } => return Err(SemanticError::Denied(reason)),
+        Decision::Confirm { reason } => return Err(SemanticError::Denied(reason)),
+        Decision::Allow => {}
     }
 
-    // ── Tier 2: CDP (Chromium/Electron) ──────────────────────────────────
-    match rt.block_on(crate::cdp::find(name, role, None)) {
-        Ok(Some(n)) => {
-            if let Some(h) = from_cdp(n) {
-                return Resolution::Found(h);
+    // Scoped to the foreground application, for the same reason `resolve` and
+    // `activate` are: the list must describe the window the user is looking
+    // at, not every window that happens to be on the bus.
+    let Some(app) = observed_foreground_app(&fg) else {
+        return Err(SemanticError::Denied(
+            "I can't tell which window is in front, sir, so I can't list its controls."
+                .to_string(),
+        ));
+    };
+
+    match run_isolated(move || async move { crate::atspi::actionables(Some(app.as_str())).await }) {
+        Ok(nodes) => Ok(nodes.into_iter().filter_map(from_atspi).collect()),
+        Err(e) => Err(SemanticError::Unavailable(e)),
+    }
+}
+
+/// Whether two application names can refer to the same application.
+///
+/// "Visual Studio Code" and "code" are the same application; "brave" and
+/// "code" are not. A shared word is enough, and so is one name contained in
+/// the other ("code" inside "vscode").
+///
+/// An empty name on either side never matches: an unidentified application is
+/// not evidence of anything.
+pub fn app_names_match(expected: &str, actual: &str) -> bool {
+    fn tokens(name: &str) -> Vec<String> {
+        name.to_lowercase()
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect()
+    }
+    let e = tokens(expected);
+    let a = tokens(actual);
+    if e.is_empty() || a.is_empty() {
+        return false;
+    }
+    if e.iter().any(|t| a.contains(t)) {
+        return true;
+    }
+    let en: String = expected.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let an: String = actual.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    !en.is_empty() && !an.is_empty() && (en.contains(&an) || an.contains(&en))
+}
+
+/// Whether a target's title belongs to the foreground window.
+///
+/// A browser window is titled "<page title> — <app>", so the target's title
+/// is contained in the window title. Two empty titles cannot contradict each
+/// other, so they match; a mismatch in either direction does not.
+pub fn title_matches(foreground_title: &str, target_title: &str) -> bool {
+    let f = foreground_title.trim().to_lowercase();
+    let t = target_title.trim().to_lowercase();
+    if f.is_empty() || t.is_empty() {
+        return true;
+    }
+    f == t || t.contains(&f) || f.contains(&t)
+}
+
+/// Whether a CDP endpoint may act on the observed foreground application.
+///
+/// The rule is **fail-closed**. The CDP tier is scoped by DEBUG PORT, not by
+/// application: it sees whichever app holds the lowest reachable port, and a
+/// background app launched with `--inspect` would answer a click meant for the
+/// app in front. So the endpoint has to PROVE three things:
+///
+/// 1. it is a Chromium or Electron endpoint (the only kinds that exist here,
+///    and the only ones whose AT-SPI tree is a skeleton);
+/// 2. it belongs to the observed foreground application;
+/// 3. the target it is showing is the foreground window.
+///
+/// Anything it cannot prove is a refusal.
+pub fn cdp_identity_matches_foreground(
+    foreground_app: &str,
+    foreground_title: &str,
+    id: &crate::cdp::CdpEndpointIdentity,
+) -> bool {
+    if id.kind != "chromium" && id.kind != "electron" {
+        return false;
+    }
+    if !app_names_match(foreground_app, &id.app) {
+        return false;
+    }
+    title_matches(foreground_title, &id.title)
+}
+
+/// Actuate a named element through the semantic tiers.
+///
+/// Unlike [`resolve`], this needs no geometry: the element is addressed by
+/// identity and the toolkit performs the action. That is what makes it work
+/// on a native Wayland session, where synthetic input does not exist.
+///
+/// The action is **scoped to the observed foreground application**, and it is
+/// REFUSED when the foreground cannot be identified: an unscoped activation
+/// would press a button in a background window — VS Code's "Save" while Brave
+/// is in front — which is an action in an application the user never
+/// referenced.
+///
+/// AT-SPI first (it is the tier that works everywhere). The CDP tier is the
+/// only one that can see a Chromium/Electron app's controls (their AT-SPI tree
+/// is a skeleton), so it is offered as a fallback — but ONLY to an endpoint
+/// that PROVES it belongs to the application in front: the server reports the
+/// endpoint's own identity and refuses with 409 when it does not match, and
+/// the identity is re-checked here before the action is reported as done.
+/// When it cannot be proven, the caller gets the AT-SPI refusal.
+pub fn activate(name: &str, role: Option<&str>) -> Result<ActivationOutcome, SemanticError> {
+    let fg = observed_foreground();
+
+    // Refuse before anything else: without a known foreground there is no
+    // application to scope the action to.
+    let Some(app) = observed_foreground_app(&fg) else {
+        return Err(SemanticError::Denied(
+            "I can't tell which window is in front, sir, so I won't act on a control \
+             I can't place."
+                .to_string(),
+        ));
+    };
+    let title = fg.title().unwrap_or_default().to_string();
+
+    match decision_for(crate::policy::Op::Activate, &fg) {
+        d if d.may_proceed_unattended() => {}
+        Decision::Deny { reason } => return Err(SemanticError::Denied(reason)),
+        Decision::Confirm { reason } => return Err(SemanticError::Denied(reason)),
+        Decision::Allow => {}
+    }
+
+    let want = name.to_string();
+    let want_role = role.map(|r| r.to_string());
+    let expect = crate::cdp::CdpExpectation {
+        app: app.clone(),
+        title: title.clone(),
+    };
+    let outcome = run_isolated(move || async move {
+        match crate::atspi::activate(&want, Some(app.as_str()), want_role.as_deref(), "click").await {
+            Ok(effect) => {
+                // The role comes back with the node: re-check it here before
+                // the action is reported as done. The server refuses credential
+                // roles too — this is the same rule on this side.
+                if crate::policy::classify_node(&effect.role, &effect.name).is_some() {
+                    return Err("refusing to act on a credential field".to_string());
+                }
+                Ok(ActivationOutcome {
+                    tier: Tier::AtSpi,
+                    app: effect.app,
+                    name: effect.name,
+                    ok: effect.ok,
+                })
             }
-            asked_any = true;
+            Err(e) => {
+                // The AT-SPI tier cannot see a Chromium/Electron app's
+                // controls, so the CDP tier is the only one that can. It is
+                // offered ONLY to an endpoint that proves it belongs to the
+                // application in front.
+                match crate::cdp::activate(&want, want_role.as_deref(), None, Some(&expect)).await {
+                    Ok(effect) => {
+                        let Some(id) = effect.identity.as_ref() else {
+                            return Err(
+                                "the debug endpoint did not prove which application it belongs to"
+                                    .to_string(),
+                            );
+                        };
+                        if !cdp_identity_matches_foreground(&expect.app, &expect.title, id) {
+                            return Err(
+                                "the debug endpoint belongs to a different application".to_string()
+                            );
+                        }
+                        if crate::policy::classify_node(&effect.role, &effect.name).is_some() {
+                            return Err("refusing to act on a credential field".to_string());
+                        }
+                        tracing::info!(
+                            "semantic: the CDP tier acted on {} ({})",
+                            id.app,
+                            id.url
+                        );
+                        Ok(ActivationOutcome {
+                            tier: Tier::Cdp,
+                            app: id.app.clone(),
+                            name: effect.name,
+                            ok: effect.ok,
+                        })
+                    }
+                    Err(cdp_err) => {
+                        // Neither tier could act on the foreground
+                        // application. The refusal the caller hears is the
+                        // semantic one.
+                        tracing::info!(
+                            "semantic: the CDP tier declined ({cdp_err}) — the AT-SPI refusal stands"
+                        );
+                        Err(e)
+                    }
+                }
+            }
         }
-        Ok(None) => {
-            asked_any = true;
-        }
-        Err(e) => {
-            // A CDP miss is expected on most machines: apps are rarely launched
-            // with a debug port. Not an error, just the next tier's turn.
-            last_err = Some(e);
-        }
-    }
+    });
 
-    if asked_any {
-        Resolution::NotFound
-    } else {
-        Resolution::NoTierAvailable {
-            detail: last_err.unwrap_or_else(|| "no semantic tier responded".to_string()),
-        }
+    match outcome {
+        Ok(outcome) => Ok(outcome),
+        Err(e) => Err(SemanticError::Unavailable(e)),
     }
+}
+
+/// The result of a semantic activation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivationOutcome {
+    /// Which tier performed the action.
+    pub tier: Tier,
+    /// The application that owns the element.
+    pub app: String,
+    /// The element's accessible name.
+    pub name: String,
+    /// Whether the toolkit reported the action as performed.
+    pub ok: bool,
 }
 
 #[cfg(test)]
@@ -273,15 +641,211 @@ mod tests {
     }
 
     #[test]
-    fn hit_accessor_only_on_found() {
-        let h = SemanticHit {
-            name: "x".into(),
-            role: "button".into(),
-            bounds: None,
-            tier: Tier::Cdp,
-        };
-        assert!(Resolution::Found(h.clone()).hit().is_some());
-        assert!(Resolution::NotFound.hit().is_none());
+    fn is_found_is_only_true_for_a_hit() {
+        let h = hit_with(None);
+        assert!(Resolution::Found(h).is_found());
         assert!(!Resolution::NotFound.is_found());
+    }
+
+    // ── Scoping to the observed foreground application ───────────────────
+
+    #[test]
+    fn the_scope_is_the_observed_foreground_application() {
+        let fg = crate::atspi::Foreground::Known {
+            app: "brave".into(),
+            title: "Example — Brave".into(),
+        };
+        assert_eq!(observed_foreground_app(&fg).as_deref(), Some("brave"));
+    }
+
+    #[test]
+    fn an_unknown_foreground_has_no_scope() {
+        // Without a name to scope to, a search would cover every application
+        // on the bus — and find a control with the right name in a BACKGROUND
+        // window.
+        let fg = crate::atspi::Foreground::Unknown {
+            reason: "ambiguous".into(),
+        };
+        assert!(observed_foreground_app(&fg).is_none());
+    }
+
+    #[test]
+    fn a_foreground_without_an_application_name_has_no_scope() {
+        // The bus named a window but not the application it belongs to, so
+        // there is still nothing to scope the query to.
+        let fg = crate::atspi::Foreground::Known {
+            app: "  ".into(),
+            title: "Something".into(),
+        };
+        assert!(observed_foreground_app(&fg).is_none());
+    }
+
+    #[test]
+    fn the_decision_uses_the_observation_it_is_given() {
+        // The policy and the scope must be made from the SAME observation, or
+        // they can disagree about which window is in front.
+        let unknown = crate::atspi::Foreground::Unknown {
+            reason: "ambiguous".into(),
+        };
+        let d = decision_for(crate::policy::Op::Activate, &unknown);
+        assert!(
+            !d.may_proceed_unattended(),
+            "an activation against an unknown window must not proceed unattended"
+        );
+        let known = crate::atspi::Foreground::Known {
+            app: "code".into(),
+            title: "main.rs — nexus".into(),
+        };
+        assert!(decision_for(crate::policy::Op::Activate, &known).may_proceed_unattended());
+    }
+
+    // ── Pointing vs. naming ───────────────────────────────────────────────
+
+    fn hit_with(bounds: Option<AtspiBounds>) -> SemanticHit {
+        SemanticHit {
+            name: "Save".into(),
+            role: "push button".into(),
+            app: "code".into(),
+            bounds,
+            tier: Tier::AtSpi,
+            actions: vec!["click".into()],
+            states: vec!["enabled".into()],
+            chromium_skeleton_risk: false,
+        }
+    }
+
+    #[test]
+    fn pointing_requires_real_geometry() {
+        // A hit with a rectangle is pointable.
+        let ok = hit_with(Some(AtspiBounds { x: 1, y: 2, w: 30, h: 20 }));
+        assert!(Resolution::Found(ok).pointing().is_some());
+    }
+
+    #[test]
+    fn a_hit_without_geometry_is_not_a_pointing_result() {
+        // This is the CDP tier's shape. It names the element, but it cannot
+        // point at it, so `pointing()` must say no.
+        let h = hit_with(None);
+        assert!(Resolution::Found(h).pointing().is_none());
+    }
+
+    #[test]
+    fn an_unlaid_out_rectangle_is_not_a_pointing_result() {
+        // GTK's "not yet positioned" sentinel must never become a click.
+        let h = hit_with(Some(AtspiBounds {
+            x: -2147483648,
+            y: -2147483648,
+            w: 1,
+            h: 1,
+        }));
+        assert!(Resolution::Found(h).pointing().is_none());
+    }
+
+    #[test]
+    fn not_found_is_never_pointing() {
+        assert!(Resolution::NotFound.pointing().is_none());
+        assert!(Resolution::NoTierAvailable { detail: "x".into() }.pointing().is_none());
+    }
+
+    // ── Error wording ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_denied_error_speaks_the_reason_verbatim() {
+        let e = SemanticError::Denied("cannot identify the target window".into());
+        assert_eq!(e.spoken(), "cannot identify the target window");
+    }
+
+    #[test]
+    fn an_unavailable_error_speaks_a_plain_sentence() {
+        let e = SemanticError::Unavailable("no a11y bus".into());
+        assert!(e.spoken().contains("no a11y bus"));
+        assert!(!e.spoken().is_empty());
+    }
+
+    // ── The CDP identity rule (fail-closed) ──────────────────────────────
+
+    fn endpoint(kind: &str, app: &str, title: &str) -> crate::cdp::CdpEndpointIdentity {
+        crate::cdp::CdpEndpointIdentity {
+            kind: kind.into(),
+            app: app.into(),
+            title: title.into(),
+            url: "https://example.com/".into(),
+        }
+    }
+
+    #[test]
+    fn app_names_match_across_spellings() {
+        assert!(app_names_match("code", "Visual Studio Code"));
+        assert!(app_names_match("Visual Studio Code", "code"));
+        assert!(app_names_match("brave", "brave"));
+        assert!(app_names_match("code", "vscode"));
+    }
+
+    #[test]
+    fn app_names_do_not_match_across_applications() {
+        assert!(!app_names_match("brave", "code"));
+        assert!(!app_names_match("code", "brave-browser"));
+    }
+
+    #[test]
+    fn an_unnamed_application_never_matches() {
+        // An unidentified application is not evidence of anything.
+        assert!(!app_names_match("", "brave"));
+        assert!(!app_names_match("brave", ""));
+        assert!(!app_names_match("", ""));
+    }
+
+    #[test]
+    fn title_matches_when_the_target_title_is_inside_the_window_title() {
+        assert!(title_matches("GitHub — Brave", "GitHub"));
+        assert!(title_matches("GitHub", "GitHub"));
+        assert!(title_matches("main.rs - nexus - Visual Studio Code", "main.rs - nexus"));
+    }
+
+    #[test]
+    fn title_matches_refuses_a_different_target() {
+        assert!(!title_matches("GitHub — Brave", "GitHub - Notifications"));
+    }
+
+    #[test]
+    fn an_empty_title_cannot_contradict_itself() {
+        assert!(title_matches("", "GitHub"));
+        assert!(title_matches("GitHub — Brave", ""));
+    }
+
+    #[test]
+    fn a_cdp_endpoint_may_act_only_when_it_proves_the_same_application() {
+        let id = endpoint("chromium", "brave", "GitHub");
+        assert!(cdp_identity_matches_foreground("brave", "GitHub — Brave", &id));
+    }
+
+    #[test]
+    fn a_cdp_endpoint_of_another_application_may_not_act() {
+        // The failure the audit found: a background VS Code holding a debug
+        // port, while Brave is in front.
+        let id = endpoint("chromium", "code", "main.rs — nexus");
+        assert!(!cdp_identity_matches_foreground("brave", "GitHub — Brave", &id));
+    }
+
+    #[test]
+    fn a_cdp_endpoint_of_an_unknown_kind_may_not_act() {
+        let id = endpoint("something-else", "brave", "GitHub");
+        assert!(!cdp_identity_matches_foreground("brave", "GitHub — Brave", &id));
+    }
+
+    #[test]
+    fn a_cdp_endpoint_showing_another_window_may_not_act() {
+        let id = endpoint("chromium", "brave", "GitHub - Notifications");
+        assert!(!cdp_identity_matches_foreground("brave", "GitHub — Brave", &id));
+    }
+
+    #[test]
+    fn an_electron_endpoint_may_act_for_its_own_application() {
+        let id = endpoint("electron", "Visual Studio Code", "main.rs — nexus");
+        assert!(cdp_identity_matches_foreground(
+            "code",
+            "main.rs — nexus - Visual Studio Code",
+            &id
+        ));
     }
 }

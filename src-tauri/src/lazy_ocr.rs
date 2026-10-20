@@ -1,7 +1,7 @@
 //! Lazy OCR server manager — starts the Python RapidOCR server on-demand
 //! for text grounding (Phase-3b locator tier) and kills it after idle.
 //!
-//! Mirrors `lazy_nlu.rs`: spawn on first locate that needs OCR, kill
+//! Mirrors `lazy_atspi.rs`: spawn on first locate that needs OCR, kill
 //! after 120s idle (the ONNX models hold ~100-300MB), 60s cooldown
 //! after a failed start so a missing `rapidocr-onnxruntime` never
 //! blocks the vision fallback path.
@@ -54,6 +54,9 @@ fn ocr_script_path() -> Option<std::path::PathBuf> {
             .join("resources")
             .join("server")
             .join("ocr_server.py"),
+        // `cargo test` runs from src-tauri/, and dev invocations from the repo root.
+        std::path::PathBuf::from("server/ocr_server.py"),
+        std::path::PathBuf::from("../server/ocr_server.py"),
     ] {
         if candidate.exists() {
             return Some(candidate);
@@ -61,6 +64,23 @@ fn ocr_script_path() -> Option<std::path::PathBuf> {
     }
     tracing::warn!("[lazy_ocr] ocr_server.py not found in any candidate location");
     None
+}
+
+/// A Python interpreter to run the sidecar with.
+///
+/// `NEXUS_PYTHON` wins, then `PYTHON`, then `python3` on PATH. The Windows
+/// registry lookup that the NLU sidecar used is gone with that module, and it
+/// was never the right answer on Linux anyway.
+fn find_python() -> Option<String> {
+    for var in ["NEXUS_PYTHON", "PYTHON"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    Some("python3".to_string())
 }
 
 fn is_ocr_responsive() -> bool {
@@ -101,8 +121,8 @@ pub fn ensure_ocr_running() {
         Some(p) => p,
         None => return,
     };
-    // Reuse the NLU module's interpreter probe (PATH + Windows registry).
-    let python_cmd = match crate::lazy_nlu::find_python() {
+    // Use the interpreter probe (env override, then python3 on PATH).
+    let python_cmd = match find_python() {
         Some(p) => p,
         None => {
             tracing::error!("[lazy_ocr] no Python interpreter found");
@@ -195,5 +215,17 @@ mod tests {
         std::env::set_var("OCR_PORT", "bogus");
         assert_eq!(ocr_port(), 39220);
         std::env::remove_var("OCR_PORT");
+    }
+
+    #[test]
+    fn script_is_discoverable_from_the_repo() {
+        // Guard against the resources copy and the dev path drifting apart.
+        let p = ocr_script_path().expect("ocr_server.py should be discoverable");
+        assert!(p.exists(), "resolved path does not exist: {}", p.display());
+        assert!(
+            p.file_name().unwrap() == "ocr_server.py",
+            "resolved a non-OCR script: {}",
+            p.display()
+        );
     }
 }
