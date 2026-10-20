@@ -91,8 +91,10 @@ pub trait CloseEnv {
     }
     /// A listing failure, if one happened. A failed listing means we no
     /// longer know what is open, so the closer must not report a clean
-    /// shutdown. Windows cannot fail to list (`EnumWindows` has no failure
-    /// mode), so the default is "no failure".
+    /// shutdown. Only Linux can fail to list (`wmctrl` talks to the X
+    /// server); Windows' `EnumWindows` has no failure mode, so the method
+    /// does not exist there at all.
+    #[cfg(target_os = "linux")]
     fn failure(&self) -> Option<String> {
         None
     }
@@ -346,6 +348,130 @@ pub mod linux {
     pub fn tool_failed_line() -> String {
         "I couldn't check whether your other apps closed, sir, so I've stopped the shutdown — please save your work and turn it off yourself."
             .to_string()
+    }
+
+    // ── The "I can't close your other apps" warning ──────────────────────
+    //
+    // On Linux the shutdown may only go past the close step when the user
+    // has EXPLICITLY confirmed that warning in THIS shutdown flow. Several
+    // paths reach the shutdown without ever showing it — the loose-mishearing
+    // offer ("Did you want me to shut down your laptop, sir?") and the
+    // meeting/drill early returns in the blocker — and there the apps are
+    // still open when the machine powers off.
+    //
+    // The state is tracked here so the rule cannot depend on which path the
+    // shutdown came from.
+
+    /// The state of the Linux close-warning inside the current flow.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum WarningState {
+        /// The warning was not asked in this flow.
+        None,
+        /// The warning was asked; the answer has not arrived yet.
+        Asked,
+        /// The warning was asked and the user answered "yes" in this flow.
+        Confirmed,
+    }
+
+    impl WarningState {
+        fn as_code(self) -> u8 {
+            match self {
+                WarningState::None => 0,
+                WarningState::Asked => 1,
+                WarningState::Confirmed => 2,
+            }
+        }
+
+        fn from_code(code: u8) -> WarningState {
+            match code {
+                1 => WarningState::Asked,
+                2 => WarningState::Confirmed,
+                _ => WarningState::None,
+            }
+        }
+    }
+
+    static WARNING_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+    /// The current state of the warning.
+    pub fn warning_state() -> WarningState {
+        WarningState::from_code(WARNING_STATE.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// The warning was asked (the question is on its way to the user).
+    pub fn note_warning_asked() {
+        WARNING_STATE.store(WarningState::Asked.as_code(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The user answered "yes" to the pending power question. Only a pending
+    /// Linux warning becomes a confirmation; anything else clears the state
+    /// (the "yes" was for a different question).
+    pub fn confirm_warning() {
+        let next = match warning_state() {
+            WarningState::Asked => WarningState::Confirmed,
+            _ => WarningState::None,
+        };
+        WARNING_STATE.store(next.as_code(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Forget the warning — a new flow started, or the question was answered
+    /// with anything but "yes".
+    pub fn clear_warning() {
+        WARNING_STATE.store(WarningState::None.as_code(), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Consume the confirmation: true when the user confirmed the warning in
+    /// this flow. The state is cleared, so a later shutdown cannot inherit it.
+    pub fn take_warning_confirmed() -> bool {
+        if warning_state() == WarningState::Confirmed {
+            clear_warning();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// What happens after the close step (unit-tested).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Proceed {
+        /// The shutdown may go ahead.
+        Continue,
+        /// The shutdown stops and the user is told why.
+        Stop { line: String },
+    }
+
+    /// The pure decision (unit-tested): may the shutdown go on after the
+    /// close step?
+    ///
+    /// `confirmed` = the user explicitly confirmed the "I can't close your
+    /// other apps" warning in THIS shutdown flow. Without it, a session that
+    /// cannot close the apps (or a window tool that failed) stops the
+    /// shutdown instead of quietly dropping unsaved work.
+    pub fn after_close(close: &CloseResult, confirmed: bool) -> Proceed {
+        match close {
+            // Everything asked to close did close.
+            CloseResult::AllClosed { .. } => Proceed::Continue,
+            // A window stayed open — the shutdown stops, as it always has.
+            CloseResult::Refused { still_open, .. } => {
+                Proceed::Stop { line: super::refusal_line(still_open) }
+            }
+            // The apps could not be closed (or we cannot even tell): the
+            // shutdown may only go ahead if the user was warned and said yes.
+            CloseResult::CannotClose { reason } => {
+                if confirmed {
+                    Proceed::Continue
+                } else {
+                    Proceed::Stop { line: format!("{reason} I've stopped the shutdown.") }
+                }
+            }
+            CloseResult::ToolFailed { .. } => {
+                if confirmed {
+                    Proceed::Continue
+                } else {
+                    Proceed::Stop { line: tool_failed_line() }
+                }
+            }
+        }
     }
 
     /// A sticky listing failure.
@@ -751,6 +877,66 @@ mod linux_tests {
             "the window set must not be polled every 250 ms: {} polls",
             env.lists.get()
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_shutdown_only_goes_on_when_the_warning_was_confirmed() {
+        use super::linux::{after_close, CloseResult, Proceed};
+
+        let cannot = CloseResult::CannotClose {
+            reason: "I can't close your other apps on Wayland, sir — anything unsaved will be lost.".to_string(),
+        };
+        // No confirmation in this flow (the loose-mishearing offer, the
+        // meeting/drill early returns) -> the shutdown stops and says why.
+        match after_close(&cannot, false) {
+            Proceed::Stop { line } => {
+                assert!(line.contains("stopped the shutdown"), "{line}");
+                assert!(line.contains("Wayland"), "{line}");
+            }
+            other => panic!("expected a stop, got {other:?}"),
+        }
+        // Confirmed in this flow -> the shutdown goes ahead, and nothing
+        // extra is spoken (the user already heard the warning).
+        assert_eq!(after_close(&cannot, true), Proceed::Continue);
+
+        // The same rule for a window tool that failed.
+        let failed = CloseResult::ToolFailed { reason: "wmctrl -l failed".to_string() };
+        assert!(matches!(after_close(&failed, false), Proceed::Stop { .. }));
+        assert_eq!(after_close(&failed, true), Proceed::Continue);
+
+        // Everything that was asked to close did close -> always go ahead.
+        assert_eq!(after_close(&CloseResult::AllClosed { closed: 3 }, false), Proceed::Continue);
+
+        // A window that stayed open always stops the shutdown.
+        let refused = CloseResult::Refused { closed: 1, still_open: vec!["Notepad".to_string()] };
+        match after_close(&refused, true) {
+            Proceed::Stop { line } => assert!(line.contains("Notepad"), "{line}"),
+            other => panic!("expected a stop, got {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_warning_confirmation_is_tracked_per_flow() {
+        use super::linux::{
+            clear_warning, confirm_warning, note_warning_asked, take_warning_confirmed, warning_state,
+            WarningState,
+        };
+
+        clear_warning();
+        assert_eq!(warning_state(), WarningState::None);
+        // A "yes" to a question that carried no warning confirms nothing.
+        confirm_warning();
+        assert!(!take_warning_confirmed());
+        // The warning was asked and answered "yes" -> confirmed, once.
+        note_warning_asked();
+        assert_eq!(warning_state(), WarningState::Asked);
+        confirm_warning();
+        assert_eq!(warning_state(), WarningState::Confirmed);
+        assert!(take_warning_confirmed());
+        assert!(!take_warning_confirmed(), "the confirmation is consumed");
+        assert_eq!(warning_state(), WarningState::None);
     }
 }
 

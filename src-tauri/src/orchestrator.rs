@@ -4721,11 +4721,22 @@ async fn run_offer_reply<R: Runtime>(
                 if let Some(d) = &dir {
                     crate::power_cmd::learn_pending_alias(d);
                 }
+                // Linux: did the question the user just answered carry the
+                // "I can't close your other apps" warning? Only then does this
+                // "yes" confirm it — every other power question leaves the
+                // warning unconfirmed, and the close step then stops the
+                // shutdown instead of dropping unsaved work.
+                #[cfg(target_os = "linux")]
+                crate::power_close::linux::confirm_warning();
                 start_power(&app, k).await
             }
             None => "I didn't understand which power command that was, sir.".to_string(),
         },
-        (Offer::Power { .. }, _) => "Understood, sir. Nothing will be turned off.".to_string(),
+        (Offer::Power { .. }, _) => {
+            #[cfg(target_os = "linux")]
+            crate::power_close::linux::clear_warning();
+            "Understood, sir. Nothing will be turned off.".to_string()
+        }
         (Offer::OpenApp { display_name, spoken }, Reply::Yes) => {
             // The user confirmed the guess: remember it, then open it for real.
             crate::app_registry::confirm_resolution(&spoken, &display_name);
@@ -5813,6 +5824,11 @@ async fn run_power_action<R: Runtime>(app: AppHandle<R>, kind: String) -> Result
             return say_and_finish(&app, request_id, "Power commands are switched off, sir.".into());
         }
     }
+    // Linux: a NEW power flow starts here, so any pending "I can't close
+    // your other apps" warning from an earlier flow is dropped — only a
+    // confirmation given in THIS flow counts.
+    #[cfg(target_os = "linux")]
+    crate::power_close::linux::clear_warning();
     if k == crate::power_cmd::PowerKind::Shutdown {
         // The explicit command is obeyed without a question; only something that would be lost or
         // interrupted (a meeting, a running task) makes NEXUS ask once.
@@ -5885,9 +5901,13 @@ fn shutdown_blocker<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     // Wayland, no `wmctrl`, or a `wmctrl` that cannot reach the X server),
     // the shutdown is confirmed once — unsaved work is the user's to lose,
     // and it must never be dropped silently.
+    //
+    // This question is the one that carries the warning, so the user's
+    // "yes" to it is the confirmation the close step looks for.
     #[cfg(target_os = "linux")]
     {
         if let Err(reason) = crate::power_close::linux::can_close_apps() {
+            crate::power_close::linux::note_warning_asked();
             return Some(reason);
         }
     }
@@ -5939,9 +5959,9 @@ async fn shutdown_sequence<R: Runtime>(app: AppHandle<R>, generation: u64) {
     }
     // Linux: the X11 windows are asked to close through `wmctrl`. A session
     // that cannot do that (native Wayland, no `wmctrl`, or a `wmctrl` that
-    // cannot reach the X server) says so instead of pretending — the user
-    // was already told and confirmed that before this sequence started (see
-    // `shutdown_blocker`).
+    // cannot reach the X server) must not power the machine off silently:
+    // the shutdown only goes ahead when the user confirmed THAT warning in
+    // THIS flow (see `power_close::linux::after_close`).
     #[cfg(target_os = "linux")]
     {
         let outcome = tauri::async_runtime::spawn_blocking(|| {
@@ -5949,37 +5969,24 @@ async fn shutdown_sequence<R: Runtime>(app: AppHandle<R>, generation: u64) {
         })
         .await
         .ok();
-        match outcome {
-            Some(crate::power_close::linux::CloseResult::Refused { closed, still_open }) => {
-                println!("[POWER] shutdown stopped: {closed} closed, still open: {still_open:?}");
+        let result = outcome.unwrap_or(crate::power_close::linux::CloseResult::ToolFailed {
+            reason: "the close step did not run".to_string(),
+        });
+        let confirmed = crate::power_close::linux::take_warning_confirmed();
+        match crate::power_close::linux::after_close(&result, confirmed) {
+            crate::power_close::linux::Proceed::Continue => {
+                println!("[POWER] close step done: {result:?}");
+            }
+            crate::power_close::linux::Proceed::Stop { line } => {
+                // The apps may still be open and the user was never told, or
+                // never agreed: the shutdown stops here.
+                println!("[POWER] shutdown stopped: {line}");
                 pc::finish(generation);
                 let (rid, _) = install_new_request(Subsystem::LocalCommand);
-                speak_line(&app, crate::power_close::refusal_line(&still_open), &rid);
+                speak_line(&app, line, &rid);
                 clear_active_request(&rid);
                 return;
             }
-            Some(crate::power_close::linux::CloseResult::AllClosed { closed }) => {
-                println!("[POWER] closed {closed} windows")
-            }
-            Some(crate::power_close::linux::CloseResult::CannotClose { reason }) => {
-                // This session cannot ask another app to close. The user was
-                // already told that before the shutdown started (see
-                // `shutdown_blocker`) and confirmed it, so the shutdown goes
-                // ahead — this is only logged, not spoken again.
-                println!("[POWER] cannot close the other apps here: {reason}");
-            }
-            Some(crate::power_close::linux::CloseResult::ToolFailed { reason }) => {
-                // We do NOT know whether the apps closed, so the shutdown must
-                // NOT go ahead: powering off now could throw unsaved work
-                // away without the user ever being told.
-                println!("[POWER] shutdown stopped: the window tool failed: {reason}");
-                pc::finish(generation);
-                let (rid, _) = install_new_request(Subsystem::LocalCommand);
-                speak_line(&app, crate::power_close::linux::tool_failed_line(), &rid);
-                clear_active_request(&rid);
-                return;
-            }
-            None => println!("[POWER] close step failed to run; continuing"),
         }
     }
     // 3. A last chance to say "cancel".
@@ -7303,6 +7310,11 @@ async fn try_power_and_howto<R: Runtime>(
     if let Some(kind) = crate::power_cmd::parse_loose(transcript) {
         crate::power_cmd::note_loose_question(transcript);
         let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+        // Linux: this question is NOT the "I can't close your other apps"
+        // warning, so it cannot confirm it — the close step will stop the
+        // shutdown if the apps could not be closed.
+        #[cfg(target_os = "linux")]
+        crate::power_close::linux::clear_warning();
         crate::memcore::offer::set(crate::memcore::offer::Offer::Power { kind: kind.as_str().to_string() }, true);
         return Some(say_and_finish(app, request_id, "Did you want me to shut down your laptop, sir?".to_string()));
     }
