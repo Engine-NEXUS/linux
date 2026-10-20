@@ -102,7 +102,7 @@ pub(crate) mod router;
 pub(crate) mod mcp_client;
 pub(crate) mod auth_vault;
 pub(crate) mod identity_state;
-pub mod worker_proxy;
+pub(crate) mod worker_proxy;
 pub(crate) mod ghostwriter;
 pub mod screen;
 pub mod shortcuts;

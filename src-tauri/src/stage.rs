@@ -102,7 +102,9 @@ pub fn set_hitbox_source(source: &str, rects: Vec<StageRect>) {
     crate::overlay_linux::apply_input_region();
 }
 
-/// Collect all current hitbox rects across all named sources.
+/// Collect all current hitbox rects across all named sources (the Linux
+/// overlay turns them into the window's input region).
+#[cfg(target_os = "linux")]
 pub fn all_hitboxes() -> Vec<StageRect> {
     HITBOXES.lock().values().flatten().copied().collect()
 }

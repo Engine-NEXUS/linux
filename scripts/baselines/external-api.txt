@@ -8,3 +8,4 @@ tts_edge        # tests/phase2_integration.rs
 screen          # dev_tools/uia_probe.rs
 shortcuts       # dev_tools/shortcut_live.rs
 wake_eval       # dev_tools/wake_replay.rs
+gdk_backend_linux # src/main.rs (picks the GTK backend before Tauri starts; Linux only)

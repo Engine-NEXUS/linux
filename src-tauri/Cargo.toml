@@ -147,7 +147,6 @@ arboard = "3.4"
 
 # Telegram remote (owner-only bridge, long-polling, no public IP needed).
 teloxide = { version = "0.17", default-features = false, features = ["macros", "native-tls"] }
-webrtc-vad = "0.4.0"
 rusqlite = { version = "0.40.2", features = ["bundled", "serialize"] }
 # AES-256-GCM + CSPRNG for the Memory Core encrypted snapshot (already in the tree via rustls).
 ring = "0.17"
@@ -244,6 +243,10 @@ mock-wake = []                   # CI: skip native lib, emit fake wake on hotkey
 # Build with: cargo build --features admin-brain
 admin-brain = []
 
+[dev-dependencies]
+# Only the wake-word tests use the WebRTC VAD now (the engine no longer runs it).
+webrtc-vad = "0.4.0"
+
 [profile.dev]
 opt-level = 0
 debug = true
@@ -314,8 +317,6 @@ opt-level = 3
 [profile.release.package.rustfft]
 opt-level = 3
 [profile.release.package.num-complex]
-opt-level = 3
-[profile.release.package.webrtc-vad]
 opt-level = 3
 
 # [profile.dist] — use this ONLY when building the final installer

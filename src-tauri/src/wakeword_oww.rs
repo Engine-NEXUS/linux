@@ -730,23 +730,9 @@ pub(crate) mod engine {
         /// Whether the last chunk reached the classifier and a stage-1 decision
         /// (false when it was gated or in grace: those push 0.0 without deciding).
         pub last_chunk_scored: bool,
-        /// WebRTC VAD pre-gate confirm (v4): energy gate passes on any loud
-        /// sound (tonal HVAC, music, mic pops); this vetoes clear non-speech
-        /// before the classifier runs. Quality mode (least aggressive) +
-        /// veto-only-on-0/4 keeps wake onset safe.
-        /// SendVad: webrtc_vad::Vad wraps a raw C pointer (not Send).
-        /// Wrapped like SendStream: all access happens under the engine
-        /// Mutex on the audio thread; the C state has no thread affinity.
-        pub webrtc_vad: SendVad,
         /// Adaptive acoustic profile loaded for the host microphone.
         pub acoustic_profile: crate::acoustic_profile::AcousticProfile,
     }
-
-    /// Send-safe wrapper for webrtc_vad::Vad (see field docs).
-    pub struct SendVad(pub webrtc_vad::Vad);
-    // SAFETY: same rationale as SendStream — exclusive access under the
-    // engine Mutex, no thread-affine state in the C struct.
-    unsafe impl Send for SendVad {}
 
     /// Load Tier 3 command classifiers from `resources/oww/commands/`.
     ///
@@ -939,12 +925,6 @@ pub(crate) mod engine {
                 grace_until_ms: STARTUP_GRACE_MS,
                 last_raw_prob: 0.0,
                 last_chunk_scored: false,
-                webrtc_vad: SendVad(
-                    webrtc_vad::Vad::new_with_rate_and_mode(
-                        webrtc_vad::SampleRate::Rate16kHz,
-                        webrtc_vad::VadMode::Quality,
-                    ),
-                ),
                 acoustic_profile: profile,
             })
         }
