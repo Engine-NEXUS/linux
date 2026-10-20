@@ -46,12 +46,25 @@ mistaken for a user decision. The Windows and macOS code paths are untouched
   * `default` is matched **exactly**: `sysdefault:…` is a hardware device,
     not ALSA's `default` device.
 * **`probe_order()`** — the pure ordering function (stable: equal tiers keep
-  the caller's order).
+  the caller's order). On a PipeWire system `pulse` and `default` are the
+  same source under other names, so they are **dropped from the order when
+  `pipewire` is present**; without PipeWire they are still probed. This also
+  means the 2 s window is not paid three times for one microphone.
+* **`silent_fallback_index()`** — when every device probe reports silence,
+  the fallback device is the best **real** capture path
+  (`pipewire`/`pulse`/`default`, `hw:` …), never an ALSA plugin or a loopback,
+  even when the plugin reports a higher RMS. Plugins and loopbacks are not
+  microphones, so reopening one can never let the wake word hear the user;
+  a real device may start working once the input is unmuted. The `>=`
+  tie-break is kept, so an all-silent machine still has a fallback (and a
+  plugin-only machine still falls back to the best plugin rather than none).
 * **`probe_wait_ms()`** — the audio server's own capture path
   (`pipewire` / `pulse` / `default`) gets a **2000 ms** window instead of
   500 ms: PipeWire's ALSA bridge delivers its first callback late, and the
   short window reported a perfectly good microphone as silent. Every other
-  device keeps the 500 ms window.
+  device keeps the 500 ms window. `pulse`/`default` only reach the probe when
+  PipeWire is absent, so their long window is never paid twice for the same
+  source.
 * **`capture_permission_state()`** probes in the same order as the wake-word
   capture (it used to keep its own two-bucket split).
 * **`KWS_DEVICE_PENDING`** and **`SILENT_MIC_HINT`** — the two Linux wordings
@@ -62,6 +75,13 @@ mistaken for a user decision. The Windows and macOS code paths are untouched
 * The device probe passes the per-device window into `try_device()`; the
   "0 samples" log line now names the window it actually waited
   (`0 samples in 2000ms`).
+* The device list is de-duplicated before probing: when `pipewire` is
+  present, its `pulse` and `default` aliases are skipped, so one source is
+  not probed with the long window three times.
+* When every probe reports silence, the fallback reopens the best **real**
+  device (`audio_linux::silent_fallback_index`), not the last-probed ALSA
+  plugin: on the target machine's list that is
+  `hw:CARD=sofhdadsp,DEV=7`, not `jack`/`lavrate`.
 * The wake-word init line prints the device as **pending** on Linux instead of
   the acoustic profile's device name (the shipped profile was calibrated on a
   Windows machine: *"Microphone Array (Intel® Smart …)"*). The device that is
@@ -80,10 +100,10 @@ mistaken for a user decision. The Windows and macOS code paths are untouched
 ## Not done / known gaps
 
 * A device that opens but delivers only electrical noise (RMS just above the
-  1e-6 floor) is still accepted. The probe order makes the real capture path
-  win, but a machine where *every* device is silent still falls back to the
-  best of them — the "ALL devices produced silence" path — which may be a
-  plugin. A minimum-RMS floor per tier would need a measured threshold.
+  1e-6 floor) is still accepted as a working microphone. The probe order and
+  the all-silent fallback now prefer real devices, but a noisy plugin/loopback
+  that exceeds the floor before a real device is reached would still be
+  accepted. A minimum-RMS floor per tier would need a measured threshold.
 * The acoustic profile that ships with the app (highpass 128.3 Hz, pre-gain
   2.5x, threshold 0.68) was calibrated on a Windows laptop. Its DSP values are
   still used on Linux; only the (wrong) device name is ignored. A Linux

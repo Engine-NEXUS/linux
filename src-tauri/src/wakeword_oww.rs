@@ -4647,6 +4647,30 @@ fn start_audio_capture(
             try_order.push(d.clone());
         }
     }
+    // Linux: `pipewire`, `pulse` and `default` are three names for the same
+    // source on a PipeWire system. Probing all three would spend the long
+    // probe window on one microphone three times and delay every real device
+    // behind it, so when `pipewire` is present its aliases are skipped (the
+    // same rule as `crate::audio_linux::probe_order`).
+    #[cfg(target_os = "linux")]
+    {
+        let names: Vec<String> = try_order
+            .iter()
+            .map(|d| d.name().unwrap_or_default())
+            .collect();
+        let pipewire_present = names
+            .iter()
+            .any(|n| crate::audio_linux::is_pipewire(n.as_str()));
+        if pipewire_present {
+            let filtered: Vec<cpal::Device> = try_order
+                .iter()
+                .zip(names.iter())
+                .filter(|(_, n)| !crate::audio_linux::is_server_alias(n.as_str()))
+                .map(|(d, _)| d.clone())
+                .collect();
+            try_order = filtered;
+        }
+    }
     // Stable sort: devices in the same tier keep the default-device-first
     // order, the ALSA plugin devices and the loopback/dummy sources move to
     // the end.
@@ -4666,7 +4690,15 @@ fn start_audio_capture(
     // the RMS.
     // If the device produces silence (Intel SST bug), try the next device.
     let mut last_err = String::new();
+    // Windows/macOS: the highest-RMS device, using >= so that even a device
+    // with RMS = 0.0 is remembered as the fallback (see the tie-break note
+    // below).
+    #[cfg(not(target_os = "linux"))]
     let mut best_device: Option<(cpal::Device, f32)> = None; // (device, rms)
+    // Linux: every device that failed the silence probe, in probe order, so
+    // the fallback can prefer a real capture path over a plugin/loopback.
+    #[cfg(target_os = "linux")]
+    let mut probed: Vec<(usize, String, f32)> = Vec::new();
 
     for (attempt, device) in try_order.iter().enumerate() {
         let dev_name = device.name().unwrap_or_else(|_| "unknown".into());
@@ -4700,19 +4732,48 @@ fn start_audio_capture(
                 // produces exactly 0.0 RMS, the comparison 0.0 > 0.0 fails,
                 // best_device stays None, and the try_device_silent fallback
                 // never runs — causing an infinite retry loop.
-                if best_device.is_none() || rms >= best_device.as_ref().map(|(_, r)| *r).unwrap_or(0.0) {
-                    best_device = Some((device.clone(), rms));
+                #[cfg(not(target_os = "linux"))]
+                {
+                    if best_device.is_none()
+                        || rms >= best_device.as_ref().map(|(_, r)| *r).unwrap_or(0.0)
+                    {
+                        best_device = Some((device.clone(), rms));
+                    }
                 }
+                // Linux keeps every candidate (the >= tie-break lives in
+                // `audio_linux::silent_fallback_index`, which also prefers a
+                // real device over a plugin/loopback).
+                #[cfg(target_os = "linux")]
+                probed.push((attempt, dev_name.clone(), rms));
                 tracing::warn!("audio: device '{}' failed: {}", dev_name, e);
                 last_err = e;
             }
         }
     }
 
-    // All devices produced silence. Fall back to the best (highest RMS) device
-    // instead of giving up entirely. The mic may start working later (driver
-    // recovery, user unmutes, headset reconnects, etc.).
-    if let Some((device, rms)) = best_device {
+    // All devices produced silence. Fall back to the best device instead of
+    // giving up entirely. The mic may start working later (driver recovery,
+    // user unmutes, headset reconnects, etc.).
+    //
+    // Linux: prefer the best real capture path (pipewire/pulse/default or a
+    // `hw:` device) over an ALSA plugin or a loopback even when the plugin's
+    // RMS is equal or higher — a plugin never becomes a microphone, while a
+    // real device may start working as soon as the user unmutes it. The
+    // overall best device is still used when no real device exists, so the
+    // fallback is never lost.
+    #[cfg(target_os = "linux")]
+    let fallback: Option<(cpal::Device, f32)> = {
+        let candidates: Vec<(&str, f32)> = probed
+            .iter()
+            .map(|(_, name, rms)| (name.as_str(), *rms))
+            .collect();
+        crate::audio_linux::silent_fallback_index(&candidates)
+            .map(|i| (try_order[probed[i].0].clone(), probed[i].2))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let fallback = best_device;
+
+    if let Some((device, rms)) = fallback {
         let dev_name = device.name().unwrap_or_else(|_| "unknown".into());
         // The cause is platform specific: on Windows it is usually the Intel
         // SST driver, on Linux a muted input or an audio server that is not

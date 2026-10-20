@@ -4,7 +4,7 @@
 //! microphones, and they are not equally useful:
 //!
 //!   - every output sink also exposes a `Monitor of …` loopback source, which
-//!     carries **speaker output** — probing it first costs 5 s per device and
+//!     carries **speaker output** — giving it a probe window wastes time and
 //!     can false-trigger the wake word on our own TTS playback;
 //!   - ALSA's `default` often resolves to a PipeWire dummy sink that emits
 //!     electrical static instead of speech;
@@ -26,7 +26,15 @@
 //! the audio server's own capture path first (`pipewire`, `pulse`,
 //! `default`), then the real hardware (`hw:`, `plughw:`, `sysdefault:`), then
 //! everything else, and only last the ALSA plugin devices and the
-//! loopback/monitor sources.
+//! loopback/monitor sources. On a PipeWire system `pipewire`, `pulse` and
+//! `default` are three names for the same source, so only `pipewire` is
+//! probed when it is present — probing all three would spend the long probe
+//! window three times on one microphone ([`probe_order`]).
+//!
+//! When every device turns out to be silent, [`silent_fallback_index`]
+//! reopens the best **real** capture path rather than a plugin or a loopback:
+//! a plugin will never become a microphone, while a real device may start
+//! working as soon as the input is unmuted.
 //!
 //! Everything in this module is pure so it can be unit-tested without a
 //! sound card.
@@ -124,8 +132,10 @@ pub fn is_loopback_device(name: &str) -> bool {
 ///
 /// The tiers are, in order:
 /// 0. `pipewire` — the audio server's own capture path;
-/// 1. `pulse` — the PulseAudio compatibility layer;
-/// 2. `default` — ALSA's default device (the server's default source);
+/// 1. `pulse` — the PulseAudio compatibility layer (skipped when `pipewire`
+///    is present: same source);
+/// 2. `default` — ALSA's default device, the server's default source
+///    (likewise skipped when `pipewire` is present);
 /// 3. `hw:` / `plughw:` / `sysdefault:` — real hardware;
 /// 4. everything else that is neither a plugin nor a loopback;
 /// 5. ALSA plugin / virtual devices (they open, but deliver silence);
@@ -163,14 +173,77 @@ pub fn probe_priority(name: &str) -> u8 {
     TIER_OTHER
 }
 
+/// Is this PipeWire's own capture device?
+pub fn is_pipewire(name: &str) -> bool {
+    probe_priority(name) == TIER_PIPEWIRE
+}
+
+/// Is this the PulseAudio / ALSA compatibility alias of the audio server's
+/// capture device (`pulse`, `default`)?
+///
+/// On a PipeWire system all three names resolve to the same source, so the
+/// aliases add nothing once `pipewire` is in the list.
+pub fn is_server_alias(name: &str) -> bool {
+    matches!(probe_priority(name), TIER_PULSE | TIER_DEFAULT)
+}
+
 /// The capture devices in the order they should be probed.
 ///
 /// Pure: the same names always come back in the same order, and the order is
 /// stable (equal tiers keep the caller's order).
+///
+/// When PipeWire is present its `pulse` and `default` aliases are dropped:
+/// probing the same microphone under three names would spend the long probe
+/// window ([`SLOW_PROBE_WAIT_MS`]) three times before any real hardware is
+/// reached. A machine without PipeWire still probes `pulse` and `default`,
+/// so the compatibility path is never lost.
 pub fn probe_order<'a>(names: &[&'a str]) -> Vec<&'a str> {
-    let mut ordered: Vec<&'a str> = names.to_vec();
+    let pipewire_present = names.iter().any(|n| is_pipewire(n));
+    let mut ordered: Vec<&'a str> = names
+        .iter()
+        .copied()
+        .filter(|n| !(pipewire_present && is_server_alias(n)))
+        .collect();
     ordered.sort_by_key(|n| probe_priority(n));
     ordered
+}
+
+/// Index (into `candidates`) of the device to reopen when every probe
+/// reported silence.
+///
+/// `candidates` are `(name, rms)` pairs in the order they were probed.
+///
+/// A real capture path (`pipewire`, `pulse`, `default`, `hw:` …) always wins
+/// over an ALSA plugin or a loopback, even when the plugin/loopback reports
+/// a higher RMS: plugins and loopbacks are not microphones (see the module
+/// docs), so reopening one can never let the wake word hear the user, while
+/// a real device may start working as soon as the input is unmuted. Among
+/// the real devices the highest RMS wins; the `>=` tie-break keeps the last
+/// one, which is also what guarantees a fallback exists when every RMS is
+/// exactly 0.0. When no real device exists the overall highest-RMS device is
+/// returned.
+pub fn silent_fallback_index(candidates: &[(&str, f32)]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_rms = 0.0f32;
+    let mut best_real: Option<usize> = None;
+    let mut best_real_rms = 0.0f32;
+
+    for (i, (name, rms)) in candidates.iter().enumerate() {
+        // `>=` (not `>`) so that even a device with RMS = 0.0 is kept —
+        // otherwise an all-silent machine would have no fallback at all.
+        if best.is_none() || *rms >= best_rms {
+            best = Some(i);
+            best_rms = *rms;
+        }
+        // Real = any tier before the plugin tier (plugins and loopbacks
+        // are the last two tiers).
+        if probe_priority(name) < TIER_PLUGIN && (best_real.is_none() || *rms >= best_real_rms) {
+            best_real = Some(i);
+            best_real_rms = *rms;
+        }
+    }
+
+    best_real.or(best)
 }
 
 /// How long to wait for the first audio callback when probing a device.
@@ -179,6 +252,10 @@ pub fn probe_order<'a>(names: &[&'a str]) -> Vec<&'a str> {
 /// needs [`SLOW_PROBE_WAIT_MS`]: PipeWire's ALSA bridge delivers its first
 /// callback late, and the normal window would report a good microphone as
 /// silent. Every other device keeps the normal window.
+///
+/// `pulse` and `default` only reach the probe when PipeWire is absent (see
+/// [`probe_order`]), so their long window is never paid on a PipeWire
+/// machine for the same source twice.
 pub fn probe_wait_ms(name: &str) -> u64 {
     let lower = name.trim().to_lowercase();
     if lower.starts_with("pipewire") || lower.starts_with("pulse") || lower == "default" {
@@ -428,18 +505,85 @@ mod tests {
             "hw:CARD=sofhdadsp,DEV=6",
             "hw:CARD=sofhdadsp,DEV=7",
         ];
+        // `pulse` and `default` are the same PipeWire source under other
+        // names, so they are not probed a second and third time.
         assert_eq!(
             probe_order(&names),
             vec![
                 "pipewire",
-                "pulse",
-                "default",
                 "hw:CARD=sofhdadsp,DEV=6",
                 "hw:CARD=sofhdadsp,DEV=7",
                 "lavrate",
                 "jack",
             ]
         );
+    }
+
+    #[test]
+    fn pulse_and_default_are_probed_when_pipewire_is_absent() {
+        // Without PipeWire the PulseAudio/ALSA compatibility path is the only
+        // way to reach the microphone — it must still be probed.
+        let names = [
+            "lavrate",
+            "jack",
+            "pulse",
+            "default",
+            "hw:CARD=sofhdadsp,DEV=6",
+        ];
+        assert_eq!(
+            probe_order(&names),
+            vec![
+                "pulse",
+                "default",
+                "hw:CARD=sofhdadsp,DEV=6",
+                "lavrate",
+                "jack",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_silent_fallback_prefers_a_real_device_over_a_plugin() {
+        // Every device is silent — the exact list from the target machine,
+        // in the order the probe really walks it. `lavrate` and `jack` open
+        // happily and deliver silence, so reopening one would leave the wake
+        // word listening to nothing; the physical microphone must win.
+        let names = [
+            "lavrate",
+            "jack",
+            "pipewire",
+            "pulse",
+            "default",
+            "hw:CARD=sofhdadsp,DEV=6",
+            "hw:CARD=sofhdadsp,DEV=7",
+        ];
+        let probed = probe_order(&names);
+        let candidates: Vec<(&str, f32)> = probed.iter().map(|n| (*n, 0.0)).collect();
+        let chosen = silent_fallback_index(&candidates).map(|i| candidates[i].0);
+
+        // The `>=` tie-break keeps the last real device probed.
+        assert_eq!(chosen, Some("hw:CARD=sofhdadsp,DEV=7"));
+        assert_ne!(chosen, Some("jack"));
+        assert_ne!(chosen, Some("lavrate"));
+        assert!(probe_priority(chosen.unwrap()) < TIER_PLUGIN);
+    }
+
+    #[test]
+    fn the_silent_fallback_ignores_a_noisy_plugin() {
+        // A plugin's RMS is electrical noise, not speech: even when it is
+        // higher than a silent microphone's, the microphone is the device
+        // that may start working once it is unmuted.
+        let candidates = [("hw:CARD=sofhdadsp,DEV=7", 0.0), ("jack", 0.004)];
+        assert_eq!(silent_fallback_index(&candidates), Some(0));
+    }
+
+    #[test]
+    fn the_silent_fallback_still_exists_without_a_real_device() {
+        // A machine whose only "inputs" are plugins/loopbacks must still get
+        // a fallback device (the `>=` tie-break keeps the last one).
+        let candidates = [("lavrate", 0.0), ("jack", 0.0)];
+        assert_eq!(silent_fallback_index(&candidates), Some(1));
+        assert_eq!(silent_fallback_index(&[]), None);
     }
 
     #[test]
