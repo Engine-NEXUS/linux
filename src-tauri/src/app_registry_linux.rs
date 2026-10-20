@@ -922,6 +922,68 @@ pub fn exec_process_names(exec: &str) -> Vec<String> {
     vec![base.to_lowercase()]
 }
 
+/// True when a running process belongs to the app.
+///
+/// ONE rule for both questions — "is it running?" and "which window is
+/// its?" — so the two can never disagree.
+///
+/// The process name must be the app's own name, or that name with a
+/// version/architecture decoration (`gimp-2.10`, `firefox-bin`). A
+/// different product never matches: `code-insiders` is not `code`, so
+/// "open code" has to launch VS Code instead of reporting that it is
+/// already running.
+pub fn is_same_app(process_name: &str, base: &str) -> bool {
+    if base.is_empty() {
+        return false;
+    }
+    if process_name == base {
+        return true;
+    }
+    match process_name.strip_prefix(base) {
+        Some(tail) => is_decoration(tail),
+        None => false,
+    }
+}
+
+/// True when the tail after the app's name is a version or a build suffix.
+///
+/// `2.10` and `-bin` count; `-insiders`, `-esr` and `-oss` do not — those
+/// are different products that merely start with the same word.
+fn is_decoration(tail: &str) -> bool {
+    let (rest, had_separator) = match tail.chars().next() {
+        Some(c) if matches!(c, '-' | '_' | '.') => (&tail[c.len_utf8()..], true),
+        Some(c) if c.is_ascii_digit() => (tail, false),
+        _ => return false,
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    // A version: digits, then optional ".digits" groups.
+    if rest.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && rest.chars().any(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    // A build suffix — only with a separator, so "codebin" is not "code".
+    had_separator && (rest == "bin" || rest == "wrapped")
+}
+
+/// The pids of the app's own running processes, or `None` when the app is
+/// not running at all.
+///
+/// Pure (unit-tested). The Insiders case: with only `code-insiders`
+/// running, "code" has no process of its own, so this is `None` and the
+/// caller launches VS Code — it must not wait for a window of an app that
+/// is not running.
+pub fn app_pids(snapshot: &ProcessSnapshot, names: &[String]) -> Option<Vec<u32>> {
+    let pids = snapshot.pids_for(names);
+    if pids.is_empty() {
+        None
+    } else {
+        Some(pids)
+    }
+}
+
 /// A snapshot of the process table.
 ///
 /// The focus path asks "is this app running?" on every attempt, and a full
@@ -956,41 +1018,13 @@ impl ProcessSnapshot {
         ProcessSnapshot { processes }
     }
 
-    /// The pids of the processes whose name matches one of `names`.
+    /// The pids of the processes that belong to the app.
     ///
-    /// Loose: a candidate of 4+ characters also matches a decorated name
-    /// ("firefox" inside "firefox-esr"). This decides whether the app is
-    /// running — never which window belongs to it. Use
-    /// [`Self::pids_for_exact`] for that.
+    /// One rule for both "is it running?" and "which window is its?" — see
+    /// [`is_same_app`]. The name must match exactly, or carry a version or
+    /// build decoration (`gimp-2.10`, `firefox-bin`); a different product
+    /// (`code-insiders`) never matches.
     pub fn pids_for(&self, names: &[String]) -> Vec<u32> {
-        if names.is_empty() {
-            return Vec::new();
-        }
-        let mut pids: Vec<u32> = Vec::new();
-        for (process_name, pid) in &self.processes {
-            for candidate in names {
-                if candidate.is_empty() {
-                    continue;
-                }
-                // A longer candidate may match a decorated process name
-                // ("firefox" inside "firefox-esr").
-                if process_name == candidate.as_str()
-                    || (candidate.len() >= 4 && process_name.contains(candidate.as_str()))
-                {
-                    pids.push(*pid);
-                    break;
-                }
-            }
-        }
-        pids
-    }
-
-    /// The pids of the processes whose name EXACTLY matches one of `names`.
-    ///
-    /// The window pick uses this: with `code` and `code-insiders` both
-    /// running, the loose rule matches both, and "open code" would raise
-    /// whichever window came first in the list.
-    pub fn pids_for_exact(&self, names: &[String]) -> Vec<u32> {
         if names.is_empty() {
             return Vec::new();
         }
@@ -998,7 +1032,7 @@ impl ProcessSnapshot {
         for (process_name, pid) in &self.processes {
             if names
                 .iter()
-                .any(|candidate| !candidate.is_empty() && process_name == candidate.as_str())
+                .any(|candidate| is_same_app(process_name, candidate))
             {
                 pids.push(*pid);
             }
@@ -1024,15 +1058,14 @@ pub fn window_id_for_pids(windows: &[(u64, u32)], pids: &[u32]) -> Option<u64> {
 }
 
 /// What a focus attempt found, before anything was raised.
-///
-/// "Not running" is not a fact here: that case needs no mapping — it is
-/// simply [`FocusOutcome::NotRunning`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusFacts {
     /// A window belonging to the app was found.
     WindowFound,
     /// The app's process is running, but no window was found for it.
     ProcessOnly,
+    /// The app has no process of its own — it is not running.
+    NotRunning,
 }
 
 /// Map the facts of a focus attempt onto the outcome the caller sees.
@@ -1057,6 +1090,8 @@ pub fn focus_outcome(facts: FocusFacts, raised: bool, blocked: Option<&str>) -> 
             // waits for it instead of starting a second copy.
             None => FocusOutcome::WindowNotReady,
         },
+        // No process of its own: the caller launches it.
+        FocusFacts::NotRunning => FocusOutcome::NotRunning,
     }
 }
 
@@ -1374,10 +1409,10 @@ mod tests {
     }
 
     #[test]
-    fn the_window_pick_needs_an_exact_process_name() {
-        // `code` and `code-insiders` both running: the loose rule matches
-        // both ("code" is inside "code-insiders"), but only the exact one
-        // may own the window that "open code" raises.
+    fn the_window_pick_needs_the_apps_own_process() {
+        // `code` and `code-insiders` both running: `code-insiders` is a
+        // different product, so it must not own the window that "open code"
+        // raises.
         let snapshot = ProcessSnapshot {
             processes: vec![
                 ("code".to_string(), 100),
@@ -1385,29 +1420,75 @@ mod tests {
             ],
         };
         let names = vec!["code".to_string()];
-        // The loose rule may only decide "is it running".
-        assert_eq!(snapshot.pids_for(&names).len(), 2);
-        // The window pick is exact.
-        assert_eq!(snapshot.pids_for_exact(&names), vec![100]);
+        assert_eq!(snapshot.pids_for(&names), vec![100]);
         let windows = [(0x03e0_0006u64, 100u32), (0x03e0_0007, 200)];
         assert_eq!(
-            window_id_for_pids(&windows, &snapshot.pids_for_exact(&names)),
+            window_id_for_pids(&windows, &snapshot.pids_for(&names)),
             Some(0x03e0_0006)
         );
     }
 
     #[test]
-    fn an_exact_name_that_is_not_running_picks_no_window() {
-        // Only code-insiders is running: it must not answer for "code".
+    fn a_different_product_is_not_the_app() {
+        // The Insiders case: a different product with a similar name is not
+        // the app the user asked for.
+        assert!(!is_same_app("code-insiders", "code"));
+        assert!(!is_same_app("code-oss", "code"));
+        assert!(!is_same_app("codium", "code"));
+        // Same product, exact name.
+        assert!(is_same_app("code", "code"));
+    }
+
+    #[test]
+    fn a_version_decoration_is_the_app() {
+        // "gimp-2.10" is GIMP; "gimp-2.10" as a process name with the
+        // Exec base "gimp".
+        assert!(is_same_app("gimp-2.10", "gimp"));
+        assert!(is_same_app("gimp2.10", "gimp"));
+        assert!(is_same_app("gimp-2", "gimp"));
+        // …but not a different product that merely starts the same way.
+        assert!(!is_same_app("gimp-2.10-insiders", "gimp"));
+    }
+
+    #[test]
+    fn a_build_suffix_is_the_app() {
+        assert!(is_same_app("firefox-bin", "firefox"));
+        assert!(is_same_app("firefox-wrapped", "firefox"));
+        // "firefox-esr" is a different build of Firefox, but the reviewer
+        // asked for only version/build decorations to count — it does not.
+        assert!(!is_same_app("firefox-esr", "firefox"));
+    }
+
+    #[test]
+    fn the_insiders_case_launches_instead_of_waiting() {
+        // Only code-insiders is running: "code" has no process of its own,
+        // so the outcome is "not running" and the caller launches VS Code.
         let snapshot = ProcessSnapshot {
             processes: vec![("code-insiders".to_string(), 200)],
         };
         let names = vec!["code".to_string()];
-        assert_eq!(snapshot.pids_for_exact(&names), Vec::<u32>::new());
-        let windows = [(0x03e0_0007u64, 200u32)];
+        assert!(app_pids(&snapshot, &names).is_none());
+
+        // It must never come out as "running but the window isn't showing":
+        // that refuses to launch an app that is not running at all.
+        let outcome = focus_outcome(FocusFacts::NotRunning, false, None);
+        assert_eq!(outcome, FocusOutcome::NotRunning);
+        assert_ne!(outcome, FocusOutcome::WindowNotReady);
+    }
+
+    #[test]
+    fn a_decorated_process_is_the_app_and_is_found() {
+        // "gimp-2.10" running: the app IS running, so the caller must not
+        // launch a second copy.
+        let snapshot = ProcessSnapshot {
+            processes: vec![("gimp-2.10".to_string(), 4242)],
+        };
+        let names = vec!["gimp".to_string()];
+        assert_eq!(app_pids(&snapshot, &names), Some(vec![4242]));
+        let windows = [(0x03e0_0009u64, 4242u32)];
         assert_eq!(
-            window_id_for_pids(&windows, &snapshot.pids_for_exact(&names)),
-            None
+            window_id_for_pids(&windows, &snapshot.pids_for(&names)),
+            Some(0x03e0_0009)
         );
     }
 
@@ -1506,6 +1587,10 @@ mod tests {
         );
         assert_ne!(
             focus_outcome(FocusFacts::WindowFound, true, None),
+            FocusOutcome::NotRunning
+        );
+        assert_eq!(
+            focus_outcome(FocusFacts::NotRunning, false, None),
             FocusOutcome::NotRunning
         );
     }

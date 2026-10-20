@@ -911,7 +911,16 @@ pub fn focus_existing(entry: &AppEntry) -> FocusOutcome {
         }
     }
 
-    FocusOutcome::NotRunning
+    // Nothing matching is open: the caller launches the app.
+    #[cfg(target_os = "linux")]
+    let outcome = app_registry_linux::focus_outcome(
+        app_registry_linux::FocusFacts::NotRunning,
+        false,
+        None,
+    );
+    #[cfg(not(target_os = "linux"))]
+    let outcome = FocusOutcome::NotRunning;
+    outcome
 }
 
 /// Linux: the process names the app can run under.
@@ -937,16 +946,15 @@ fn linux_focus_running_window(
         return None;
     }
     let snapshot = snapshot?;
-    // The window pick needs an EXACT process-name match. The loose rule
-    // ("code" inside "code-insiders") decides only whether the app is
-    // running; using it here would raise the wrong window.
-    let exact_pids = snapshot.pids_for_exact(&names);
+    // The SAME rule as "is it running?" — an app with no process of its own
+    // has no window to raise either.
+    let pids = app_registry_linux::app_pids(snapshot, &names)?;
     let windows: Vec<(u64, u32)> = WINDOW_CACHE
         .read()
         .iter()
         .map(|w| (w.hwnd.max(0) as u64, w.pid))
         .collect();
-    let id = app_registry_linux::window_id_for_pids(&windows, &exact_pids)?;
+    let id = app_registry_linux::window_id_for_pids(&windows, &pids)?;
     if focus_window(id as isize) {
         return Some(FocusOutcome::Focused);
     }
@@ -971,11 +979,13 @@ fn linux_window_not_ready(
     if names.is_empty() {
         return None;
     }
-    // The loose rule is enough here: it only decides "is it running".
-    let running = snapshot.map(|s| s.pids_for(&names)).unwrap_or_default();
-    if running.is_empty() {
-        return None;
-    }
+    let snapshot = snapshot?;
+    // The SAME rule as the window pick above: only the app's own process
+    // counts. A different product with a similar name ("code-insiders" for
+    // "code") must not make the app look like it is running — the caller
+    // would then wait for a window that will never come instead of
+    // launching the app the user asked for.
+    let _pids = app_registry_linux::app_pids(snapshot, &names)?;
     // Last chance to raise it: the display-name regex.
     if app_registry_linux::focus_by_title(&entry.display_name) {
         return Some(FocusOutcome::Focused);

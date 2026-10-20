@@ -46,11 +46,15 @@ The whole Linux platform layer, declared from the parent module
 * **Which window?** The window title rarely equals the `.desktop` name
   ("Text Editor" vs "gedit", "Firefox" vs "Mozilla Firefox"), so the window
   of the app is located by the **PID** the `wmctrl -l -p` output carries and
-  raised with `wmctrl -i -a <id>`. The pid must match the process name
-  **exactly** for that pick — with `code` and `code-insiders` both running,
-  the loose "contains" rule would raise the wrong window. The loose rule is
-  used only to decide running/not-running. The display-name regex is the last
+  raised with `wmctrl -i -a <id>`. The display-name regex is the last
   fallback.
+* **"Is this app running?"** — **one** rule, used by both the "is it
+  running?" question and the "which window is its?" pick, so the two can
+  never disagree. The process name must be the app's own name or that name
+  with a version/build decoration (`gimp-2.10`, `firefox-bin`); a different
+  product never matches, so `code-insiders` is not `code` and "open code"
+  launches VS Code instead of answering "it is running but its window isn't
+  showing".
 * **"Is it already running?"** — the process table answers this where the
   window list does not exist (Wayland). The table is read **once per
   `focus_existing` call** and that one snapshot is passed down; there is no
