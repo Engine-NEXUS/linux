@@ -225,6 +225,12 @@ pub fn get_or_create_window<R: Runtime>(
     if config.label == "stage" {
         crate::overlay_linux::init_stage(&win);
     }
+    // Linux: the sidebar becomes a system drawer (layer-shell, keyboard on
+    // demand) where the compositor supports it; otherwise a normal window.
+    #[cfg(target_os = "linux")]
+    if config.label == "sidebar" {
+        crate::overlay_linux::init_drawer(&win);
+    }
 
     // Apply platform-specific effects
     #[cfg(target_os = "windows")]

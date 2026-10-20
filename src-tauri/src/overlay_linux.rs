@@ -29,6 +29,8 @@ use crate::stage::StageRect;
 
 /// Target layer: overlay (above normal windows, panels, and full-screen apps).
 const GTK_LAYER_SHELL_LAYER_OVERLAY: i32 = 3;
+/// The sidebar drawer's layer: above normal windows, below the overlay.
+const GTK_LAYER_SHELL_LAYER_TOP: i32 = 2;
 
 /// Edge anchor indices for gtk-layer-shell.
 const GTK_LAYER_SHELL_EDGE_LEFT: i32 = 0;
@@ -38,6 +40,8 @@ const GTK_LAYER_SHELL_EDGE_BOTTOM: i32 = 3;
 
 /// Keyboard interactivity mode for gtk-layer-shell (0 = NONE).
 const GTK_LAYER_SHELL_KEYBOARD_MODE_NONE: i32 = 0;
+/// The surface takes the keyboard when the user clicks into it (the drawer).
+const GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND: i32 = 2;
 
 /// Reason why the fallback path was chosen instead of layer-shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +69,7 @@ pub struct LayerShellBindings {
     pub set_keyboard_mode: Option<unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32)>,
     pub set_keyboard_interactivity: Option<unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32)>,
     pub set_monitor: Option<unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, *mut gdk::ffi::GdkMonitor)>,
+    pub set_margin: Option<unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32, i32)>,
 }
 
 /// Loaded `libgtk-layer-shell.so.0` handle and function pointers.
@@ -89,6 +94,7 @@ impl LayerShellLib {
             let set_keyboard_mode = lib.get::<unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32)>(b"gtk_layer_set_keyboard_mode\0").ok().map(|s| *s);
             let set_keyboard_interactivity = lib.get::<unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32)>(b"gtk_layer_set_keyboard_interactivity\0").ok().map(|s| *s);
             let set_monitor = lib.get::<unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, *mut gdk::ffi::GdkMonitor)>(b"gtk_layer_set_monitor\0").ok().map(|s| *s);
+            let set_margin = lib.get::<unsafe extern "C" fn(*mut gtk::ffi::GtkWindow, i32, i32)>(b"gtk_layer_set_margin\0").ok().map(|s| *s);
 
             Ok(Self {
                 _lib: lib,
@@ -102,6 +108,7 @@ impl LayerShellLib {
                     set_keyboard_mode,
                     set_keyboard_interactivity,
                     set_monitor,
+                    set_margin,
                 },
             })
         }
@@ -258,6 +265,11 @@ fn init_stage_on_main_thread<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
             if gtk_win.is_realized() {
                 gtk_win.unrealize();
             }
+            // A non-resizable GtkWindow keeps its default size and ignores the
+            // compositor's configure, so the anchored surface could never take
+            // the size the compositor gives it. A layer surface cannot be
+            // resized by the user anyway.
+            gtk_win.set_resizable(true);
 
             if let Some(lib) = get_layer_shell_lib() {
                 unsafe {
@@ -269,23 +281,36 @@ fn init_stage_on_main_thread<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
                     (lib.set_anchor)(raw_ptr, GTK_LAYER_SHELL_EDGE_RIGHT, 1);
                     (lib.set_anchor)(raw_ptr, GTK_LAYER_SHELL_EDGE_TOP, 1);
                     (lib.set_anchor)(raw_ptr, GTK_LAYER_SHELL_EDGE_BOTTOM, 1);
-                    (lib.set_exclusive_zone)(raw_ptr, -1);
+                    // 0 first: the first configure then reports the area the
+                    // panels leave free (see `measure_safe_area`), after which
+                    // the stage goes full screen (-1) so screen coordinates
+                    // stay exact for the pointer, the tour and the pins.
+                    (lib.set_exclusive_zone)(raw_ptr, 0);
                     if let Some(set_km) = lib.set_keyboard_mode {
                         (set_km)(raw_ptr, GTK_LAYER_SHELL_KEYBOARD_MODE_NONE);
                     } else if let Some(set_ki) = lib.set_keyboard_interactivity {
                         (set_ki)(raw_ptr, 0);
                     }
-                    if let Some(set_mon) = lib.set_monitor {
-                        if let Some(display) = gdk::Display::default() {
-                            let monitor = display.primary_monitor().or_else(|| display.monitor(0));
-                            if let Some(m) = monitor {
-                                let m_ptr: *mut gdk::ffi::GdkMonitor = m.to_glib_none().0;
-                                (set_mon)(raw_ptr, m_ptr);
-                            }
-                        }
-                    }
+                    set_primary_monitor(lib, raw_ptr);
                 }
                 LAYER_SHELL_ACTIVE.store(true, Ordering::SeqCst);
+
+                // Measure the panels once per stage window, shortly after its
+                // first map (the compositor's configure has arrived by then).
+                let measured = std::rc::Rc::new(std::cell::Cell::new(false));
+                let win_for_measure = win.clone();
+                gtk_win.connect_map(move |w| {
+                    if measured.replace(true) {
+                        return;
+                    }
+                    let weak = w.downgrade();
+                    let win = win_for_measure.clone();
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(700), move || {
+                        if let Some(w) = weak.upgrade() {
+                            measure_safe_area(w.upcast_ref::<gtk::Window>(), &win);
+                        }
+                    });
+                });
             }
 
             gtk_win.set_accept_focus(false);
@@ -342,9 +367,375 @@ fn apply_input_region_on_main_thread() {
     }
 }
 
+/// Pin a layer surface to the primary monitor (the one Rust's geometry uses).
+unsafe fn set_primary_monitor(lib: &LayerShellBindings, raw_ptr: *mut gtk::ffi::GtkWindow) {
+    if let Some(set_mon) = lib.set_monitor {
+        if let Some(display) = gdk::Display::default() {
+            let monitor = display.primary_monitor().or_else(|| display.monitor(0));
+            if let Some(m) = monitor {
+                let m_ptr: *mut gdk::ffi::GdkMonitor = m.to_glib_none().0;
+                (set_mon)(raw_ptr, m_ptr);
+            }
+        }
+    }
+}
+
+fn primary_monitor_size_logical() -> Option<(i32, i32)> {
+    let display = gdk::Display::default()?;
+    let m = display.primary_monitor().or_else(|| display.monitor(0))?;
+    let g = m.geometry();
+    Some((g.width(), g.height()))
+}
+
+// ─── Safe area: where the panels are (the orb sits inside it) ────────────────
+
+/// Space the desktop's panels take on each edge, in logical pixels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Insets {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+/// Which edges carry a panel that reserves space, when the desktop says so.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PanelEdges {
+    /// The edges below come from the desktop's own config.
+    pub known: bool,
+    pub left: bool,
+    pub top: bool,
+    pub right: bool,
+    pub bottom: bool,
+}
+
+static SAFE_INSETS: once_cell::sync::Lazy<parking_lot::Mutex<Insets>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(Insets::default()));
+
+/// The measured panel insets in PHYSICAL pixels, or zero when the stage is
+/// not a layer surface (the X11 window is placed below the panels by the
+/// window manager itself).
+pub fn safe_insets_physical(scale: f64) -> Insets {
+    if !is_layer_shell_active() {
+        return Insets::default();
+    }
+    let i = *SAFE_INSETS.lock();
+    let s = |v: i32| (v as f64 * scale).round() as i32;
+    Insets { left: s(i.left), top: s(i.top), right: s(i.right), bottom: s(i.bottom) }
+}
+
+/// The measured panel insets in logical pixels (zero until measured).
+pub fn safe_insets_logical() -> Insets {
+    *SAFE_INSETS.lock()
+}
+
+/// Pure: share the measured free-area shortfall between the edges.
+///
+/// `total_x` / `total_y` are monitor size minus the area the panels leave
+/// free. When the desktop config names exactly one panel edge on an axis,
+/// that edge gets all of it; otherwise (both edges, or a panel the config
+/// does not explain) each edge on that axis gets the whole amount, which
+/// keeps the orb clear of either one at the cost of a small gap.
+pub fn attribute_insets(total_x: i32, total_y: i32, edges: PanelEdges) -> Insets {
+    let split = |total: i32, a: bool, b: bool| -> (i32, i32) {
+        if total <= 0 {
+            return (0, 0);
+        }
+        match (edges.known, a, b) {
+            (true, true, false) => (total, 0),
+            (true, false, true) => (0, total),
+            _ => (total, total),
+        }
+    };
+    let (top, bottom) = split(total_y, edges.top, edges.bottom);
+    let (left, right) = split(total_x, edges.left, edges.right);
+    Insets { left, top, right, bottom }
+}
+
+/// Pure: the quoted names in COSMIC's panel `entries` file (`["Panel", "Dock"]`).
+pub fn parse_cosmic_entries(text: &str) -> Vec<String> {
+    text.split('"')
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1)
+        .map(|(_, s)| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Pure: which edges reserve space, from each panel's (`anchor`, `exclusive_zone`) files.
+pub fn cosmic_edges_from(panels: &[(String, String)]) -> PanelEdges {
+    let mut e = PanelEdges { known: true, ..PanelEdges::default() };
+    for (anchor, exclusive) in panels {
+        if exclusive.trim() != "true" {
+            continue;
+        }
+        match anchor.trim() {
+            "Top" => e.top = true,
+            "Bottom" => e.bottom = true,
+            "Left" => e.left = true,
+            "Right" => e.right = true,
+            _ => {}
+        }
+    }
+    e
+}
+
+/// COSMIC's panel layout from its config files; `known: false` elsewhere.
+fn desktop_panel_edges() -> PanelEdges {
+    let on_cosmic = std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|d| d.to_ascii_lowercase().contains("cosmic"))
+        .unwrap_or(false);
+    if !on_cosmic {
+        return PanelEdges::default();
+    }
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs_next::home_dir().map(|h| h.join(".config")));
+    let Some(root) = base.map(|b| b.join("cosmic")) else {
+        return PanelEdges::default();
+    };
+    let Ok(entries) = std::fs::read_to_string(root.join("com.system76.CosmicPanel/v1/entries")) else {
+        return PanelEdges::default();
+    };
+    let panels: Vec<(String, String)> = parse_cosmic_entries(&entries)
+        .iter()
+        .map(|name| {
+            let dir = root.join(format!("com.system76.CosmicPanel.{name}/v1"));
+            (
+                std::fs::read_to_string(dir.join("anchor")).unwrap_or_default(),
+                std::fs::read_to_string(dir.join("exclusive_zone")).unwrap_or_default(),
+            )
+        })
+        .collect();
+    cosmic_edges_from(&panels)
+}
+
+/// Runs once per stage window, on the main thread, after its first map: the
+/// surface was created with exclusive zone 0, so its allocation is the area
+/// the panels leave free. Store the insets, go full screen, re-place the orb.
+fn measure_safe_area<R: tauri::Runtime>(gtk_win: &gtk::Window, win: &tauri::WebviewWindow<R>) {
+    let Some((mw, mh)) = primary_monitor_size_logical() else {
+        return;
+    };
+    let (w, h) = (gtk_win.allocated_width(), gtk_win.allocated_height());
+    let edges = desktop_panel_edges();
+    let insets = attribute_insets(mw - w, mh - h, edges);
+    *SAFE_INSETS.lock() = insets;
+    tracing::info!(
+        "overlay_linux: free area {w}x{h} of {mw}x{mh} — panel insets {:?} (desktop config known: {})",
+        insets,
+        edges.known
+    );
+    if let Some(lib) = get_layer_shell_lib() {
+        let raw_ptr: *mut gtk::ffi::GtkWindow = gtk_win.to_glib_none().0;
+        unsafe { (lib.set_exclusive_zone)(raw_ptr, -1) };
+    }
+    use tauri::Manager;
+    crate::window_manager::emit_orb_rect(win.app_handle());
+}
+
+// ─── The sidebar as a system drawer ──────────────────────────────────────────
+
+static DRAWER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether the sidebar is a layer-shell drawer (positioned by margins).
+pub fn is_drawer_active() -> bool {
+    DRAWER_ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Where a drawer goes: anchored to the top and to one side, with margins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrawerPlacement {
+    /// Anchored to the right edge (else the left one).
+    pub right: bool,
+    /// Distance from that side edge.
+    pub margin_side: i32,
+    pub margin_top: i32,
+}
+
+/// Pure: turn the sidebar's (x, y, w) inside an area `area_w` wide into
+/// layer-shell anchors and margins. A rect right of centre hugs the right
+/// edge (so rounding can never push it off screen); anything else is placed
+/// from the left, which also covers the centred views.
+pub fn drawer_placement(x: f64, y: f64, w: f64, area_w: f64) -> DrawerPlacement {
+    let right = x + w / 2.0 > area_w / 2.0;
+    let margin_side = if right { area_w - x - w } else { x };
+    DrawerPlacement {
+        right,
+        margin_side: margin_side.round().max(0.0) as i32,
+        margin_top: y.round().max(0.0) as i32,
+    }
+}
+
+/// The area the sidebar can use, in logical pixels: the monitor minus the
+/// panels when the sidebar is a drawer (its margins count from the panels),
+/// the whole monitor otherwise.
+pub fn drawer_area_logical(monitor_w: f64, monitor_h: f64) -> (f64, f64) {
+    if !is_drawer_active() {
+        return (monitor_w, monitor_h);
+    }
+    let i = safe_insets_logical();
+    (
+        (monitor_w - (i.left + i.right) as f64).max(200.0),
+        (monitor_h - (i.top + i.bottom) as f64).max(200.0),
+    )
+}
+
+/// Make the sidebar a drawer before its first map: top layer, never pushes
+/// windows aside, takes the keyboard only when clicked into, never in
+/// Alt-Tab. Needs the keyboard-mode API (gtk-layer-shell >= 0.6): an older
+/// library would only offer an all-or-nothing keyboard grab, so the sidebar
+/// then stays a normal window.
+pub fn init_drawer<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>) {
+    // Decided here, synchronously: `prepare_sidebar` computes the geometry
+    // right after the window is created, before the main-thread task below
+    // has run. The stage already settled whether layer-shell works.
+    let eligible = is_layer_shell_active()
+        && get_layer_shell_lib()
+            .map(|l| l.set_keyboard_mode.is_some() && l.set_margin.is_some())
+            .unwrap_or(false);
+    DRAWER_ACTIVE.store(eligible, Ordering::SeqCst);
+    if !eligible {
+        if is_layer_shell_active() {
+            tracing::warn!("overlay_linux: gtk-layer-shell too old for the drawer — sidebar stays a window");
+        }
+        return;
+    }
+    let win_clone = win.clone();
+    let _ = win.run_on_main_thread(move || {
+        let Some(lib) = get_layer_shell_lib() else { return };
+        let Some(set_km) = lib.set_keyboard_mode else { return };
+        let Ok(gtk_win) = win_clone.gtk_window() else {
+            DRAWER_ACTIVE.store(false, Ordering::SeqCst);
+            return;
+        };
+        if gtk_win.is_realized() {
+            gtk_win.unrealize();
+        }
+        let raw_ptr: *mut gtk::ffi::GtkWindow = gtk_win.upcast_ref::<gtk::Window>().to_glib_none().0;
+        unsafe {
+            (lib.init_for_window)(raw_ptr);
+            let ns = std::ffi::CStr::from_bytes_with_nul(b"nexus-sidebar\0").unwrap();
+            (lib.set_namespace)(raw_ptr, ns.as_ptr());
+            (lib.set_layer)(raw_ptr, GTK_LAYER_SHELL_LAYER_TOP);
+            (lib.set_exclusive_zone)(raw_ptr, 0);
+            (set_km)(raw_ptr, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
+            set_primary_monitor(lib, raw_ptr);
+        }
+        tracing::info!("overlay_linux: sidebar is a layer-shell drawer (top layer, keyboard on demand)");
+    });
+}
+
+/// Place the drawer at (x, y) with size (w, h) inside the area from
+/// `drawer_area_logical`. No-op when the sidebar is not a drawer.
+///
+/// The size is set as the GTK size request: a drawer anchored to one side
+/// takes the size its window asks for, and the window is non-resizable, so
+/// a plain resize would be ignored.
+pub fn place_drawer<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>, x: f64, y: f64, w: f64, h: f64, area_w: f64) {
+    if !is_drawer_active() {
+        return;
+    }
+    let placement = drawer_placement(x, y, w, area_w);
+    let win_clone = win.clone();
+    let _ = win.run_on_main_thread(move || {
+        let Some(lib) = get_layer_shell_lib() else { return };
+        let Ok(gtk_win) = win_clone.gtk_window() else { return };
+        gtk_win.set_size_request(w.round().max(1.0) as i32, h.round().max(1.0) as i32);
+        let raw_ptr: *mut gtk::ffi::GtkWindow = gtk_win.upcast_ref::<gtk::Window>().to_glib_none().0;
+        apply_drawer_placement(lib, raw_ptr, placement);
+        let weak = gtk_win.downgrade();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(1500), move || {
+            if let Some(g) = weak.upgrade() {
+                tracing::debug!(
+                    "overlay_linux: drawer asked {:.0}x{:.0} at {:?}, got {}x{}",
+                    w, h, placement, g.allocated_width(), g.allocated_height()
+                );
+            }
+        });
+    });
+}
+
+fn apply_drawer_placement(lib: &LayerShellBindings, raw_ptr: *mut gtk::ffi::GtkWindow, p: DrawerPlacement) {
+    let Some(set_margin) = lib.set_margin else { return };
+    unsafe {
+        (lib.set_anchor)(raw_ptr, GTK_LAYER_SHELL_EDGE_TOP, 1);
+        (lib.set_anchor)(raw_ptr, GTK_LAYER_SHELL_EDGE_BOTTOM, 0);
+        (lib.set_anchor)(raw_ptr, GTK_LAYER_SHELL_EDGE_LEFT, (!p.right) as i32);
+        (lib.set_anchor)(raw_ptr, GTK_LAYER_SHELL_EDGE_RIGHT, p.right as i32);
+        (set_margin)(raw_ptr, GTK_LAYER_SHELL_EDGE_TOP, p.margin_top);
+        (set_margin)(raw_ptr, GTK_LAYER_SHELL_EDGE_LEFT, if p.right { 0 } else { p.margin_side });
+        (set_margin)(raw_ptr, GTK_LAYER_SHELL_EDGE_RIGHT, if p.right { p.margin_side } else { 0 });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn insets_go_to_the_edge_the_desktop_names() {
+        let top_only = PanelEdges { known: true, top: true, ..PanelEdges::default() };
+        assert_eq!(
+            attribute_insets(0, 32, top_only),
+            Insets { left: 0, top: 32, right: 0, bottom: 0 }
+        );
+        let bottom_only = PanelEdges { known: true, bottom: true, ..PanelEdges::default() };
+        assert_eq!(attribute_insets(0, 48, bottom_only).bottom, 48);
+        assert_eq!(attribute_insets(0, 48, bottom_only).top, 0);
+        let left_only = PanelEdges { known: true, left: true, ..PanelEdges::default() };
+        assert_eq!(attribute_insets(60, 0, left_only).left, 60);
+    }
+
+    #[test]
+    fn unexplained_or_two_sided_insets_keep_clear_of_both_edges() {
+        // Unknown desktop: a 40px shortfall could be at the top or the bottom.
+        let i = attribute_insets(0, 40, PanelEdges::default());
+        assert_eq!((i.top, i.bottom), (40, 40));
+        // Config says panels top AND bottom: the split is unknown.
+        let both = PanelEdges { known: true, top: true, bottom: true, ..PanelEdges::default() };
+        let i = attribute_insets(0, 80, both);
+        assert_eq!((i.top, i.bottom), (80, 80));
+        // Nothing missing: no inset, whatever the config says.
+        assert_eq!(attribute_insets(0, 0, both), Insets::default());
+        // A negative shortfall (allocation larger than the monitor) is no inset.
+        assert_eq!(attribute_insets(-5, -5, PanelEdges::default()), Insets::default());
+    }
+
+    #[test]
+    fn cosmic_panel_config_is_parsed() {
+        let entries = "[\n    \"Panel\",\n    \"Dock\",\n]\n";
+        assert_eq!(parse_cosmic_entries(entries), vec!["Panel", "Dock"]);
+        assert!(parse_cosmic_entries("[]").is_empty());
+        // The real layout on the target machine: exclusive top panel, dock
+        // that does not reserve space.
+        let e = cosmic_edges_from(&[
+            ("Top\n".into(), "true\n".into()),
+            ("Bottom".into(), "false".into()),
+        ]);
+        assert_eq!(
+            e,
+            PanelEdges { known: true, top: true, ..PanelEdges::default() }
+        );
+    }
+
+    #[test]
+    fn drawer_hugs_the_side_it_is_docked_to() {
+        // Right dock: 520 wide, 10px from the right edge of a 1920 area.
+        let p = drawer_placement(1920.0 - 520.0 - 10.0, 20.0, 520.0, 1920.0);
+        assert_eq!(p, DrawerPlacement { right: true, margin_side: 10, margin_top: 20 });
+        // Left dock.
+        let p = drawer_placement(10.0, 20.0, 400.0, 1920.0);
+        assert_eq!(p, DrawerPlacement { right: false, margin_side: 10, margin_top: 20 });
+        // Centred view: placed from the left at its x.
+        let p = drawer_placement(480.0, 40.0, 960.0, 1920.0);
+        assert_eq!(p, DrawerPlacement { right: false, margin_side: 480, margin_top: 40 });
+        // A rect hanging past the edge gets margin 0, never a negative one.
+        assert_eq!(drawer_placement(1500.0, -3.0, 520.0, 1920.0).margin_side, 0);
+        assert_eq!(drawer_placement(1500.0, -3.0, 520.0, 1920.0).margin_top, 0);
+    }
 
     #[test]
     fn test_path_decision_layer_shell() {

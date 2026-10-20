@@ -253,6 +253,15 @@ pub fn size_stage_to_monitor<R: Runtime>(_app: &AppHandle<R>, _win: &WebviewWind
 /// live-preview path.
 pub fn rect_for<R: Runtime>(app: &AppHandle<R>, h_pct: f64, v_pct: f64, size: u32) -> RectPayload {
     let (sw, sh, scale) = monitor_info(app);
+    // Linux layer-shell: the stage covers the whole output, panels included,
+    // so the orb is placed inside the area the panels leave free.
+    #[cfg(target_os = "linux")]
+    let (x, y) = {
+        let i = crate::overlay_linux::safe_insets_physical(scale);
+        let (x, y) = overlay_xy(h_pct, v_pct, size, sw - i.left - i.right, sh - i.top - i.bottom, scale);
+        (x + i.left, y + i.top)
+    };
+    #[cfg(not(target_os = "linux"))]
     let (x, y) = overlay_xy(h_pct, v_pct, size, sw, sh, scale);
     let phys = (size as f64 * scale) as i32;
     RectPayload { x, y, w: phys, h: phys }

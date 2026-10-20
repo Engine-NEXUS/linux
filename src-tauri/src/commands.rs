@@ -1185,12 +1185,30 @@ pub(crate) async fn prepare_sidebar<R: Runtime>(
     let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::sidebar())?;
     let already_visible = win.is_visible().unwrap_or(false);
 
-    if let Ok(Some(monitor)) = win.current_monitor().or_else(|_| win.primary_monitor()) {
+    let monitor = win.current_monitor().or_else(|_| win.primary_monitor());
+    // Linux (Wayland): a window that is not mapped yet has no current
+    // monitor, and Wayland has no "primary" one (both `Ok(None)`), which
+    // skipped the whole geometry below. Any known monitor is better.
+    #[cfg(target_os = "linux")]
+    let monitor = match monitor {
+        Ok(None) => match win.primary_monitor() {
+            Ok(None) => win.available_monitors().map(|m| m.into_iter().next()),
+            other => other,
+        },
+        other => other,
+    };
+    if let Ok(Some(monitor)) = monitor {
         let scale = monitor.scale_factor();
         let mw = monitor.size().width as f64 / scale;
         let mh = monitor.size().height as f64 / scale;
+        // Linux drawer: its margins count from the panels, so the geometry
+        // is computed inside the area they leave free.
+        #[cfg(target_os = "linux")]
+        let (mw, mh) = crate::overlay_linux::drawer_area_logical(mw, mh);
         let (x, y, w, h) = sidebar_geometry(view, dock, mw, mh);
         let _ = win.set_size(tauri::LogicalSize::new(w, h));
+        #[cfg(target_os = "linux")]
+        crate::overlay_linux::place_drawer(&win, x, y, w, h, mw);
         let _ = win.set_position(tauri::LogicalPosition::new(x, y));
 
         // ── Physical clamp (scale-mismatch drift fix) ──
