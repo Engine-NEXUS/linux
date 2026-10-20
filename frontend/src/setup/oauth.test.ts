@@ -26,6 +26,20 @@ import {
   workerCall,
 } from "./oauth";
 
+/**
+ * Start a sign-in and resolve once it is waiting for the browser redirect.
+ * `connectOAuth` records its pending state synchronously right after
+ * `onBrowserOpened`, so awaiting that callback (rather than a guessed tick —
+ * the PKCE hash is async and slower on CI runners) makes the redirect land on
+ * a flow that is ready for it.
+ */
+function startConnect(provider: "google" | "github" | "swiggy", userId: string) {
+  let opened!: () => void;
+  const browserOpened = new Promise<void>((resolve) => (opened = resolve));
+  const connectPromise = connectOAuth(provider, userId, () => opened());
+  return { connectPromise, browserOpened };
+}
+
 describe("OAuth and API Key Worker Proxy Migration (Job 3)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -143,11 +157,13 @@ describe("OAuth and API Key Worker Proxy Migration (Job 3)", () => {
         url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=xyz",
       });
 
-      const openedCb = vi.fn();
+      let opened!: () => void;
+      const browserOpened = new Promise<void>((resolve) => (opened = resolve));
+      const openedCb = vi.fn(() => opened());
       const connectPromise = connectOAuth("google", "user-123", openedCb);
 
-      // Wait a tick for auth-url invoke to execute
-      await new Promise((r) => setTimeout(r, 0));
+      // Wait until the flow has opened the browser (see startConnect).
+      await browserOpened;
 
       expect(invokeMock).toHaveBeenCalledTimes(1);
       const [cmd, payload] = invokeMock.mock.calls[0];
@@ -204,8 +220,8 @@ describe("OAuth and API Key Worker Proxy Migration (Job 3)", () => {
         url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=xyz",
       });
 
-      const connectPromise = connectOAuth("google", "user-123");
-      await new Promise((r) => setTimeout(r, 0));
+      const { connectPromise, browserOpened } = startConnect("google", "user-123");
+      await browserOpened;
 
       await handleOAuthRedirect("nexus://oauth/callback?status=success");
 
@@ -219,8 +235,8 @@ describe("OAuth and API Key Worker Proxy Migration (Job 3)", () => {
         url: "https://github.com/login/oauth/authorize?client_id=xyz",
       });
 
-      const connectPromise = connectOAuth("github", "user-1");
-      await new Promise((r) => setTimeout(r, 0));
+      const { connectPromise, browserOpened } = startConnect("github", "user-1");
+      await browserOpened;
 
       await handleOAuthRedirect("nexus://oauth/callback?error=access_denied");
 
@@ -233,8 +249,8 @@ describe("OAuth and API Key Worker Proxy Migration (Job 3)", () => {
         url: "https://github.com/login/oauth/authorize?client_id=xyz",
       });
 
-      const connectPromise = connectOAuth("github", "user-1");
-      await new Promise((r) => setTimeout(r, 0));
+      const { connectPromise, browserOpened } = startConnect("github", "user-1");
+      await browserOpened;
 
       invokeMock.mockResolvedValueOnce({ error: "Invalid grant" });
       await handleOAuthRedirect("nexus://oauth/callback?code=bad-code");
