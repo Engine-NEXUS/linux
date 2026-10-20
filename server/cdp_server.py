@@ -245,14 +245,22 @@ _FOCUS_STATE_JS = (
     "JSON.stringify({focus: document.hasFocus(), vis: document.visibilityState})"
 )
 
-# The focus sweep: ALL of a port's candidate targets are probed
-# CONCURRENTLY, under ONE deadline for the whole sweep.
+# The focus sweep: a port's candidate targets are probed under ONE deadline
+# for the WHOLE sweep. HOW they are probed depends on the transport:
 #
-# The deadline is a sweep deadline, not a per-probe one: the probes run in
-# parallel, so a browser with N tabs costs one sweep rather than N sequential
-# probes. A background tab the browser has FROZEN (Chrome/Brave Memory Saver
-# freezes background tabs, and they stop answering `Runtime.evaluate`) can
-# therefore never hold the request hostage.
+#   * Chromium — CONCURRENTLY. Every probe opens its OWN CDP connection, so
+#     a browser with N tabs costs one sweep rather than N sequential probes.
+#     A background tab the browser has FROZEN (Chrome/Brave Memory Saver
+#     freezes background tabs, and they stop answering `Runtime.evaluate`)
+#     can therefore never hold the request hostage.
+#
+#   * Electron — ONE AFTER ANOTHER, because every probe shares the single
+#     inspector websocket, and a socket without reply demultiplexing cannot
+#     serve two requests at once (the replies would be stolen). Each
+#     candidate gets its OWN SLICE of the remaining budget —
+#     `remaining / candidates_left`, recomputed before every probe — so a
+#     frozen window can only eat its own share and the window the user is
+#     actually looking at is still probed.
 FOCUS_SWEEP_DEADLINE = float(os.environ.get("CDP_FOCUS_SWEEP", "6"))
 
 # The whole request, across every reachable port.
@@ -751,7 +759,8 @@ class Electron:
 
         The probes run ONE AFTER ANOTHER, not concurrently: they share a
         single CDP websocket that cannot demultiplex two replies (see
-        `_probe_renderers`).
+        `_probe_renderers`). Each candidate gets its own slice of the
+        remaining budget, so a frozen window cannot starve the one in front.
 
         Returns (None, reason) when the foreground cannot be established.
         """
@@ -793,13 +802,21 @@ class Electron:
         So the probes run sequentially, under the SAME overall sweep
         deadline: the moment the deadline is reached, the remaining
         candidates are unknown — nothing is proved — and the sweep is over.
+
+        Each candidate gets its OWN SLICE of what is left —
+        `remaining / candidates_left`, recomputed before every probe. The
+        candidates are NOT focus-ordered (`webContents.getAllWebContents()`
+        is not), so without a slice the FIRST candidate would take the whole
+        budget: one hung window would starve every window after it, and the
+        window the user is actually looking at would never be probed. With a
+        slice, a frozen window can only eat its own share.
         """
         if not candidates:
             return []
 
         end = time.monotonic() + deadline
         states: list[dict] = []
-        for r in candidates:
+        for index, r in enumerate(candidates):
             remaining = end - time.monotonic()
             if remaining <= 0:
                 # Out of time: this candidate and every one after it are
@@ -807,7 +824,9 @@ class Electron:
                 rest = candidates[len(states):]
                 states.extend(dict(_FOCUS_TIMED_OUT) for _ in rest)
                 break
-            states.append(await self.renderer_focus(r["id"], remaining))
+            # This candidate's own share of what is left.
+            left = len(candidates) - index
+            states.append(await self.renderer_focus(r["id"], remaining / left))
         return states
 
     async def ax(self, wcid: int) -> list[dict]:
@@ -1300,8 +1319,10 @@ async def activate(request: Request) -> JSONResponse:
          per port — CONCURRENTLY for Chromium, where every probe has its
          own connection, and ONE AFTER ANOTHER for Electron, where the
          probes share a single CDP websocket that cannot demultiplex two
-         replies — and the ports share one total budget (`ACTIVATE_BUDGET`)
-         so the request stays inside 15 s;
+         replies (each candidate there gets its own slice of the remaining
+         budget, so a frozen window cannot starve the one in front) — and
+         the ports share one total budget (`ACTIVATE_BUDGET`) so the
+         request stays inside 15 s;
       4. a target is chosen ONLY when EXACTLY ONE candidate answered
          `known` and `focus` — zero focused, more than one focused, or
          everything unknown all REFUSE with 409 and a reason.

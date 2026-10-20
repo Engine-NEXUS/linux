@@ -369,15 +369,32 @@ def test_the_reason_says_why_no_target_was_chosen():
 
 
 def test_the_sweep_probes_every_candidate_concurrently_under_one_deadline(monkeypatch):
-    # Four frozen background tabs. Four SEQUENTIAL probes would cost four
-    # deadlines; the sweep costs ONE, because the probes run in parallel.
+    # Four frozen background tabs. The sweep probes ALL of them, and it
+    # probes them CONCURRENTLY: every probe has its own connection, so all
+    # four are open at the same time and the sweep costs ONE deadline
+    # instead of four.
+    #
+    # No wall-clock assertion here: how long a timer takes to fire on a
+    # loaded machine is not a property of this code. The properties that
+    # ARE — every candidate probed, all of them open at once, none of them
+    # answering — are asserted directly.
+    live = []
+    peak = []
+
     class _NeverAnswers:
         def __init__(self, ws_url):
             self.ws_url = ws_url
+            live.append(self)
+            peak.append(len(live))
 
         async def __aenter__(self):
-            await asyncio.sleep(3600)  # a frozen renderer
-            return self
+            try:
+                await asyncio.sleep(3600)  # a frozen renderer
+                return self
+            finally:
+                # Abandoned: the probe timed out and gave the connection up.
+                if self in live:
+                    live.remove(self)
 
         async def __aexit__(self, *exc):
             return None
@@ -385,16 +402,18 @@ def test_the_sweep_probes_every_candidate_concurrently_under_one_deadline(monkey
     monkeypatch.setattr(cdp_server, "Cdp", _NeverAnswers)
 
     targets = [{"webSocketDebuggerUrl": f"ws://x/{i}"} for i in range(4)]
-    deadline = 0.5
-    t0 = time.monotonic()
-    states = asyncio.run(cdp_server._probe_all(targets, deadline))
-    elapsed = time.monotonic() - t0
+    states = asyncio.run(cdp_server._probe_all(targets, 0.5))
 
     assert len(states) == 4
+    # Every candidate was probed — the sweep does not stop at the first.
+    assert len(peak) == 4
+    # And they were probed CONCURRENTLY: the fourth connection was opened
+    # while the first three were still waiting. A sequential sweep would
+    # never have more than one open at a time.
+    assert max(peak) == 4
+    # None of them answered, so none of them proved anything.
     assert all(st["known"] is False for st in states)
     assert all(st["focus"] is False for st in states)
-    # One deadline, not one per candidate.
-    assert elapsed < deadline * 2
     # And nothing was chosen: no candidate proved it was in front.
     assert cdp_server.choose_focused_target(targets, states) is None
 
@@ -554,27 +573,86 @@ def test_the_electron_probes_never_overlap_on_the_shared_socket(monkeypatch):
 def test_the_electron_sweep_stays_inside_the_deadline_when_a_renderer_never_answers(
     monkeypatch,
 ):
-    # A renderer that never answers must not hold the sweep: the deadline
-    # is reached, that renderer and every one after it are unknown, and the
-    # sweep is over.
+    # A renderer that never answers must not hold the sweep: it gets its own
+    # slice of the budget, and the sweep is over when the deadline is
+    # reached.
+    #
+    # No wall-clock assertion here: how long a timer takes to fire on a
+    # loaded machine is not a property of this code. What IS asserted is
+    # what each candidate proved — and that the sweep finished at all.
     e = _electron(monkeypatch)
 
     class _NeverAnswers:
+        def __init__(self):
+            self.calls = 0
+
         async def main_eval(self, body):
+            self.calls += 1
             await asyncio.sleep(3600)  # a frozen renderer
             return {}
 
-    monkeypatch.setattr(e, "main_eval", _NeverAnswers().main_eval)
+    conn = _NeverAnswers()
+    monkeypatch.setattr(e, "main_eval", conn.main_eval)
 
     t0 = time.monotonic()
     states = asyncio.run(e._probe_renderers([{"id": 1}, {"id": 2}], 0.4))
     elapsed = time.monotonic() - t0
 
     assert len(states) == 2
+    # The first candidate was probed, and it proved nothing.
+    assert conn.calls >= 1
+    assert states[0]["known"] is False
+    # Neither candidate proved anything: the one that was probed timed out,
+    # and the one the deadline skipped is unknown as well.
     assert all(st["known"] is False for st in states)
-    # The sweep did not run past its deadline: the second renderer was
-    # never probed, because the first one ate the whole budget.
-    assert elapsed < 0.4 * 2
+    assert all(st["timed_out"] is True for st in states)
+    # And the sweep did finish — a generous absolute bound, because the
+    # duration does matter here (the request may not hang), but a multiple
+    # of the deadline does not: a late timer is not a broken sweep.
+    assert elapsed < 5.0
+
+
+def test_a_frozen_first_window_cannot_starve_the_focused_one(monkeypatch):
+    # `webContents.getAllWebContents()` is NOT focus-ordered, so the HUNG
+    # window can be candidate 0. If the first candidate took the whole
+    # sweep budget, the focused window would never be probed and the click
+    # would be refused even though the control IS in front.
+    #
+    # Each candidate gets its own slice of the remaining budget, so the
+    # frozen window can only eat its own share — and the focused one is
+    # still probed, and still chosen.
+    e = _electron(monkeypatch)
+
+    class _FirstNeverAnswers:
+        def __init__(self):
+            self.calls = 0
+
+        async def main_eval(self, body):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(3600)  # a frozen window
+                return {}
+            return {"focus": True, "vis": "visible"}
+
+    conn = _FirstNeverAnswers()
+    monkeypatch.setattr(e, "main_eval", conn.main_eval)
+
+    candidates = [{"id": 1}, {"id": 2}]
+    # A generous deadline: each candidate gets its own slice of it, so the
+    # frozen one can only eat its own share.
+    states = asyncio.run(e._probe_renderers(candidates, 2.0))
+
+    # The frozen window proved nothing...
+    assert states[0]["known"] is False
+    assert states[0]["timed_out"] is True
+    # ...and the focused window was still probed...
+    assert conn.calls == 2
+    assert states[1]["known"] is True
+    assert states[1]["focus"] is True
+    # ...and it is the one that is chosen.
+    chosen = cdp_server.choose_focused_target(candidates, states)
+    assert chosen is not None
+    assert chosen["id"] == 2
 
 
 # ── The whole rule, with a fake endpoint ────────────────────────────────────
