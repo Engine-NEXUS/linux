@@ -11,6 +11,7 @@
           "librsvg2-2",
           "libasound2",
           "libssl3",
+          "libgtk-layer-shell0",
           "python3"
         ]
       }

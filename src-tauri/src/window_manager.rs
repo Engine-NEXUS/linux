@@ -231,6 +231,10 @@ pub fn monitor_info<R: Runtime>(app: &AppHandle<R>) -> (i32, i32, f64) {
 /// keeps its configured size, so this is a no-op there.
 #[cfg(target_os = "linux")]
 pub fn size_stage_to_monitor<R: Runtime>(app: &AppHandle<R>, win: &WebviewWindow<R>) {
+    if crate::overlay_linux::is_layer_shell_active() {
+        tracing::info!("stage: layer-shell active — skipping manual window sizing (anchored to edges)");
+        return;
+    }
     let (w, h, _scale) = monitor_info(app);
     if w <= 0 || h <= 0 {
         return;

@@ -43,6 +43,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     MISSING_PKGS=()
     for pkg in libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev \
                libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config \
+               libgtk-layer-shell0 \
                portaudio19-dev python3-venv python3-pip python3-gi gir1.2-atspi-2.0 at-spi2-core; do
       if ! dpkg -s "$pkg" &> /dev/null; then
         MISSING_PKGS+=("$pkg")

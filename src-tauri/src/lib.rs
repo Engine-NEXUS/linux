@@ -156,6 +156,9 @@ pub(crate) mod session;
 // Called from main() before Tauri/GTK starts — see the module docs.
 #[cfg(target_os = "linux")]
 pub mod gdk_backend_linux;
+// Linux stage overlay via layer-shell (Wayland) or non-focusable notification window (X11).
+#[cfg(target_os = "linux")]
+pub(crate) mod overlay_linux;
 
 // ── Linux semantic tier + policy gate ─────────────────────────────────────
 //
