@@ -134,6 +134,67 @@ impl Foreground {
     }
 }
 
+/// A window that claims to be the active one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowCandidate {
+    pub app: String,
+    pub title: String,
+}
+
+/// Resolve the observed foreground from the set of windows claiming to be active.
+///
+/// # Why "exactly one" and not "the first one"
+///
+/// The audit of the Linux build on the target machine found that **two**
+/// applications report an ACTIVE frame at the same time. The first-match rule
+/// that was in place picked whichever the bus happened to list first, and the
+/// privacy gate then compared *that* window against the deny-list — so a
+/// deny-listed window in front of a non-deny-listed one was captured, or the
+/// other way round, depending on enumeration order.
+///
+/// Ambiguity is not a reason to guess. When more than one window claims to be
+/// active, the honest answer is "I could not tell", and the policy layer
+/// treats that as a refusal.
+///
+/// Pure + unit-tested.
+pub fn resolve_foreground(candidates: &[WindowCandidate], reason: &str) -> Foreground {
+    match candidates.len() {
+        0 => Foreground::Unknown {
+            reason: reason.to_string(),
+        },
+        1 => Foreground::Known {
+            app: candidates[0].app.clone(),
+            title: candidates[0].title.clone(),
+        },
+        n => Foreground::Unknown {
+            reason: format!("{n} windows report an active frame — the foreground is ambiguous"),
+        },
+    }
+}
+
+/// Parse the `candidates` array of a `/focused` response.
+fn parse_candidates(v: &serde_json::Value) -> Vec<WindowCandidate> {
+    v.get("candidates")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let app = c.get("app").and_then(|x| x.as_str()).unwrap_or_default();
+                    let title = c.get("title").and_then(|x| x.as_str()).unwrap_or_default();
+                    if app.is_empty() && title.is_empty() {
+                        None
+                    } else {
+                        Some(WindowCandidate {
+                            app: app.to_string(),
+                            title: title.to_string(),
+                        })
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -286,6 +347,11 @@ pub async fn fill(name: Option<&str>, app: Option<&str>, text: &str) -> Result<A
 }
 
 /// Identify the foreground window, for the privacy exclusion gate.
+///
+/// The server reports every window that claims to be active; the "exactly one"
+/// rule is applied HERE as well as in the server. The client must not depend
+/// on the server's judgement for a conclusion the policy gate acts on, so the
+/// ambiguity rule is enforced on this side of the wire and unit-tested.
 pub async fn focused() -> Result<Foreground, String> {
     crate::lazy_atspi::ensure_atspi_running();
     crate::lazy_atspi::mark_atspi_request();
@@ -307,20 +373,85 @@ pub async fn focused() -> Result<Foreground, String> {
         .await
         .map_err(|e| format!("atspi focused parse: {e}"))?;
 
+    let reason = v
+        .get("reason")
+        .and_then(|x| x.as_str())
+        .unwrap_or("no application reported an active or focused window")
+        .to_string();
+
+    // The candidate list is authoritative when present; a server that only
+    // answers `known` still works, because then there is exactly one
+    // candidate by construction.
+    let candidates = parse_candidates(&v);
+    if !candidates.is_empty() {
+        return Ok(resolve_foreground(&candidates, &reason));
+    }
+
     if v.get("known").and_then(|k| k.as_bool()).unwrap_or(false) {
         Ok(Foreground::Known {
             app: v.get("app").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
             title: v.get("title").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
         })
     } else {
-        Ok(Foreground::Unknown {
-            reason: v
-                .get("reason")
-                .and_then(|x| x.as_str())
-                .unwrap_or("unspecified")
-                .to_string(),
-        })
+        Ok(Foreground::Unknown { reason })
     }
+}
+
+/// The actionable elements of the foreground window (or of one named app).
+///
+/// "Actionable" means the toolkit says the element can be invoked or edited —
+/// the same set the pointer/ordinal flows need. Password-ish elements are
+/// filtered by the caller through [`crate::policy`], never here: this function
+/// reports what the toolkit exposes, and the policy layer decides what may be
+/// touched.
+pub async fn actionables(app: Option<&str>) -> Result<Vec<AtspiNode>, String> {
+    crate::lazy_atspi::ensure_atspi_running();
+    crate::lazy_atspi::mark_atspi_request();
+
+    let mut q: Vec<(&str, String)> = Vec::new();
+    if let Some(a) = app {
+        q.push(("app", a.to_string()));
+    }
+    let url = format!("{}/actionables", base());
+    let resp = client()?
+        .get(url)
+        .query(&q)
+        .send()
+        .await
+        .map_err(|e| format!("atspi actionables failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        200 => {}
+        404 => return Ok(Vec::new()),
+        503 => return Err("atspi tier unavailable".into()),
+        s => return Err(format!("atspi HTTP {s}")),
+    }
+
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("atspi actionables parse: {e}"))?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(format!("atspi: {err}"));
+    }
+    // "The foreground is unknown" is not "the window has no controls". The
+    // server says so explicitly; the caller must be able to tell them apart.
+    if v.get("known").and_then(|k| k.as_bool()) == Some(false) {
+        let reason = v
+            .get("reason")
+            .and_then(|x| x.as_str())
+            .unwrap_or("the foreground window is unknown");
+        return Err(format!("atspi: {reason}"));
+    }
+    let elements = v
+        .get("elements")
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(elements
+        .into_iter()
+        .filter_map(|e| serde_json::from_value::<AtspiNode>(e).ok())
+        .collect())
 }
 
 #[cfg(test)]
@@ -410,5 +541,80 @@ mod tests {
             .expect("runtime");
         let r = rt.block_on(find("   ", None, None));
         assert!(r.is_err(), "empty name must be rejected locally");
+    }
+
+    // ── Foreground identity: ambiguity is not a licence to guess ──────────
+
+    fn cand(app: &str, title: &str) -> WindowCandidate {
+        WindowCandidate {
+            app: app.into(),
+            title: title.into(),
+        }
+    }
+
+    #[test]
+    fn a_single_active_window_is_the_foreground() {
+        let f = resolve_foreground(&[cand("Firefox", "Example — Mozilla Firefox")], "none");
+        assert!(f.is_known());
+        assert_eq!(f.title(), Some("Example — Mozilla Firefox"));
+    }
+
+    #[test]
+    fn several_active_windows_mean_unknown_not_the_first_match() {
+        // The bug the audit found on the target machine: two applications
+        // reported an ACTIVE frame, and the first-match rule picked one of
+        // them at random. The gate then compared the wrong window against
+        // the deny-list.
+        let f = resolve_foreground(
+            &[
+                cand("portal-gtk", "Settings"),
+                cand("code", "main.rs — nexus"),
+            ],
+            "none",
+        );
+        assert!(!f.is_known(), "an ambiguous foreground must not be reported as known");
+        match f {
+            Foreground::Unknown { reason } => {
+                assert!(reason.contains("ambiguous"), "reason must say why: {reason}");
+                assert!(reason.contains('2'), "reason must say how many: {reason}");
+            }
+            Foreground::Known { .. } => panic!("ambiguous foreground reported as known"),
+        }
+    }
+
+    #[test]
+    fn no_active_window_is_unknown_with_the_servers_reason() {
+        let f = resolve_foreground(&[], "no application reported an active window");
+        assert!(!f.is_known());
+        assert_eq!(f.title(), None);
+        match f {
+            Foreground::Unknown { reason } => {
+                assert_eq!(reason, "no application reported an active window")
+            }
+            Foreground::Known { .. } => panic!("no candidate must not be known"),
+        }
+    }
+
+    #[test]
+    fn candidate_parsing_ignores_empty_entries() {
+        let v = serde_json::json!({
+            "known": false,
+            "reason": "ambiguous",
+            "candidates": [
+                {"app": "code", "title": "a.rs"},
+                {"app": "", "title": ""},
+                {"app": "firefox", "title": "Example"}
+            ]
+        });
+        let c = parse_candidates(&v);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].app, "code");
+        assert_eq!(c[1].title, "Example");
+    }
+
+    #[test]
+    fn candidate_parsing_of_a_server_without_the_array_is_empty() {
+        let v = serde_json::json!({"known": true, "app": "code", "title": "a.rs"});
+        assert!(parse_candidates(&v).is_empty());
     }
 }

@@ -205,12 +205,21 @@ pub fn capture_primary_jpeg_base64() -> Option<(String, i32, i32)> {
 /// grounding, and it can occlude small text). Returns
 /// (base64_jpeg, screen_w, screen_h). None on any failure.
 pub fn capture_plain_jpeg_base64_w(max_w: u32) -> Option<(String, i32, i32)> {
-    let (mw, mh) = crate::screen::primary_monitor_size()?;
-    if mw <= 0 || mh <= 0 {
-        return None;
+    #[cfg(target_os = "linux")]
+    {
+        // The portal captures the whole screen and reports its real size, so
+        // the region is left to the caller. The privacy gate runs inside.
+        crate::screen::capture_jpeg_base64(None, max_w, false)
     }
-    let b64 = capture_region_jpeg_base64(0, 0, mw, mh, max_w)?;
-    Some((b64, mw, mh))
+    #[cfg(not(target_os = "linux"))]
+    {
+        let (mw, mh) = crate::screen::primary_monitor_size()?;
+        if mw <= 0 || mh <= 0 {
+            return None;
+        }
+        let b64 = capture_region_jpeg_base64(0, 0, mw, mh, max_w)?;
+        Some((b64, mw, mh))
+    }
 }
 
 /// Capture one screen rectangle (physical px), downscale to `max_w`, JPEG,
@@ -237,7 +246,14 @@ pub fn capture_region_jpeg_base64(x: i32, y: i32, w: i32, h: i32, max_w: u32) ->
         use base64::Engine;
         Some(base64::engine::general_purpose::STANDARD.encode(&jpeg))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        // The portal has no region option: the whole screen is captured and
+        // the region is cropped locally. The privacy gate runs inside.
+        crate::screen::capture_jpeg_base64(Some((x, y, w, h)), max_w, false)
+            .map(|(b64, _, _)| b64)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = (x, y, w, h, max_w);
         None
@@ -308,12 +324,12 @@ pub fn overlay_axis_grid(mut img: image::RgbaImage) -> image::RgbaImage {
 /// `max_w` controls the downscale target (1024 standard, 768 fast).
 /// Returns (base64_jpeg, screen_w, screen_h). None on any failure.
 pub fn capture_gridded_jpeg_base64_w(max_w: u32) -> Option<(String, i32, i32)> {
-    let (mw, mh) = crate::screen::primary_monitor_size()?;
-    if mw <= 0 || mh <= 0 {
-        return None;
-    }
     #[cfg(target_os = "windows")]
     {
+        let (mw, mh) = crate::screen::primary_monitor_size()?;
+        if mw <= 0 || mh <= 0 {
+            return None;
+        }
         let bgra = crate::sidebar_backdrop::capture_region_bgra_public(0, 0, mw, mh)?;
         let img = image::RgbaImage::from_raw(mw as u32, mh as u32, bgra_to_rgba(bgra))?;
         let scale = (max_w as f32 / mw as f32).min(1.0);
@@ -334,7 +350,13 @@ pub fn capture_gridded_jpeg_base64_w(max_w: u32) -> Option<(String, i32, i32)> {
             mh,
         ))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        // The portal captures the whole screen; the grid is drawn onto it
+        // locally. The privacy gate runs inside the capture helper.
+        crate::screen::capture_jpeg_base64(None, max_w, true)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = max_w;
         None

@@ -59,6 +59,12 @@ pub struct ScreenContext {
     /// Title/URL/app matched the sensitive-window denylist (bank, password
     /// manager, wallet…): the tour refuses instead of capturing.
     pub sensitive: bool,
+    /// Whether the foreground window could actually be identified.
+    ///
+    /// `false` means "I could not tell" — which is NOT the same as "there is
+    /// nothing interesting here". A caller that captures without an identity
+    /// cannot check its privacy list, so on Linux the answer is to refuse.
+    pub foreground_known: bool,
     /// OCR-visible text lines (compact), injected into the vision prompt as
     /// ground-truth clues so celebrity/creator recognition can cross-reference
     /// on-screen text (Feature 88 v2 / P3).
@@ -73,6 +79,8 @@ pub struct RawContext {
     pub url: Option<String>,
     pub document_rect: Option<(i32, i32, i32, i32)>,
     pub window_rect: Option<(i32, i32, i32, i32)>,
+    /// Whether the probes actually identified the foreground window.
+    pub foreground_known: bool,
 }
 
 pub const MIN_REGION_W: i32 = 200;
@@ -242,6 +250,14 @@ pub fn choose_region(raw: &RawContext, mw: i32, mh: i32) -> Region {
 /// Sensitive-window check against the live-mode denylist (banks, password
 /// managers, wallets). Pure over strings.
 pub fn is_sensitive(app: &str, title: &str, url: Option<&str>) -> bool {
+    // On Linux the OBSERVED identity is what counts, and `policy` is the
+    // module that knows which windows hold credentials or money. The
+    // live-mode denylist below matches text the *model* supplied, which a
+    // prompt injection controls — so it is only ever an extra layer here.
+    #[cfg(target_os = "linux")]
+    if crate::policy::classify_window(app, title).is_some() {
+        return true;
+    }
     let t = crate::live::safety::is_target_blocked;
     t(app) || t(title) || url.map(t).unwrap_or(false)
 }
@@ -261,6 +277,7 @@ pub fn build_context(
         kind: classify_content(&raw.app, url.as_deref()),
         full_screen: region.is_full(mw, mh),
         sensitive: is_sensitive(&raw.app, &raw.title, raw.url.as_deref()),
+        foreground_known: raw.foreground_known,
         youtube,
         url,
         region,
@@ -365,10 +382,35 @@ fn probe_blocking() -> RawContext {
         url,
         document_rect,
         window_rect: crate::browser_url::foreground_window_rect(),
+        foreground_known: true,
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Blocking OS probes on Linux: the accessibility bus.
+///
+/// The identity comes from the same source the policy gate uses — the
+/// toolkit's own report of the focused window — so the context and the gate
+/// can never disagree about which window is in front. There is no portable
+/// "active browser URL" on Wayland, and the CDP tier needs the browser to be
+/// launched with a debug port, so the URL is simply not available here.
+#[cfg(target_os = "linux")]
+fn probe_blocking() -> RawContext {
+    let fg = crate::semantic::observed_foreground();
+    let (app, title, known) = match &fg {
+        crate::atspi::Foreground::Known { app, title } => (app.clone(), title.clone(), true),
+        crate::atspi::Foreground::Unknown { .. } => (String::new(), String::new(), false),
+    };
+    RawContext {
+        app,
+        title,
+        url: None,
+        document_rect: None,
+        window_rect: None,
+        foreground_known: known,
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn probe_blocking() -> RawContext {
     RawContext::default()
 }
@@ -402,6 +444,13 @@ async fn fetch_oembed(video_id: &str) -> Option<YoutubeMeta> {
 
 /// Gather the context for the tour. Never fails: a slow/failed probe or
 /// lookup just yields less context (and a full-screen capture).
+///
+/// **But "less context" is not "no identity".** A probe that times out
+/// leaves `foreground_known` false, and the caller must treat that as a
+/// refusal rather than as "nothing interesting here" — an unidentified
+/// window cannot be checked against the privacy list. On Windows the capture
+/// path still fails open (see the Windows note in the port handover); on
+/// Linux the capture primitive itself refuses, so the whole chain is closed.
 pub async fn collect(mw: i32, mh: i32) -> ScreenContext {
     let raw = match tokio::time::timeout(
         std::time::Duration::from_millis(3500),
@@ -411,7 +460,9 @@ pub async fn collect(mw: i32, mh: i32) -> ScreenContext {
     {
         Ok(Ok(raw)) => raw,
         _ => {
-            tracing::warn!("screen_context: probes timed out — capturing full screen with no context");
+            tracing::warn!(
+                "screen_context: probes timed out — the foreground window is unknown"
+            );
             RawContext::default()
         }
     };
@@ -447,13 +498,14 @@ pub async fn collect(mw: i32, mh: i32) -> ScreenContext {
     let ocr_lines = Vec::new();
     let ctx = ScreenContext { ocr_lines, ..ctx };
     tracing::info!(
-        "screen_context: app='{}' kind={:?} region={:?} full={} youtube={} sensitive={}",
+        "screen_context: app='{}' kind={:?} region={:?} full={} youtube={} sensitive={} foreground_known={}",
         ctx.app,
         ctx.kind,
         ctx.region,
         ctx.full_screen,
         ctx.youtube.is_some(),
-        ctx.sensitive
+        ctx.sensitive,
+        ctx.foreground_known
     );
     ctx
 }
@@ -623,10 +675,12 @@ mod tests {
             url: Some("womenshealthmag.com/uk/food/healthy-eating/g63752621/healthiest-nuts/".into()),
             document_rect: Some((0, 82, 1920, 950)),
             window_rect: Some((0, 0, 1920, 1032)),
+            foreground_known: true,
         };
         let ctx = build_context(&raw, None, 1920, 1080);
         assert_eq!(ctx.kind, ContentKind::BrowserPage);
         assert!(!ctx.full_screen && !ctx.sensitive);
+        assert!(ctx.foreground_known);
         assert_eq!(ctx.region, Region { x: 0, y: 82, w: 1920, h: 950 });
         let block = ctx.prompt_block();
         assert!(block.contains("Top 10 healthiest nuts"));
@@ -640,6 +694,7 @@ mod tests {
             app: "brave.exe".into(),
             title: "Some Video - YouTube".into(),
             url: Some(format!("https://www.youtube.com/watch?v={ID}&list=PLsecret&si=trk")),
+            foreground_known: true,
             ..Default::default()
         };
         let meta = YoutubeMeta { title: "Never Gonna Give You Up".into(), author: "Rick Astley".into() };
@@ -658,5 +713,29 @@ mod tests {
         assert!(ctx.full_screen && !ctx.sensitive);
         assert_eq!(ctx.kind, ContentKind::Unknown);
         assert!(ctx.prompt_block().contains("unknown"));
+    }
+
+    #[test]
+    fn an_unidentified_foreground_is_flagged_as_unknown() {
+        // The distinction the whole capture gate rests on: "I could not tell
+        // which window this is" is not "nothing to redact". A probe that
+        // timed out leaves the identity unknown, and the caller must be able
+        // to see that.
+        let raw = RawContext::default();
+        let ctx = build_context(&raw, None, 1920, 1080);
+        assert!(!ctx.foreground_known);
+        assert!(ctx.app.is_empty());
+    }
+
+    #[test]
+    fn an_identified_foreground_is_flagged_as_known() {
+        let raw = RawContext {
+            app: "code".into(),
+            title: "main.rs".into(),
+            foreground_known: true,
+            ..Default::default()
+        };
+        let ctx = build_context(&raw, None, 1920, 1080);
+        assert!(ctx.foreground_known);
     }
 }

@@ -61,6 +61,10 @@ pub enum Op {
     WriteText,
     /// Enumerate every accessible name in a window.
     ReadTree,
+    /// Capture the screen. Discloses *everything* in the window, so it is
+    /// graded with the read/write tier rather than with the geometry tier:
+    /// a screenshot of a vault is a screenshot of the vault.
+    Capture,
 }
 
 impl Op {
@@ -69,7 +73,7 @@ impl Op {
         match self {
             Op::LocateGeometry => Sensitivity::Low,
             Op::Activate => Sensitivity::Medium,
-            Op::ReadText | Op::WriteText | Op::ReadTree => Sensitivity::High,
+            Op::ReadText | Op::WriteText | Op::ReadTree | Op::Capture => Sensitivity::High,
         }
     }
 }
@@ -271,9 +275,14 @@ pub fn decide(
                 reason: "cannot identify the target window; confirm before acting".into(),
             },
             Sensitivity::High => Decision::Deny {
-                reason: "cannot identify the target window; refusing to read or write its \
-                         contents"
-                    .into(),
+                reason: match op {
+                    Op::Capture => "cannot identify the target window; refusing to capture \
+                                   the screen of a window I cannot name"
+                        .into(),
+                    _ => "cannot identify the target window; refusing to read or write its \
+                          contents"
+                        .into(),
+                },
             },
         };
     }
@@ -419,5 +428,49 @@ mod tests {
         if let Decision::Deny { reason } = d {
             assert!(!reason.contains("1Password"), "reason echoed the sensitive name");
         }
+    }
+
+    // ── Capture: the pixel tier is graded like a read ────────────────────
+
+    #[test]
+    fn capture_is_a_high_sensitivity_operation() {
+        // A screenshot of a vault is a screenshot of the vault, so capture
+        // must not be graded with the (low) geometry tier.
+        assert_eq!(Op::Capture.sensitivity(), Sensitivity::High);
+        assert!(Op::Capture.sensitivity() > Op::LocateGeometry.sensitivity());
+    }
+
+    #[test]
+    fn capture_is_denied_when_the_window_cannot_be_identified() {
+        // This is the rule the whole pre-capture gate rests on: an unknown
+        // foreground is not "nothing to redact", it is "cannot rule anything
+        // out".
+        let d = decide(Op::Capture, false, None, None);
+        assert!(matches!(d, Decision::Deny { .. }));
+        if let Decision::Deny { reason } = d {
+            assert!(
+                reason.contains("cannot identify"),
+                "the reason must explain the refusal: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_is_denied_on_a_sensitive_window() {
+        for w in [
+            Sensitive::PasswordManager,
+            Sensitive::Financial,
+            Sensitive::SecretBearingText,
+        ] {
+            assert!(
+                !decide(Op::Capture, true, Some(w), None).may_proceed_unattended(),
+                "capture must be refused on {w:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_is_allowed_on_an_ordinary_known_window() {
+        assert_eq!(decide(Op::Capture, true, None, None), Decision::Allow);
     }
 }

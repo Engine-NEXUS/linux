@@ -3703,7 +3703,56 @@ async fn run_screen_click<R: Runtime>(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = ordinal;
-        speak_line(&app, "Screen clicking needs Windows, sir.".to_string(), &request_id);
+        // Linux: the accessibility tree is the instrument, and the *action* is
+        // performed by the application itself (AT-SPI `do_action`), so this
+        // works on a native Wayland session where synthetic input does not
+        // exist. The policy gate is inside the semantic tier.
+        #[cfg(target_os = "linux")]
+        {
+            let els = match crate::screen::list_actionables_with_reason() {
+                Ok(els) => els,
+                Err(e) => {
+                    speak_line(&app, e, &request_id);
+                    clear_active_request(&request_id);
+                    return Ok(ProcessResult {
+                        request_id,
+                        subsystem: Subsystem::LocalCommand,
+                        handled_locally: true,
+                    });
+                }
+            };
+            match crate::screen::pick_ordinal(&els, ordinal) {
+                Some(el) => {
+                    let name = el.name.clone();
+                    let (cx, cy) = crate::live::commands::mouse::element_center(&el);
+                    match crate::system_center::click_element_by_name(&name) {
+                        Ok(msg) => {
+                            // Point at what was clicked, so the user can see
+                            // which control the assistant acted on. Any stale
+                            // marker from an earlier turn goes first.
+                            let _ = crate::pointer::emit_hide(&app);
+                            let _ = crate::pointer::show_direct(
+                                &app,
+                                cx as f64,
+                                cy as f64,
+                                name.clone(),
+                            );
+                            speak_line(&app, msg, &request_id)
+                        }
+                        Err(e) => speak_line(&app, e, &request_id),
+                    }
+                }
+                None => speak_line(
+                    &app,
+                    format!("I only see {} clickable things, sir.", els.len()),
+                    &request_id,
+                ),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            speak_line(&app, "Screen clicking needs Windows, sir.".to_string(), &request_id);
+        }
     }
     clear_active_request(&request_id);
     Ok(ProcessResult {
@@ -3773,7 +3822,38 @@ async fn run_screen_read<R: Runtime>(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = ordinal;
-        speak_line(&app, "Screen reading needs Windows, sir.".to_string(), &request_id);
+        // Linux: the same accessibility tree, read instead of actuated.
+        #[cfg(target_os = "linux")]
+        {
+            let els = match crate::screen::list_actionables_with_reason() {
+                Ok(els) => els,
+                Err(e) => {
+                    speak_line(&app, e, &request_id);
+                    clear_active_request(&request_id);
+                    return Ok(ProcessResult {
+                        request_id,
+                        subsystem: Subsystem::LocalCommand,
+                        handled_locally: true,
+                    });
+                }
+            };
+            match crate::screen::pick_ordinal(&els, ordinal) {
+                Some(el) => speak_line(
+                    &app,
+                    format!("{} {} says {}, sir.", ordinal_word(ordinal), el.kind, el.name),
+                    &request_id,
+                ),
+                None => speak_line(
+                    &app,
+                    format!("I only see {} clickable things, sir.", els.len()),
+                    &request_id,
+                ),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            speak_line(&app, "Screen reading needs Windows, sir.".to_string(), &request_id);
+        }
     }
     clear_active_request(&request_id);
     Ok(ProcessResult {
@@ -3890,6 +3970,75 @@ async fn try_ocr_answer<R: Runtime>(
             None
         }
     }
+}
+
+/// LOCAL OCR answer attempt on Linux (the Feature 86 path, ported).
+///
+/// The Windows implementation uses Windows.Media.Ocr; on Linux the local
+/// RapidOCR sidecar does the same job: free, offline, no quota, no API key.
+/// The screenshot comes from the xdg-desktop-portal — which means it passes
+/// through the pre-capture privacy gate — and the text boxes come back from
+/// the sidecar.
+///
+/// Returns Some(ProcessResult) when OCR produced text (turn answered +
+/// cleared); None when OCR found nothing → the caller continues the chain.
+#[cfg(target_os = "linux")]
+async fn try_ocr_answer_linux<R: Runtime>(
+    app: &AppHandle<R>,
+    prompt: &str,
+    request_id: &str,
+) -> Option<ProcessResult> {
+    // The capture primitive carries the privacy gate: an unidentified
+    // foreground refuses the capture and this returns None.
+    let (b64, _, _) =
+        crate::vision::capture_plain_jpeg_base64_w(crate::vision::VISION_FAST_W)?;
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let boxes = match crate::ocr::ocr_image(&bytes).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("ocr: the local OCR tier failed ({e}) — continuing chain");
+            return None;
+        }
+    };
+    let lines = crate::ocr::merge_lines(boxes);
+    if lines.is_empty() {
+        tracing::warn!("ocr: screen text extraction was empty — continuing chain");
+        return None;
+    }
+    let line_count = lines.len();
+    let text: String = lines
+        .iter()
+        .map(|b| b.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let first = lines
+        .first()
+        .map(|b| b.text.chars().take(90).collect::<String>())
+        .unwrap_or_default();
+    speak_line(
+        app,
+        format!(
+            "Your screen shows {line_count} text lines, sir, starting with: {first}. \
+             The full text is in the sidebar."
+        ),
+        request_id,
+    );
+    crate::commands::set_pending_sidebar_text(
+        prompt.to_string(),
+        format!(
+            "## Screen Text (OCR)\n\n```\n{}\n```",
+            text.chars().take(3000).collect::<String>()
+        ),
+    );
+    let _ = crate::commands::unified_show_sidebar(app, "assistant", None).await;
+    tracing::info!("ocr: screen text extracted ({line_count} lines)");
+    clear_active_request(request_id);
+    Some(ProcessResult {
+        request_id: request_id.to_string(),
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
 }
 
 /// Spoken guidance prefix for the OCR fallback in screen analysis
@@ -6424,8 +6573,86 @@ async fn run_screen_analysis<R: Runtime>(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = prompt;
-        speak_line(&app, "Screen analysis needs Windows, sir.".to_string(), &request_id);
+        // Linux: the capture goes through the pre-capture privacy gate, and
+        // the gate is checked HERE as well so the refusal can be spoken. The
+        // capture primitive re-checks it, so there is no path around it.
+        #[cfg(target_os = "linux")]
+        {
+            let gate = crate::pointer::capture_gate(&app);
+            if !gate.allows_capture() {
+                tracing::warn!("screen analysis refused: {}", gate.spoken());
+                speak_line(&app, gate.spoken(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            // The context comes from the same observed identity the gate used.
+            let (sw, sh) = crate::screen::primary_monitor_size().unwrap_or((1920, 1080));
+            let ctx = crate::screen_context::collect(sw, sh).await;
+            if !ctx.foreground_known {
+                speak_line(
+                    &app,
+                    "I can't tell which window is in front, sir, so I won't risk looking \
+                     at the screen."
+                        .to_string(),
+                    &request_id,
+                );
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            if ctx.sensitive {
+                speak_line(&app, "I won't analyse this window, sir.".to_string(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            // A transcription question ("read my screen") is answered by the
+            // LOCAL OCR tier: free, offline, no quota. The same cost tier the
+            // Windows path uses.
+            if classify_screen_query(&prompt) == ScreenQueryTier::ReadOnly {
+                if let Some(result) = try_ocr_answer_linux(&app, &prompt, &request_id).await {
+                    return Ok(result);
+                }
+                tracing::info!("ocr: empty for a ReadOnly query — continuing to the VLM");
+            }
+            match crate::vision::analyze_screen_spatial(&app, &prompt).await {
+                Ok(payload) => {
+                    let spoken = if !payload.overview.trim().is_empty() {
+                        format!("{}, sir.", payload.overview.trim().trim_end_matches('.'))
+                    } else {
+                        let n = payload.items.len();
+                        format!(
+                            "I've highlighted {} {} on your screen, sir.",
+                            n,
+                            if n == 1 { "element" } else { "elements" }
+                        )
+                    };
+                    speak_line(&app, spoken, &request_id);
+                }
+                Err(e) => speak_line(
+                    &app,
+                    format!("I couldn't see the screen, sir: {e}"),
+                    &request_id,
+                ),
+            }
+            // Falls through to the shared tail below, which clears the active
+            // request and returns the result.
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = &prompt;
+            speak_line(&app, "Screen analysis needs Windows, sir.".to_string(), &request_id);
+        }
     }
 
     // ── Fallback 2: LOCAL OCR (Feature 86, zero-RAM, keyless+offline) ──
@@ -6832,7 +7059,32 @@ async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Resul
 
     #[cfg(not(target_os = "windows"))]
     {
-        speak_line(&app, "Clicking by name isn't available on this platform, sir.".to_string(), &request_id);
+        // Linux: clicking by name is exactly what the semantic tier is for.
+        // The application performs the action itself (AT-SPI `do_action`), so
+        // this needs no synthetic input and therefore works on a native
+        // Wayland session.
+        #[cfg(target_os = "linux")]
+        {
+            let name_clone = name.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::system_center::click_element_by_name(&name_clone)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("the click could not be performed: {e}")));
+            let reply = match outcome {
+                Ok(msg) => msg,
+                Err(e) => e,
+            };
+            speak_line(&app, reply, &request_id);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            speak_line(
+                &app,
+                "Clicking by name isn't available on this platform, sir.".to_string(),
+                &request_id,
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]

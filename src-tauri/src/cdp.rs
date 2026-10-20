@@ -45,7 +45,11 @@ pub struct CdpNode {
     pub name: String,
     #[serde(default)]
     pub role: String,
-    #[serde(default)]
+    /// The server speaks CDP's own spelling, `backendDOMNodeId`. Serde's
+    /// `camelCase` would produce `backendDomNodeId`, which is a different
+    /// string — so the rename is explicit, and the snake_case spelling is
+    /// kept as an alias for callers that build the JSON themselves.
+    #[serde(default, rename = "backendDOMNodeId", alias = "backend_dom_node_id")]
     pub backend_dom_node_id: u64,
     /// True when the read was cut off by the server's node budget.
     #[serde(default)]
@@ -273,15 +277,27 @@ mod tests {
     }
 
     #[test]
-    fn node_decodes_with_snake_case_dom_id() {
-        // The server emits backendDOMNodeId; serde maps it via rename_all.
+    fn node_decodes_with_the_servers_dom_id_spelling() {
+        // The server emits `backendDOMNodeId` — CDP's own spelling. Serde's
+        // `camelCase` would have asked for `backendDomNodeId`, which is a
+        // different string, so the field used to decode as 0 and the node
+        // looked un-actionable.
         let raw = r#"{"port":9229,"name":"Open Quick Access","role":"button",
-                      "backend_dom_node_id":210,"truncated":false}"#;
+                      "backendDOMNodeId":210,"truncated":false}"#;
         let n: CdpNode = serde_json::from_str(raw).expect("decode");
         assert_eq!(n.name, "Open Quick Access");
         assert_eq!(n.role, "button");
         assert_eq!(n.backend_dom_node_id, 210);
         assert!(!n.truncated);
+    }
+
+    #[test]
+    fn node_also_decodes_the_snake_case_spelling() {
+        // Hand-built JSON may use either spelling; both must work.
+        let raw = r#"{"port":9229,"name":"Open Quick Access","role":"button",
+                      "backend_dom_node_id":210,"truncated":false}"#;
+        let n: CdpNode = serde_json::from_str(raw).expect("decode");
+        assert_eq!(n.backend_dom_node_id, 210);
     }
 
     #[test]
