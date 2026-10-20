@@ -35,10 +35,30 @@ static WLCOPY_MISSING: AtomicBool = AtomicBool::new(false);
 /// line is 50 backspaces), and the focused window cannot change inside one
 /// utterance. Re-asking the X server per key press meant two `xdotool`
 /// spawns per key — a hundred processes for one undo.
+///
+/// This window only ever holds a *restrictive* answer (see
+/// [`focus_cache_reusable`]), so the saving applies where the answer is "do
+/// not type" — which is the common case on a native Wayland session.
 const FOCUS_TTL: Duration = Duration::from_millis(750);
 
 /// The last focus answer and when it was taken.
 static FOCUS_CACHE: Mutex<Option<(Instant, Option<bool>)>> = Mutex::new(None);
+
+/// The cache rule, pure: may a cached answer be reused, or must the X server
+/// be asked again?
+///
+/// A permissive answer (`Some(true)` — "the focused window is an XWayland
+/// window, you may type") is NEVER reused, however fresh it is. The user can
+/// move focus at any moment, and a stale "yes" would authorise typing into
+/// whatever window happens to be under the pointer — the silent wrong-window
+/// write the port brief forbids.
+///
+/// A restrictive answer (`Some(false)` / `None` — "do not type") is safe to
+/// reuse: it can only refuse, never authorise a write. An expired answer is
+/// never reused either way.
+pub fn focus_cache_reusable(age: Duration, cached: Option<bool>) -> bool {
+    age < FOCUS_TTL && !matches!(cached, Some(true))
+}
 
 /// The facts for the input decision, read from the session and the X server.
 pub fn current_session() -> InputSession {
@@ -64,12 +84,15 @@ pub fn current_session() -> InputSession {
     }
 }
 
-/// The focus answer, reused for [`FOCUS_TTL`] so one dictated line does not
-/// spawn a process per key press.
+/// The focus answer, reused for [`FOCUS_TTL`] when it is safe to reuse, so one
+/// dictated line does not spawn a process per key press.
+///
+/// A cached "yes" is never reused — see [`focus_cache_reusable`] — so the X
+/// server is asked again whenever the answer would authorise typing.
 fn cached_xwayland_focus() -> Option<bool> {
     if let Ok(g) = FOCUS_CACHE.lock() {
         if let Some((at, answer)) = g.as_ref() {
-            if at.elapsed() < FOCUS_TTL {
+            if focus_cache_reusable(at.elapsed(), *answer) {
                 return *answer;
             }
         }
@@ -221,5 +244,38 @@ fn wl_copy(text: &str) -> bool {
             tracing::warn!("live: wl-copy did not finish: {e}");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_permissive_focus_answer_is_never_reused() {
+        // "The focused window is an XWayland one, you may type" must never
+        // survive a cache hit: the user can move focus at any moment, and a
+        // stale yes would send the keys to whatever window is under the
+        // pointer.
+        assert!(!focus_cache_reusable(Duration::ZERO, Some(true)));
+        assert!(!focus_cache_reusable(Duration::from_millis(1), Some(true)));
+        assert!(!focus_cache_reusable(FOCUS_TTL - Duration::from_millis(1), Some(true)));
+        assert!(!focus_cache_reusable(FOCUS_TTL, Some(true)));
+    }
+
+    #[test]
+    fn a_restrictive_focus_answer_is_reused_until_it_expires() {
+        // "Do not type" is safe to reuse: it can only refuse.
+        assert!(focus_cache_reusable(Duration::ZERO, Some(false)));
+        assert!(focus_cache_reusable(Duration::from_millis(1), Some(false)));
+        assert!(focus_cache_reusable(FOCUS_TTL - Duration::from_millis(1), Some(false)));
+        // "We could not tell" is just as safe to reuse.
+        assert!(focus_cache_reusable(Duration::ZERO, None));
+        assert!(focus_cache_reusable(FOCUS_TTL - Duration::from_millis(1), None));
+
+        // An expired answer is never reused, whatever it says.
+        assert!(!focus_cache_reusable(FOCUS_TTL, Some(false)));
+        assert!(!focus_cache_reusable(FOCUS_TTL, None));
+        assert!(!focus_cache_reusable(FOCUS_TTL + Duration::from_millis(1), Some(false)));
     }
 }
