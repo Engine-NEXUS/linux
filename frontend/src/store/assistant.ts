@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { isLinuxRuntime } from "../platform";
 import {
   LOADING_HIDDEN,
   LoadingSnapshot,
@@ -6,6 +7,18 @@ import {
   loadingSettle,
   loadingShow,
 } from "./loadingMachine";
+
+/** How the orb is framed on the stage: the black capsule, the pebble scoop, or a bare orb ringed by the audio-reactive aura. */
+export type OrbCapsuleStyle = "classic" | "pebble" | "aura";
+
+/**
+ * Pure: a known style passes through; anything else gets the platform
+ * default — the aura on Linux (the Linux redesign), the pebble elsewhere.
+ */
+export function resolveCapsuleStyle(raw: unknown, linux: boolean): OrbCapsuleStyle {
+  if (raw === "classic" || raw === "pebble" || raw === "aura") return raw;
+  return linux ? "aura" : "pebble";
+}
 
 export type AssistantState = "idle" | "listening" | "thinking" | "speaking";
 
@@ -87,8 +100,8 @@ interface AssistantStore {
   orbPosition: "top" | "bottom";
   setOrbPosition: (pos: "top" | "bottom") => void;
   /** Orb background capsule style: "classic" or "pebble". Default: "classic". */
-  orbCapsuleStyle: "classic" | "pebble";
-  setOrbCapsuleStyle: (style: "classic" | "pebble") => void;
+  orbCapsuleStyle: OrbCapsuleStyle;
+  setOrbCapsuleStyle: (style: OrbCapsuleStyle) => void;
   /** Orb wakeup thread animation mode (1..5). Default: 1 (Elastic thread). */
   orbWakeupMode: number;
   setOrbWakeupMode: (m: number) => void;
@@ -258,7 +271,10 @@ export const useAssistant = create<AssistantStore>((set) => ({
     try { localStorage.setItem("nexus:orb_position", p); } catch (_) {}
     set({ orbPosition: p });
   },
-  orbCapsuleStyle: typeof localStorage !== "undefined" ? ((localStorage.getItem("nexus:orb_capsule_style") as "classic" | "pebble") || "pebble") : "pebble",
+  orbCapsuleStyle: resolveCapsuleStyle(
+    typeof localStorage !== "undefined" ? localStorage.getItem("nexus:orb_capsule_style") : null,
+    isLinuxRuntime(),
+  ),
   setOrbCapsuleStyle: (s) => {
     try { localStorage.setItem("nexus:orb_capsule_style", s); } catch (_) {}
     set({ orbCapsuleStyle: s });

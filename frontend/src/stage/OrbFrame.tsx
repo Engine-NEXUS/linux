@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Avatar } from "../avatar/Avatar";
+import { AuraCanvas } from "../aura/AuraCanvas";
 import { useAssistant } from "../store/assistant";
 import { initOrchestratorListener, hideOrbAfterSpeech } from "../net/orchestrator";
 import { stepWatchdog, INITIAL_WATCHDOG_STATE, type WatchdogState } from "../net/orbIdleWatchdog";
@@ -754,6 +756,9 @@ export function OrbFrame() {
     el.style.pointerEvents = shown ? "auto" : "none";
   };
   const frameRef = useRef<HTMLDivElement | null>(null);
+  // The aura rims this element: a circle the size of the visible particle
+  // sphere, centred in the frame (see `.orb-aura-anchor`).
+  const auraAnchorRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     console.log(`[ORB-FRAME] state: isShown=${isShown} pos=${orbPosition} (assistantVisible=${assistantVisible}, ghost=${ghostActive}, stageOverride=${stageOverride})`);
     applyRect(frameRef.current, rect, isShown, orbPosition);
@@ -780,6 +785,18 @@ export function OrbFrame() {
           dispersing={dispersing}
           wakeupMode={wakeupMode}
         />
+      ) : capsuleStyle === "aura" ? (
+        // Linux redesign: no box — the bare orb, ringed by the audio-reactive
+        // aura. The canvas is portalled to <body>: it is `position: fixed` in
+        // viewport coordinates, and this frame slides with a transform.
+        <div className="orb-aura">
+          <div className="orb-aura-anchor" ref={auraAnchorRef} aria-hidden="true" />
+          <div className="orb-sphere-wrapper">
+            <Avatar entered={entered} dispersing={dispersing} shown={isShown} />
+          </div>
+          {typeof document !== "undefined" &&
+            createPortal(<AuraCanvas anchorRef={auraAnchorRef} shown={isShown} />, document.body)}
+        </div>
       ) : (
         <div className="orb-capsule">
           <div className="orb-sphere-wrapper">

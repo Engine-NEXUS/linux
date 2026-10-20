@@ -15,7 +15,8 @@ import { preloadSileroVad, preloadMicVad, stopVad } from "../audio/vad";
 import { abortCapture, processTranscript } from "../audio/recorder";
 import { stopTts, isRustTtsPlaying } from "../audio/ttsPlayer";
 import { transcribeAudio } from "../audio/stt";
-import { useAssistant } from "../store/assistant";
+import { resolveCapsuleStyle, useAssistant } from "../store/assistant";
+import { isLinuxRuntime } from "../platform";
 import { setBargedIn, clearBargedIn, clearDialogContext } from "../net/wsBridge";
 import { isDuplicateListen } from "../net/listenDedupe";
 
@@ -562,7 +563,7 @@ export function initOrbRuntime(): void {
       const s = await invoke<{
         orbColor?: string;
         orbPosition?: "top" | "bottom";
-        orbCapsuleStyle?: "classic" | "pebble";
+        orbCapsuleStyle?: string;
         orbWakeupMode?: number;
         orbInteriorGenesis?: number;
         orbThinkMode?: number;
@@ -576,7 +577,7 @@ export function initOrbRuntime(): void {
         useAssistant.getState().setOrbPosition(s.orbPosition);
       }
       if (s?.orbCapsuleStyle) {
-        useAssistant.getState().setOrbCapsuleStyle(s.orbCapsuleStyle as "classic" | "pebble");
+        useAssistant.getState().setOrbCapsuleStyle(resolveCapsuleStyle(s.orbCapsuleStyle, isLinuxRuntime()));
       }
       if (s?.orbWakeupMode) {
         useAssistant.getState().setOrbWakeupMode(s.orbWakeupMode);
@@ -605,11 +606,11 @@ export function initOrbRuntime(): void {
       await listen<{ style?: string; mode?: number; genesis?: number } | string>("orb:capsule_style", (e) => {
         const payload = e.payload;
         if (typeof payload === "string") {
-          if (payload === "classic" || payload === "pebble") {
+          if (payload === "classic" || payload === "pebble" || payload === "aura") {
             useAssistant.getState().setOrbCapsuleStyle(payload);
           }
         } else if (payload?.style) {
-          if (payload.style === "classic" || payload.style === "pebble") {
+          if (payload.style === "classic" || payload.style === "pebble" || payload.style === "aura") {
             useAssistant.getState().setOrbCapsuleStyle(payload.style);
           }
           if (payload.mode) useAssistant.getState().setOrbWakeupMode(payload.mode);

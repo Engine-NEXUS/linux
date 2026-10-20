@@ -13,8 +13,8 @@ import {
   disconnectOAuth,
   type OAuthStatus,
 } from "../setup/oauth";
-import { useAssistant } from "../store/assistant";
-import { globalHotkeyLabel } from "../platform";
+import { resolveCapsuleStyle, useAssistant, type OrbCapsuleStyle } from "../store/assistant";
+import { globalHotkeyLabel, isLinuxRuntime } from "../platform";
 import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
 import { ApiKeysPage } from "./hub/ApiKeysPage";
@@ -125,7 +125,7 @@ interface Settings {
   // Orb fixed position ("top" | "bottom")
   orbPosition?: "top" | "bottom";
   // Orb background capsule style ("classic" | "pebble")
-  orbCapsuleStyle?: "classic" | "pebble";
+  orbCapsuleStyle?: OrbCapsuleStyle;
   // Orb wakeup animation mode (1..5) & genesis mode (0..3)
   orbWakeupMode?: number;
   orbInteriorGenesis?: number;
@@ -414,7 +414,7 @@ function DisplayTab({ settings, update }: {
   };
 
   const currentPos = settings.orbPosition || "top";
-  const currentCapsuleStyle = settings.orbCapsuleStyle || "classic";
+  const currentCapsuleStyle = resolveCapsuleStyle(settings.orbCapsuleStyle, isLinuxRuntime());
   const currentWakeupMode = settings.orbWakeupMode ?? 1;
   const currentInteriorGenesis = settings.orbInteriorGenesis ?? 2;
 
@@ -434,7 +434,7 @@ function DisplayTab({ settings, update }: {
     }).catch(() => {});
   };
 
-  const onCapsuleStyleSelect = (style: "classic" | "pebble", mode?: number, genesis?: number) => {
+  const onCapsuleStyleSelect = (style: OrbCapsuleStyle, mode?: number, genesis?: number) => {
     update("orbCapsuleStyle", style);
     const m = mode ?? currentWakeupMode;
     const g = genesis ?? currentInteriorGenesis;
@@ -589,9 +589,31 @@ function DisplayTab({ settings, update }: {
       <div className="settings-section">
         <div className="settings-section-title">Orb Capsule &amp; Scoop Style</div>
         <div className="setting-desc" style={{ marginBottom: 12 }}>
-          Choose your container geometry. Classic is a solid pitch-black 10px capsule box; Pebble Scoop is an organic catenary curve dropping smoothly from the screen bezel.
+          Choose your container geometry. Aura is the bare orb ringed by a light that moves with your voice; Classic is a solid pitch-black 10px capsule box; Pebble Scoop is an organic catenary curve dropping smoothly from the screen bezel.
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <button
+            type="button"
+            className={`settings-btn ${currentCapsuleStyle === "aura" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentCapsuleStyle === "aura" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentCapsuleStyle === "aura" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onCapsuleStyleSelect("aura")}
+          >
+            <span style={{ fontSize: 18 }}>◌</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Aura</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>Bare orb, voice-reactive glow</span>
+          </button>
           <button
             type="button"
             className={`settings-btn ${currentCapsuleStyle === "classic" ? "settings-btn--primary" : "settings-btn--glass"}`}

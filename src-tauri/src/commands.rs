@@ -2002,6 +2002,10 @@ fn default_orb_position() -> String {
 }
 
 fn default_orb_capsule_style() -> String {
+    // Linux: the redesign's bare orb ringed by the audio-reactive aura.
+    #[cfg(target_os = "linux")]
+    return "aura".to_string();
+    #[cfg(not(target_os = "linux"))]
     "classic".to_string()
 }
 

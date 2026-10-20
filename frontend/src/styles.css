@@ -70,6 +70,47 @@
   box-shadow: 0 20px 54px rgba(0, 0, 0, 1), 0 0 16px rgba(242, 184, 89, 0.25);
 }
 
+/* ─── Aura style (Linux redesign): the bare orb, ringed by the audio-reactive
+   aura (aura/AuraCanvas.tsx). No box: the orb floats over the desktop. ─── */
+.orb-aura {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  padding: 14px;
+  box-sizing: border-box;
+}
+
+/* What the aura rims: a circle the size of the visible particle sphere
+   (about 62% of the frame with the 14px padding above). */
+.orb-aura-anchor {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 62%;
+  height: 62%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+/* The aura's WebGL canvas. The host sizes, places and shows it (CSSOM); it
+   sits just under the orb. Normal compositing, NOT `plus-lighter`: the shader
+   writes a coverage alpha, and plus-lighter would wash out over bright
+   desktop content instead of reading as a glow. */
+.aura-canvas {
+  position: fixed;
+  left: 0;
+  top: 0;
+  display: none;
+  pointer-events: none;
+  mix-blend-mode: normal;
+  z-index: 9997;
+}
+
 /* ─── Feature 106: Pebble Wakeup Design (Organic Contour) ─── */
 .orb-pebble {
   width: 100%;
