@@ -1,6 +1,15 @@
 import { finishCapture, finishCaptureFromVad, getRecordingContext } from "./recorder";
 import { transcribeAudio } from "./stt";
 import { useAssistant } from "../store/assistant";
+import {
+  DEFAULT_CONFIG as ENDPOINT_CONFIG,
+  newState as newEndpointState,
+  observe as observeEndpoint,
+  preRollStart,
+  shouldFinalize as endpointShouldFinalize,
+  tailRms as endpointTailRms,
+  type EndpointState,
+} from "./endpoint";
 
 /**
  * Voice Activity Detection using Silero ONNX VAD via @ricky0123/vad-web.
@@ -40,6 +49,16 @@ const ORT_CDN_BASE = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION
 // ---- Silero VAD configuration ----
 // These thresholds are tuned for voice commands (short utterances).
 // Silero returns a speech probability 0.0-1.0 per frame.
+
+// Model version. v6 (2026-03) is a retrained Silero: same ONNX interface
+// (input/sr/state) but better calibration and ~16% fewer errors on noisy
+// data than v5. Requires @ricky0123/vad-web >= 0.0.31 — earlier versions only
+// ship v5 and the asset path will 404.
+const SILERO_MODEL = "v6" as const;
+const SILERO_MODEL_FILE = `./silero_vad_${SILERO_MODEL}.onnx`;
+
+// Silero's own recommended operating point. v6 is calibrated against these, so
+// they are kept at the defaults rather than the old hand-tuned v5 values.
 const POSITIVE_SPEECH_THRESHOLD = 0.5;  // Above this = speech detected
 const NEGATIVE_SPEECH_THRESHOLD = 0.35; // Below this = silence detected
 // Grace period before declaring speech end. This is pure end-to-end latency:
@@ -71,6 +90,11 @@ const SPEC_FIRE_SILENCE_MS = 120;   // silence observed before firing
 const SPEC_MIN_SPEECH_MS = 300;     // don't speculate on short blips
 const SPEC_MAX_BUFFER_MS = 15000;   // cap the rolling frame buffer
 
+// ---- Adaptive endpoint (pre-pausal cut-off) ----
+// Full rationale and the measured-cost caveat live in ./endpoint.ts, which holds
+// this decision as a pure function so it can be unit tested without audio.
+const ADAPTIVE_PRE_ROLL_MS = 320;       // pre-pausal audio kept ahead of onset
+
 // ---- State ----
 let micVad: any = null;           // MicVAD instance (Silero) — kept alive between commands
 let micVadStream: MediaStream | null = null;  // Stream associated with the pre-init VAD
@@ -93,6 +117,13 @@ let specSilenceMs = 0;
 let specPending: Promise<string> | null = null;
 let specInvalid = false;
 
+// ---- Adaptive endpoint state ----
+let endpoint: EndpointState = newEndpointState();
+// Set when the adaptive rule finalizes. vad-web will still call onSpeechEnd
+// REDEMPTION_MS later with its own merged buffer; that call is discarded so the
+// segment is not transcribed twice.
+let endpointFinalized = false;
+
 function resetSpeculation(): void {
   specFrames = [];
   specSamples = 0;
@@ -100,6 +131,72 @@ function resetSpeculation(): void {
   specSilenceMs = 0;
   specPending = null;
   specInvalid = false;
+  endpoint = newEndpointState();
+  endpointFinalized = false;
+}
+
+/** Concatenate frames[from..to) into one Float32Array. */
+function sliceFrames(from: number, to: number): Float32Array {
+  let n = 0;
+  for (let i = Math.max(0, from); i < to && i < specFrames.length; i++) {
+    n += specFrames[i].length;
+  }
+  const out = new Float32Array(n);
+  let off = 0;
+  for (let i = Math.max(0, from); i < to && i < specFrames.length; i++) {
+    out.set(specFrames[i], off);
+    off += specFrames[i].length;
+  }
+  return out;
+}
+
+/**
+ * Cut the utterance off now because the tail is unambiguously dead.
+ *
+ * Assembles the segment ourselves from `specFrames` rather than using vad-web's
+ * buffer, which is what lets us control the pre-roll precisely: the audio before
+ * speech onset is kept, so a word whose onset straddles the VAD threshold is not
+ * clipped (this is the "pre-pausal" half of the endpointing work).
+ */
+function finalizeAdaptiveEndpoint(rmsTail: number): void {
+  if (endpointFinalized) return;
+  // ORDERING IS LOAD-BEARING. This assignment must stay above the `micVad.pause()`
+  // call below.
+  //
+  // MicVAD is configured with `submitUserSpeechOnPause: true`, and vad-web's
+  // frameProcessor.pause() then calls endSegment(), which fires `SpeechEnd`
+  // SYNCHRONOUSLY whenever the buffer held enough speech (vad-web 0.0.31,
+  // frame-processor.js). Because this rule only fires after >=500ms of speech,
+  // that condition is always met — so pausing re-enters our own onSpeechEnd
+  // handler from inside this function.
+  //
+  // `endpointFinalized` is what makes that re-entrant call harmless: both
+  // onSpeechEnd handlers check it and return early. If this line is ever moved
+  // below the pause(), every command is transcribed twice. There is no unit test
+  // covering this because it needs a live AudioWorklet + ONNX session; it is
+  // documented here because the coupling is invisible at the call site.
+  endpointFinalized = true;
+
+  const start = preRollStart(endpoint.onsetFrame, ADAPTIVE_PRE_ROLL_MS, specFrames.length);
+  const audio = sliceFrames(start, specFrames.length);
+  const ms = Math.round((audio.length / 16000) * 1000);
+
+  console.log(
+    `[NEXUS] VAD: adaptive endpoint — ${ms}ms audio (onset frame ${endpoint.onsetFrame}, ` +
+      `pre-roll ${Math.max(0, endpoint.onsetFrame - start)} frames), ` +
+      `tail ${Math.round(endpoint.tailSilenceMs)}ms silent, ` +
+      `tailProb<=${endpoint.tailMaxProb.toFixed(3)} (floor ${ENDPOINT_CONFIG.probFloor}), ` +
+      `tailRms=${rmsTail.toFixed(4)} (max ${ENDPOINT_CONFIG.tailRmsMax})`,
+  );
+
+  const spec = takeSpeculation();
+  active = false;
+  useAssistant.getState().setAudioVolume(0);
+  // Stop the underlying VAD so its own redemption timer does not also finalize.
+  if (micVad) {
+    try { micVad.pause(); } catch {}
+  }
+  void finishCaptureFromVad(audio, spec);
 }
 
 /**
@@ -129,6 +226,9 @@ function onVadFrame(probs: { isSpeech: number }, frame: Float32Array): void {
     specFrames.shift();
   }
 
+    // Adaptive endpoint state is maintained by the pure, unit-tested helper.
+  observeEndpoint(endpoint, specFrames.length - 1, probs.isSpeech, rms, ENDPOINT_CONFIG);
+
   if (probs.isSpeech >= POSITIVE_SPEECH_THRESHOLD) {
     specSpeechMs += frameMs;
     specSilenceMs = 0;
@@ -137,6 +237,14 @@ function onVadFrame(probs: { isSpeech: number }, frame: Float32Array): void {
   } else if (probs.isSpeech < NEGATIVE_SPEECH_THRESHOLD) {
     specSilenceMs += frameMs;
   }
+
+  // ---- Adaptive endpoint evaluation ----
+  if (endpointShouldFinalize(endpoint, ENDPOINT_CONFIG)) {
+    finalizeAdaptiveEndpoint(endpointTailRms(endpoint));
+    return;
+  }
+  // Otherwise: inconclusive, or speech still live. vad-web's redemption path
+  // decides, which is exactly the pre-existing behaviour.
 
   if (
     !specPending &&
@@ -224,7 +332,7 @@ async function _preloadSilero(): Promise<void> {
     ];
 
     // Also fetch the Silero model from the local server.
-    const modelFetch = fetch("./silero_vad_v5.onnx");
+    const modelFetch = fetch(SILERO_MODEL_FILE);
 
     const [mjsResp, wasmResp, modelResp] = await Promise.all([...cdnFetches, modelFetch]);
 
@@ -267,7 +375,7 @@ export async function preloadMicVad(stream: MediaStream): Promise<void> {
     micVad = await MicVAD.new({
       baseAssetPath: "./",
       onnxWASMBasePath: ORT_CDN_BASE,
-      model: "v5",
+      model: SILERO_MODEL,
       startOnLoad: false,
       positiveSpeechThreshold: POSITIVE_SPEECH_THRESHOLD,
       negativeSpeechThreshold: NEGATIVE_SPEECH_THRESHOLD,
@@ -298,6 +406,12 @@ export async function preloadMicVad(stream: MediaStream): Promise<void> {
         console.log("[NEXUS] VAD: Silero misfire (segment too short)");
       },
       onSpeechEnd: (audio: Float32Array) => {
+        // The adaptive endpoint may have already finalized this segment with its
+        // own pre-pausal buffer. Drop this call so it is not transcribed twice.
+        if (endpointFinalized) {
+          console.log("[NEXUS] VAD: Silero speech end — discarded (adaptive endpoint already fired)");
+          return;
+        }
         console.log(`[NEXUS] VAD: Silero speech end (${audio.length} samples @ 16kHz)`);
         const spec = takeSpeculation();
         active = false;
@@ -396,6 +510,13 @@ export function stopVad(): void {
 export async function resumeVad(): Promise<void> {
   if (micVad && micVadStream) {
     active = true;
+    startedAt = performance.now();
+    // Required, not cosmetic: `endpointFinalized` latches once the adaptive
+    // endpoint fires and makes the MicVAD's own onSpeechEnd discard itself.
+    // Without this reset, the first turn would latch it and every later turn in
+    // the retry loop would be silently dropped — the user speaks and nothing is
+    // ever transcribed. Mirrors startVad().
+    resetSpeculation();
     await micVad.start();
     console.log("[NEXUS] VAD: Silero VAD resumed (multi-turn loop)");
   } else if (micVadStream) {
@@ -426,7 +547,7 @@ async function startSileroVad(stream: MediaStream): Promise<void> {
     // import incompatibility (microsoft/onnxruntime#20978).
     // The CDN import bypasses Vite's module system entirely.
     onnxWASMBasePath: ORT_CDN_BASE,
-    model: "v5",
+    model: SILERO_MODEL,
     startOnLoad: false,
     positiveSpeechThreshold: POSITIVE_SPEECH_THRESHOLD,
     negativeSpeechThreshold: NEGATIVE_SPEECH_THRESHOLD,
@@ -465,6 +586,12 @@ async function startSileroVad(stream: MediaStream): Promise<void> {
     onSpeechEnd: (audio: Float32Array) => {
       // audio is Float32Array at 16kHz, samples between -1 and 1.
       // This is EXACTLY what STT needs — convert to Int16 and process.
+      // The adaptive endpoint may have already finalized this segment with its
+      // own pre-pausal buffer; drop this call so it is not transcribed twice.
+      if (endpointFinalized) {
+        console.log("[NEXUS] VAD: Silero speech end — discarded (adaptive endpoint already fired)");
+        return;
+      }
       console.log(`[NEXUS] VAD: Silero speech end (${audio.length} samples @ 16kHz)`);
       const spec = takeSpeculation();
       active = false;
