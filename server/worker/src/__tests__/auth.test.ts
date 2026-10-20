@@ -5,8 +5,14 @@
  * Worker returned live OAuth access tokens keyed only on a client-supplied
  * `?user_id=`, with no authentication.
  *
+ * BRANCH ADAPTATION (Linux port J1, 2026-10-20): the credential now lives in
+ * the Feature-88 `devices` table (one canonical profile per laptop), not in
+ * the dropped `user_devices` table, and the owner of a device is its
+ * `profile_id`. The hash + constant-time compare are the ones in
+ * `./identity` — the Worker has exactly one implementation of both.
+ *
  * The tests use a hand-rolled in-memory D1 double rather than a real D1
- * binding. It implements only the four query shapes these helpers issue, which
+ * binding. It implements only the query shapes these helpers issue, which
  * is deliberate: if the SQL changes, the double fails loudly rather than
  * silently diverging.
  */
@@ -20,7 +26,15 @@ import {
   registerDevice,
   createOAuthState,
   consumeOAuthState,
+  resolveAuthUserId,
+  isPublicRoute,
+  routeKey,
+  corsHeaders,
+  isAllowedOrigin,
+  parseAllowedOrigins,
+  DEFAULT_ALLOWED_ORIGINS,
   PUBLIC_ROUTES,
+  SELF_AUTH_ROUTE_PREFIXES,
 } from "../auth";
 
 type Row = Record<string, unknown>;
@@ -28,46 +42,45 @@ type Row = Record<string, unknown>;
 /** Minimal D1 double covering exactly the statements auth.ts issues. */
 function makeD1(seed: Row[] = []) {
   const tables = {
-    user_devices: [...seed],
+    devices: [...seed],
     oauth_states: [] as Row[],
   };
 
   const stmt = (sql: string, binds: unknown[]) => {
     const s = sql.replace(/\s+/g, " ").trim();
 
-    if (s.includes("FROM user_devices") && s.includes("device_token_hash = ?")) {
-      const [hash, now] = binds as [string, number];
+    if (s.includes("FROM devices") && s.includes("device_token_hash = ?")) {
+      const [hash] = binds as [string];
       return Promise.resolve({
-        results: tables.user_devices.filter(
+        results: tables.devices.filter(
           (r) =>
             r.device_token_hash === hash &&
-            r.device_revoked_at == null &&
-            (r.device_token_expires_at == null ||
-              (r.device_token_expires_at as number) > now),
+            r.status === "active" &&
+            r.revoked_at == null,
         ),
         meta: {},
       });
     }
 
-    if (s.includes("INSERT INTO user_devices")) {
-      const [userId, deviceId, name, os, hash, expiresAt, createdAt] = binds as (
+    if (s.includes("INSERT INTO devices")) {
+      const [deviceId, profileId, hash, name, os, createdAt] = binds as (
         string | number | null
       )[];
-      const existing = tables.user_devices.find(
-        (r) => r.user_id === userId && r.device_id === deviceId,
-      );
+      const existing = tables.devices.find((r) => r.device_id === deviceId);
       const record: Row = {
-        user_id: userId,
         device_id: deviceId,
+        profile_id: profileId,
+        device_token_hash: hash,
         device_name: name,
         os,
-        device_token_hash: hash,
-        device_token_expires_at: expiresAt,
-        device_revoked_at: null,
+        app_version: null,
+        status: "active",
         created_at: createdAt,
+        last_seen_at: createdAt,
+        revoked_at: null,
       };
       if (existing) Object.assign(existing, record);
-      else tables.user_devices.push(record);
+      else tables.devices.push(record);
       return Promise.resolve({ results: [], meta: { changes: 1 } });
     }
 
@@ -121,11 +134,20 @@ function makeD1(seed: Row[] = []) {
   // D1's API is `prepare(sql).bind(...args)` -> object with
   // `first()/all()/run()`. Each of those executes the statement. Returning a
   // promise from `bind()` (rather than a statement object) is the easy mistake;
-  // this shape is what the real binding provides.
+  // this shape is what the real binding provides. `all()` and `run()` resolve
+  // to a `D1Result` (`{ results, success, meta }`), never a bare array — a
+  // double that diverges from D1 is a trap for the next test that reads
+  // `result.results`.
   const handle = (sql: string, binds: unknown[]) => ({
-    run: async () => stmt(sql, binds),
+    run: async () => {
+      const res = await stmt(sql, binds);
+      return { results: res.results, success: true, meta: res.meta };
+    },
     first: async () => (await stmt(sql, binds)).results[0] ?? null,
-    all: async () => (await stmt(sql, binds)).results,
+    all: async () => {
+      const res = await stmt(sql, binds);
+      return { results: res.results, success: true, meta: res.meta };
+    },
   });
 
   return {
@@ -211,17 +233,14 @@ describe("authenticateDevice", () => {
     expect("error" in res).toBe(true);
   });
 
-  it("accepts a registered token and resolves its user", async () => {
+  it("accepts a registered token and resolves its owner", async () => {
     const token = "s3cret-device-token";
-    // Timestamps must be wall-clock, not epoch-relative: authenticateDevice
-    // compares expiry against Date.now()/1000, so a `now` of 1000 would make a
-    // freshly registered device look expired.
     const now = Math.floor(Date.now() / 1000);
-    await registerDevice(envFor(d1), "user_abc", "dev_1", "NEXUS", "linux", now);
+    await registerDevice(envFor(d1), "prof_owner", "dev_1", "NEXUS", "linux", now);
 
     // registerDevice mints its own token internally; pin the row's hash to the
     // token we are about to present.
-    d1.__tables.user_devices[0].device_token_hash = await sha256Hex(token);
+    d1.__tables.devices[0].device_token_hash = await sha256Hex(token);
 
     const res = await authenticateDevice(
       req({ Authorization: `Bearer ${token}` }),
@@ -230,22 +249,25 @@ describe("authenticateDevice", () => {
     );
     expect("error" in res).toBe(false);
     if (!("error" in res)) {
-      expect(res.device.user_id).toBe("user_abc");
+      // The owner is the canonical profile id — never a client-supplied id.
+      expect(res.device.user_id).toBe("prof_owner");
       expect(res.device.device_id).toBe("dev_1");
     }
   });
 
   it("accepts the X-Nexus-Device-Token header form", async () => {
     const token = "header-form-token";
-    d1.__tables.user_devices.push({
-      user_id: "user_h",
+    d1.__tables.devices.push({
       device_id: "dev_h",
+      profile_id: "prof_h",
+      device_token_hash: await sha256Hex(token),
       device_name: "NEXUS",
       os: "linux",
-      device_token_hash: await sha256Hex(token),
-      device_token_expires_at: null,
-      device_revoked_at: null,
+      app_version: null,
+      status: "active",
       created_at: 1000,
+      last_seen_at: 1000,
+      revoked_at: null,
     });
     const res = await authenticateDevice(
       req({ "X-Nexus-Device-Token": token }),
@@ -257,15 +279,17 @@ describe("authenticateDevice", () => {
 
   it("rejects a revoked device even with a valid token", async () => {
     const token = "revoked-token";
-    d1.__tables.user_devices.push({
-      user_id: "user_r",
+    d1.__tables.devices.push({
       device_id: "dev_r",
+      profile_id: "prof_r",
+      device_token_hash: await sha256Hex(token),
       device_name: "NEXUS",
       os: "linux",
-      device_token_hash: await sha256Hex(token),
-      device_token_expires_at: null,
-      device_revoked_at: 2000, // revoked
+      app_version: null,
+      status: "revoked",
       created_at: 1000,
+      last_seen_at: 1000,
+      revoked_at: 2000, // revoked
     });
     const res = await authenticateDevice(
       req({ Authorization: `Bearer ${token}` }),
@@ -275,17 +299,19 @@ describe("authenticateDevice", () => {
     expect("error" in res).toBe(true);
   });
 
-  it("rejects an expired device even with a valid token", async () => {
-    const token = "expired-token";
-    d1.__tables.user_devices.push({
-      user_id: "user_e",
-      device_id: "dev_e",
+  it("rejects a device whose status is not active", async () => {
+    const token = "pending-token";
+    d1.__tables.devices.push({
+      device_id: "dev_p",
+      profile_id: "prof_p",
+      device_token_hash: await sha256Hex(token),
       device_name: "NEXUS",
       os: "linux",
-      device_token_hash: await sha256Hex(token),
-      device_token_expires_at: 1500, // already past `now`
-      device_revoked_at: null,
+      app_version: null,
+      status: "suspended",
       created_at: 1000,
+      last_seen_at: 1000,
+      revoked_at: null,
     });
     const res = await authenticateDevice(
       req({ Authorization: `Bearer ${token}` }),
@@ -312,26 +338,28 @@ describe("registerDevice", () => {
     const d1 = makeD1();
     const token = await registerDevice(
       envFor(d1),
-      "user_1",
+      "prof_1",
       "dev_1",
       "NEXUS",
       "linux",
       1000,
     );
     expect(token).toHaveLength(64); // 32 bytes hex
-    const row = d1.__tables.user_devices[0];
+    const row = d1.__tables.devices[0];
     expect(row.device_token_hash).toBe(await sha256Hex(token));
     expect(JSON.stringify(row)).not.toContain(token);
     expect(row).not.toHaveProperty("device_token");
+    expect(row.profile_id).toBe("prof_1");
+    expect(row.status).toBe("active");
   });
 
   it("rotates the credential on re-registration of the same device", async () => {
     const d1 = makeD1();
-    const first = await registerDevice(envFor(d1), "u", "d", "NEXUS", "linux", 1000);
-    const second = await registerDevice(envFor(d1), "u", "d", "NEXUS", "linux", 2000);
+    const first = await registerDevice(envFor(d1), "prof", "dev", "NEXUS", "linux", 1000);
+    const second = await registerDevice(envFor(d1), "prof", "dev", "NEXUS", "linux", 2000);
     expect(second).not.toBe(first);
-    expect(d1.__tables.user_devices).toHaveLength(1);
-    expect(d1.__tables.user_devices[0].device_token_hash).toBe(
+    expect(d1.__tables.devices).toHaveLength(1);
+    expect(d1.__tables.devices[0].device_token_hash).toBe(
       await sha256Hex(second),
     );
   });
@@ -401,6 +429,60 @@ describe("OAuth state", () => {
   });
 });
 
+describe("resolveAuthUserId", () => {
+  const device = { user_id: "prof_real", device_id: "dev_1" };
+
+  it("returns the device's owner", () => {
+    expect(resolveAuthUserId(device, null)).toBe("prof_real");
+  });
+
+  it("ignores a forged user id supplied by the caller", () => {
+    expect(resolveAuthUserId(device, "user_victim")).toBe("prof_real");
+    expect(resolveAuthUserId(device, "")).toBe("prof_real");
+  });
+});
+
+describe("route classification", () => {
+  it("builds a METHOD PATH key", () => {
+    expect(routeKey("get", "/health")).toBe("GET /health");
+  });
+
+  it("keeps the bootstrap + public routes reachable", () => {
+    expect(isPublicRoute("GET", "/health")).toBe(true);
+    expect(isPublicRoute("POST", "/v1/profiles/claim")).toBe(true);
+    expect(isPublicRoute("GET", "/oauth/callback")).toBe(true);
+    expect(isPublicRoute("POST", "/models/nlu/publish")).toBe(true);
+    expect(isPublicRoute("GET", "/models/nlu/latest")).toBe(true);
+    expect(isPublicRoute("GET", "/models/nlu/download")).toBe(true);
+  });
+
+  it("gates every credential-bearing route", () => {
+    expect(isPublicRoute("GET", "/oauth/google-token")).toBe(false);
+    expect(isPublicRoute("GET", "/oauth/github-token")).toBe(false);
+    expect(isPublicRoute("GET", "/oauth/swiggy-token")).toBe(false);
+    expect(isPublicRoute("GET", "/oauth/status")).toBe(false);
+    expect(isPublicRoute("DELETE", "/oauth/disconnect")).toBe(false);
+    expect(isPublicRoute("GET", "/oauth/auth-url")).toBe(false);
+    expect(isPublicRoute("POST", "/oauth/exchange")).toBe(false);
+    expect(isPublicRoute("POST", "/apikeys/add")).toBe(false);
+    expect(isPublicRoute("DELETE", "/apikeys/remove")).toBe(false);
+    expect(isPublicRoute("GET", "/apikeys/list")).toBe(false);
+    expect(isPublicRoute("POST", "/")).toBe(false);
+    expect(isPublicRoute("GET", "/v1/profiles/me")).toBe(false);
+  });
+
+  it("does not treat a different method on a public path as public", () => {
+    expect(isPublicRoute("POST", "/health")).toBe(false);
+    expect(isPublicRoute("GET", "/v1/profiles/claim")).toBe(false);
+  });
+
+  it("leaves the self-authenticated admin plane alone", () => {
+    for (const prefix of SELF_AUTH_ROUTE_PREFIXES) {
+      expect(isPublicRoute("GET", `${prefix}profiles/pending`)).toBe(true);
+    }
+  });
+});
+
 describe("PUBLIC_ROUTES", () => {
   it("does not expose any route that returns an OAuth token", () => {
     for (const entry of PUBLIC_ROUTES) {
@@ -416,12 +498,54 @@ describe("PUBLIC_ROUTES", () => {
 
   it("keeps exactly the routes that must bootstrap or are public", () => {
     expect([...PUBLIC_ROUTES].sort()).toEqual([
-      "GET /config/check",
       "GET /health",
       "GET /models/nlu/download",
       "GET /models/nlu/latest",
       "GET /oauth/callback",
-      "POST /api/register",
+      "POST /models/nlu/publish",
+      "POST /v1/profiles/claim",
     ]);
+  });
+});
+
+describe("CORS", () => {
+  it("parses the configured origins on top of the built-in ones", () => {
+    const allowed = parseAllowedOrigins("https://app.example, https://other.example");
+    expect(allowed).toContain("https://app.example");
+    expect(allowed).toContain("https://other.example");
+    for (const origin of DEFAULT_ALLOWED_ORIGINS) expect(allowed).toContain(origin);
+  });
+
+  it("ignores blank entries and an unset variable", () => {
+    expect(parseAllowedOrigins(" , ")).toEqual(DEFAULT_ALLOWED_ORIGINS);
+    expect(parseAllowedOrigins(undefined)).toEqual(DEFAULT_ALLOWED_ORIGINS);
+  });
+
+  it("allows the packaged app origins and loopback dev origins", () => {
+    const allowed = parseAllowedOrigins(undefined);
+    expect(isAllowedOrigin("tauri://localhost", allowed)).toBe(true);
+    expect(isAllowedOrigin("http://tauri.localhost", allowed)).toBe(true);
+    expect(isAllowedOrigin("http://localhost:5173", allowed)).toBe(true);
+    expect(isAllowedOrigin("http://127.0.0.1:1420", allowed)).toBe(true);
+  });
+
+  it("refuses an unknown origin", () => {
+    const allowed = parseAllowedOrigins(undefined);
+    expect(isAllowedOrigin("https://evil.example", allowed)).toBe(false);
+    expect(isAllowedOrigin("", allowed)).toBe(false);
+  });
+
+  it("reflects an allowed origin and always varies on Origin", () => {
+    const allowed = parseAllowedOrigins(undefined);
+    const headers = corsHeaders("tauri://localhost", allowed);
+    expect(headers["Access-Control-Allow-Origin"]).toBe("tauri://localhost");
+    expect(headers["Vary"]).toBe("Origin");
+  });
+
+  it("never sends a wildcard", () => {
+    const allowed = parseAllowedOrigins(undefined);
+    for (const origin of ["https://evil.example", null]) {
+      expect(corsHeaders(origin, allowed)["Access-Control-Allow-Origin"]).toBeUndefined();
+    }
   });
 });

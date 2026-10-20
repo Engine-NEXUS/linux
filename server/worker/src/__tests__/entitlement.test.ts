@@ -12,6 +12,7 @@
 
 import worker from "../index";
 import { memoryIdentityStore } from "./identity_helpers";
+import { sha256Hex } from "../auth";
 const BASE = 1_800_000_000_000;
 
 // ---- Mini D1 ----
@@ -56,6 +57,21 @@ function miniD1() {
         if (whereProfile) return { first: async () => t.profiles.get(args[0]) || null };
       }
       if (table === "devices") {
+        // The device gate (Linux port J1) looks the credential up by the
+        // SHA-256 hash of the bearer token and takes the owner from the
+        // device's profile.
+        if (/device_token_hash = \?/.test(s)) {
+          return { first: async () => {
+            for (const d of t.devices.values()) {
+              if (d.device_token_hash === args[0]
+                && d.status === "active"
+                && d.revoked_at == null) {
+                return d;
+              }
+            }
+            return null;
+          } };
+        }
         if (whereDeviceAndProfile) return { first: async () => {
           const d = t.devices.get(args[0]);
           return d && d.profile_id === args[1] ? d : null;
@@ -224,18 +240,40 @@ function makeEnv() {
 
 describe("Feature 88 e2e — entitlement gate", () => {
   test("mode=off: legacy transcript flows exactly as before (zero AI for static intent)", async () => {
-    const { env, aiRun } = makeEnv();
+    const { env, db, aiRun } = makeEnv();
+    // The device gate (Linux port J1) runs before the entitlement gate: the
+    // transcript route now needs a device credential like every other
+    // non-public route. The LEGACY entitlement semantics (mode=off) are
+    // unchanged.
+    db._t.devices.set("device_legacy1", {
+      device_id: "device_legacy1", profile_id: "user_legacy1",
+      device_token_hash: await sha256Hex("legacy-device-token"),
+      device_name: "Laptop", os: "windows", app_version: null,
+      status: "active", created_at: BASE, last_seen_at: BASE, revoked_at: null,
+    });
     const res = await worker.fetch(jsonReq("https://w.test/", "POST", {
       request_id: "r1",
       requester: { id: "user_legacy1", device_id: "device_legacy1" },
       task: { type: "general", intent: "deep_analyse", request: "deep analyse owner/repo" },
-    }), env);
+    }, { Authorization: "Bearer legacy-device-token" }), env);
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(body.reply_text).toContain("architecture mapper");
     expect(body.protocol_version).toBe("1");
     // explicit intent → classify never ran; deep_analyse branch is static
     expect(aiRun).not.toHaveBeenCalled();
+  });
+
+  test("a transcript turn without a device credential is refused before any AI runs", async () => {
+    const { env, db, aiRun } = makeEnv();
+    const res = await worker.fetch(jsonReq("https://w.test/", "POST", {
+      request_id: "r0",
+      requester: { id: "user_legacy1", device_id: "device_legacy1" },
+      task: { type: "general", request: "what is the capital of France" },
+    }), env);
+    expect(res.status).toBe(401);
+    expect(aiRun).not.toHaveBeenCalled();
+    expect(db._t.usage_log.size).toBe(0);
   });
 
   test("pending canonical profile is denied with zero AI calls and zero usage", async () => {
@@ -329,13 +367,15 @@ describe("Feature 88 e2e — entitlement gate", () => {
     expect(revBody.oauth_deleted).toBe(1);
     expect(db._t.oauth_tokens.size).toBe(0);
 
-    // device token is dead
+    // device token is dead — the device gate (Linux port J1) now catches the
+    // revoked device before the entitlement gate, so the refusal is a 401
+    // (invalid credential) rather than a 403 (revoked profile).
     const me = await worker.fetch(new Request(
       `https://w.test/v1/profiles/me?profile_id=${claim.profile_id}&device_id=${claim.device_id}`,
       { headers: { Authorization: `Bearer ${claim.device_token}` } }), env);
-    expect(me.status).toBe(403);
+    expect(me.status).toBe(401);
     const meBody = await me.json() as any;
-    expect(meBody.code).toBe("revoked");
+    expect(meBody.error).toContain("unauthorized");
   });
 
   test("two laptops are fully isolated", async () => {
