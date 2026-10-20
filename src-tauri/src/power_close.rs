@@ -89,6 +89,13 @@ pub trait CloseEnv {
     fn poll_ms(&self) -> u64 {
         POLL_MS
     }
+    /// A listing failure, if one happened. A failed listing means we no
+    /// longer know what is open, so the closer must not report a clean
+    /// shutdown. Windows cannot fail to list (`EnumWindows` has no failure
+    /// mode), so the default is "no failure".
+    fn failure(&self) -> Option<String> {
+        None
+    }
 }
 
 const POLL_MS: u64 = 250;
@@ -291,10 +298,28 @@ pub mod linux {
     /// can be present while the X server is unreachable, and then it closes
     /// nothing at all. That must read as "cannot", never as "nothing open".
     pub fn can_close_apps() -> Result<(), String> {
-        match strategy(crate::session::is_wayland(), wmctrl::installed()) {
-            Strategy::Wmctrl => match wmctrl::list() {
-                Ok(_) => Ok(()),
-                Err(e) => Err(format!("{TOOL_BROKEN_REASON} ({e})")),
+        let strat = strategy(crate::session::is_wayland(), wmctrl::installed());
+        let probe = match strat {
+            Strategy::Wmctrl => wmctrl::list().map(|_| ()),
+            _ => Ok(()),
+        };
+        if let Err(detail) = &probe {
+            // The raw command error is for the log, never for the user's ear.
+            tracing::warn!("power_close: the window tool failed: {detail}");
+        }
+        can_close_from(strat, probe)
+    }
+
+    /// The pure mapping (unit-tested): can the apps be closed here, and if
+    /// not, what is the user told?
+    ///
+    /// The tool's raw error is deliberately dropped — the user is told what
+    /// it means for them, the error text goes to the log.
+    pub fn can_close_from(strategy: Strategy, probe: Result<(), String>) -> Result<(), String> {
+        match strategy {
+            Strategy::Wmctrl => match probe {
+                Ok(()) => Ok(()),
+                Err(_) => Err(TOOL_BROKEN_REASON.to_string()),
             },
             Strategy::Wayland => Err(WAYLAND_REASON.to_string()),
             Strategy::NoTool => Err(NO_TOOL_REASON.to_string()),
@@ -311,51 +336,69 @@ pub mod linux {
         /// This session cannot ask the other apps to close at all (native
         /// Wayland, or no `wmctrl`) — nothing was closed.
         CannotClose { reason: String },
-        /// The tool that can close windows is not working — nothing was
-        /// closed and we must say so instead of reporting a clean shutdown.
+        /// The tool that can close windows is not working — we do NOT know
+        /// whether the apps closed, so the shutdown must not go ahead.
         ToolFailed { reason: String },
     }
 
-    /// What NEXUS says when the other apps could not be closed at all.
-    pub fn cannot_close_line() -> String {
-        "I couldn't close your other apps, sir.".to_string()
+    /// What NEXUS says when it could not even find out whether the other
+    /// apps closed. The shutdown stops here, so the line says what to do.
+    pub fn tool_failed_line() -> String {
+        "I couldn't check whether your other apps closed, sir, so I've stopped the shutdown — please save your work and turn it off yourself."
+            .to_string()
     }
 
-    /// What NEXUS says when the window tool itself failed, so we cannot even
-    /// tell whether the apps closed.
-    pub fn tool_failed_line() -> String {
-        "I couldn't check your other apps, sir.".to_string()
+    /// A sticky listing failure.
+    ///
+    /// Once a listing has failed we no longer know what is open, so a later
+    /// SUCCESSFUL listing must not erase the failure — the first one is
+    /// kept, because the failed listing may have been the one that built
+    /// the target set (an empty target set means nothing was ever asked to
+    /// close).
+    #[derive(Default)]
+    pub struct FailureFlag {
+        error: std::cell::RefCell<Option<String>>,
+    }
+
+    impl FailureFlag {
+        /// Record a listing failure. The FIRST failure wins.
+        pub fn record(&self, error: String) {
+            let mut slot = self.error.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(error);
+            }
+        }
+
+        /// The sticky failure, if any listing failed.
+        pub fn get(&self) -> Option<String> {
+            self.error.borrow().clone()
+        }
     }
 
     /// The X11 windows `wmctrl` can see, as the closer sees them.
     ///
-    /// `last_error` remembers a failed listing: an empty window list and a
+    /// `failure` remembers a failed listing: an empty window list and a
     /// broken `wmctrl` look the same from the outside, and the difference is
     /// the difference between "nothing was open" and "we closed nothing".
     pub struct LinuxEnv {
-        last_error: std::cell::RefCell<Option<String>>,
+        failure: FailureFlag,
     }
 
     impl LinuxEnv {
         pub fn new() -> Self {
-            Self { last_error: std::cell::RefCell::new(None) }
+            Self { failure: FailureFlag::default() }
         }
 
-        /// The last listing failure, if the last listing failed.
-        pub fn last_error(&self) -> Option<String> {
-            self.last_error.borrow().clone()
-        }
-    }
-
-    impl CloseEnv for LinuxEnv {
-        fn list(&self) -> Vec<Win> {
-            let windows = match wmctrl::list() {
-                Ok(w) => {
-                    *self.last_error.borrow_mut() = None;
-                    w
-                }
+        /// Turn a listing result into the windows the closer works on.
+        ///
+        /// A failed listing is recorded (sticky) and looks like an empty
+        /// room — the caller checks `failure()` before believing it.
+        pub fn absorb(&self, result: Result<Vec<wmctrl::Window>, String>) -> Vec<Win> {
+            let windows = match result {
+                Ok(w) => w,
                 Err(e) => {
-                    *self.last_error.borrow_mut() = Some(e);
+                    // Sticky: a later successful listing does NOT erase this.
+                    self.failure.record(e);
                     return vec![];
                 }
             };
@@ -384,6 +427,12 @@ pub mod linux {
                 })
                 .collect()
         }
+    }
+
+    impl CloseEnv for LinuxEnv {
+        fn list(&self) -> Vec<Win> {
+            self.absorb(wmctrl::list())
+        }
 
         fn close(&self, w: &Win) {
             wmctrl::close(w.hwnd);
@@ -398,13 +447,33 @@ pub mod linux {
         fn poll_ms(&self) -> u64 {
             1_000
         }
+
+        fn failure(&self) -> Option<String> {
+            self.failure.get()
+        }
+    }
+
+    /// Close everything with the given environment, and report honestly.
+    ///
+    /// A listing that failed is a FAILURE, not an empty room: the caller
+    /// must not power the machine off while believing the apps were closed.
+    /// (The failure is sticky — see [`FailureFlag`] — so a failed FIRST
+    /// listing, which is the one that builds the target set, cannot be
+    /// erased by a later successful poll.)
+    pub fn close_with(env: &dyn CloseEnv, wait_ms: u64) -> CloseResult {
+        let outcome = super::close_all(env, wait_ms);
+        if let Some(reason) = env.failure() {
+            return CloseResult::ToolFailed {
+                reason: format!("{TOOL_BROKEN_REASON} ({reason})"),
+            };
+        }
+        match outcome {
+            super::Outcome::AllClosed { closed } => CloseResult::AllClosed { closed },
+            super::Outcome::Refused { closed, still_open } => CloseResult::Refused { closed, still_open },
+        }
     }
 
     /// Close everything, and report honestly what happened.
-    ///
-    /// A `wmctrl` that cannot list the windows is a FAILURE, not an empty
-    /// room: the caller must not power the machine off while believing the
-    /// apps were closed.
     pub fn close_everything(wait_ms: u64) -> CloseResult {
         match strategy(crate::session::is_wayland(), wmctrl::installed()) {
             // Native Wayland: no client may ask another application to close.
@@ -418,16 +487,7 @@ pub mod linux {
             Strategy::Wmctrl => {}
         }
         let env = LinuxEnv::new();
-        let outcome = super::close_all(&env, wait_ms);
-        if let Some(reason) = env.last_error() {
-            return CloseResult::ToolFailed {
-                reason: format!("{TOOL_BROKEN_REASON} ({reason})"),
-            };
-        }
-        match outcome {
-            super::Outcome::AllClosed { closed } => CloseResult::AllClosed { closed },
-            super::Outcome::Refused { closed, still_open } => CloseResult::Refused { closed, still_open },
-        }
+        close_with(&env, wait_ms)
     }
 
     /// "0x03a00003" -> the window id as a number.
@@ -582,39 +642,115 @@ mod linux_tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_broken_or_missing_wmctrl_is_an_error_not_an_empty_room() {
-        // Either wmctrl is missing (spawn error) or it cannot reach the X
-        // server (non-zero exit). Both must be ERRORS: an empty list would
-        // tell the shutdown that nothing was open, and the machine would
-        // power off with the user's work still running.
-        match wmctrl::list() {
-            Ok(windows) => {
-                assert!(windows.iter().all(|w| w.id.starts_with("0x")), "{windows:?}");
+    fn a_failed_listing_is_a_tool_failure_not_an_empty_room() {
+        // The Linux failure mode: `list()` cannot talk to the X server, so
+        // it returns nothing — which, without the failure flag, would look
+        // like "no windows were open" and the machine would power off with
+        // the user's work still running.
+        struct FailingEnv {
+            failure: Option<String>,
+        }
+        impl super::CloseEnv for FailingEnv {
+            fn list(&self) -> Vec<super::Win> {
+                vec![] // a failed listing looks like an empty room
             }
-            Err(e) => {
-                assert!(!e.trim().is_empty(), "the error must say what went wrong");
+            fn close(&self, _w: &super::Win) {}
+            fn sleep_ms(&self, _ms: u64) {}
+            fn failure(&self) -> Option<String> {
+                self.failure.clone()
             }
         }
+
+        let broken = FailingEnv {
+            failure: Some("wmctrl -l failed: Cannot open display".into()),
+        };
+        let result = super::linux::close_with(&broken, 0);
+        assert!(
+            matches!(result, super::linux::CloseResult::ToolFailed { .. }),
+            "a failed listing must never be reported as a clean close: {result:?}"
+        );
+
+        // The same env without a failure IS a clean close — the mapping
+        // distinguishes the two instead of always refusing.
+        let healthy = FailingEnv { failure: None };
+        let result = super::linux::close_with(&healthy, 0);
+        assert!(
+            matches!(result, super::linux::CloseResult::AllClosed { .. }),
+            "{result:?}"
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_linux_poll_is_slower_than_the_windows_one() {
-        // Every Linux poll spawns a `wmctrl` process, so it must not poll
-        // as often as the (free) Windows EnumWindows poll.
+    fn a_failed_first_listing_is_not_erased_by_a_later_success() {
         use super::CloseEnv;
         let env = super::linux::LinuxEnv::new();
-        assert!(env.poll_ms() >= 500, "the Linux poll must not be the 250 ms default");
+        // The FIRST listing fails — it is the one that builds the target
+        // set, so nothing was ever asked to close.
+        assert!(env.absorb(Err("Cannot open display".into())).is_empty());
+        // A later listing works. The failure must still stand.
+        let later = env.absorb(Ok(vec![super::linux::wmctrl::Window {
+            id: "0x03a00003".into(),
+            title: "Firefox".into(),
+        }]));
+        assert_eq!(later.len(), 1);
+        assert!(
+            env.failure().is_some(),
+            "the sticky failure must survive a later successful listing"
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_broken_window_tool_is_announced_not_hidden() {
-        let line = super::linux::tool_failed_line();
-        assert!(!line.trim().is_empty(), "the failure must be spoken, not hidden");
-        assert!(line.contains("couldn't check"), "{line}");
-        let line = super::linux::cannot_close_line();
-        assert!(line.contains("couldn't close"), "{line}");
+    fn a_list_error_makes_the_close_step_refuse_without_reading_the_error_aloud() {
+        // The blocker asks the user once; the raw command error is for the
+        // log, not for the user's ear.
+        let reason = super::linux::can_close_from(
+            super::linux::Strategy::Wmctrl,
+            Err("wmctrl -l failed: Cannot open display".to_string()),
+        )
+        .expect_err("a broken window tool must refuse to close silently");
+        assert!(!reason.contains("Cannot open display"), "the raw error must not be spoken: {reason}");
+        assert!(reason.contains("window manager"), "{reason}");
+        // A working tool still allows closing; Wayland / a missing tool keep
+        // their own reasons.
+        assert!(super::linux::can_close_from(super::linux::Strategy::Wmctrl, Ok(())).is_ok());
+        assert!(super::linux::can_close_from(super::linux::Strategy::Wayland, Ok(())).is_err());
+        assert!(super::linux::can_close_from(super::linux::Strategy::NoTool, Ok(())).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_close_step_polls_at_the_envs_own_rate() {
+        // Every Linux poll spawns a `wmctrl` process, so the loop must use
+        // the environment's interval, not the 250 ms Windows default.
+        struct SlowEnv {
+            lists: std::cell::Cell<u32>,
+        }
+        impl super::CloseEnv for SlowEnv {
+            fn list(&self) -> Vec<super::Win> {
+                self.lists.set(self.lists.get() + 1);
+                vec![super::Win {
+                    hwnd: 1,
+                    exe: "x".into(),
+                    class: String::new(),
+                    title: "never closes".into(),
+                }]
+            }
+            fn close(&self, _w: &super::Win) {}
+            fn sleep_ms(&self, _ms: u64) {}
+            fn poll_ms(&self) -> u64 {
+                1_000
+            }
+        }
+        let env = SlowEnv { lists: std::cell::Cell::new(0) };
+        // The window never goes away, so the step waits out its budget.
+        let _ = super::close_all(&env, 2_000);
+        assert!(
+            env.lists.get() <= 3,
+            "the window set must not be polled every 250 ms: {} polls",
+            env.lists.get()
+        );
     }
 }
 

@@ -5962,21 +5962,22 @@ async fn shutdown_sequence<R: Runtime>(app: AppHandle<R>, generation: u64) {
                 println!("[POWER] closed {closed} windows")
             }
             Some(crate::power_close::linux::CloseResult::CannotClose { reason }) => {
-                // This session cannot ask another app to close. Say so — the
-                // shutdown itself was already confirmed by the user.
+                // This session cannot ask another app to close. The user was
+                // already told that before the shutdown started (see
+                // `shutdown_blocker`) and confirmed it, so the shutdown goes
+                // ahead — this is only logged, not spoken again.
                 println!("[POWER] cannot close the other apps here: {reason}");
-                let (rid, _) = install_new_request(Subsystem::LocalCommand);
-                speak_line(&app, crate::power_close::linux::cannot_close_line(), &rid);
-                clear_active_request(&rid);
             }
             Some(crate::power_close::linux::CloseResult::ToolFailed { reason }) => {
-                // `wmctrl` could not list the windows, so we do NOT know that
-                // anything closed. Say so plainly and keep going — the user
-                // already confirmed this shutdown.
-                println!("[POWER] the window tool failed: {reason}");
+                // We do NOT know whether the apps closed, so the shutdown must
+                // NOT go ahead: powering off now could throw unsaved work
+                // away without the user ever being told.
+                println!("[POWER] shutdown stopped: the window tool failed: {reason}");
+                pc::finish(generation);
                 let (rid, _) = install_new_request(Subsystem::LocalCommand);
                 speak_line(&app, crate::power_close::linux::tool_failed_line(), &rid);
                 clear_active_request(&rid);
+                return;
             }
             None => println!("[POWER] close step failed to run; continuing"),
         }
