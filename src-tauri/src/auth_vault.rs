@@ -269,22 +269,28 @@ async fn fetch_google_token_from_worker(
     worker_url: &str,
     user_id: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/google-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
+    // The device bearer is mandatory for the gated Worker.  Keep the legacy
+    // user_id during the staged rollout; worker_proxy owns the one removal
+    // flag and places the trusted native value first.
+    let url = crate::worker_proxy::build_worker_url(
+        worker_url,
+        "/oauth/google-token",
+        None,
+        Some(user_id),
+    )?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
-        .get(&url)
+    let resp = crate::worker_proxy::apply_to(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("google token fetch: {e}"))?;
     if resp.status() == 404 {
         return Err("Google not connected. Connect Google in setup.".into());
+    }
+    if resp.status() == 401 || resp.status() == 403 {
+        return Err(crate::worker_proxy::DEVICE_NOT_AUTHORIZED_MESSAGE.into());
     }
     if !resp.status().is_success() {
         return Err(format!("google token error {}", resp.status()));
@@ -302,22 +308,27 @@ async fn fetch_swiggy_token_from_worker(
     worker_url: &str,
     user_id: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/swiggy-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
+    // See the Google fetch above: this remains transition-compatible with the
+    // deployed Worker while also authenticating a request to the gated one.
+    let url = crate::worker_proxy::build_worker_url(
+        worker_url,
+        "/oauth/swiggy-token",
+        None,
+        Some(user_id),
+    )?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = client
-        .get(&url)
+    let resp = crate::worker_proxy::apply_to(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("swiggy token fetch: {e}"))?;
     if resp.status() == 404 {
         return Err("Swiggy not connected. Connect Swiggy in Settings, Connections tab.".into());
+    }
+    if resp.status() == 401 || resp.status() == 403 {
+        return Err(crate::worker_proxy::DEVICE_NOT_AUTHORIZED_MESSAGE.into());
     }
     if !resp.status().is_success() {
         return Err(format!("swiggy token error {}", resp.status()));
