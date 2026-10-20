@@ -8,6 +8,7 @@ import { stopTts } from "../audio/ttsPlayer";
 import { AnalysisDashboard } from "./AnalysisDashboard";
 import { GitHubConflictPanel } from "./GitHubConflictPanel";
 import { ConfirmationPanel } from "./ConfirmationPanel";
+import { SubtitleBar } from "./SubtitleBar";
 import { topicTitle } from "./spatialShared";
 
 /**
@@ -321,6 +322,12 @@ export function SidebarApp({ onDock }: SidebarAppProps) {
               </button>
             </div>
           </header>
+
+          {/* ── Last heard: editable copy of your most recent command ───── */}
+          {/* Lives here (not in the stage) because the stage is a
+              keyboard-less click-through overlay; this window is focused
+              deliberately by the user to type a correction. */}
+          <SubtitleBar />
 
           {/* ── Topic title — ONLY for research / analyse responses ────── */}
           {/* The search/research topic heads the information block here;

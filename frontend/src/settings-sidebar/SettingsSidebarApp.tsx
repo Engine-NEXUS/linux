@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { HandModeSection } from "./HandModeSection";
 import { AgentWatchSection } from "./AgentWatchSection";
 import { invoke } from "@tauri-apps/api/core";
+import { resolveThemeMode, type ThemeMode } from "../sidebar/theme";
 import { isPlausibleGeminiKey } from "./keyFormat";
 import { identityBanner, type IdentityBanner } from "../setup/identityBanner";
 import {
@@ -315,9 +316,9 @@ export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string)
 
   const acc = useAccounts(settings.serverUrl, settings.userId);
   const insights = useInsights(insightsKey);
-  const themeMode: "light" | "dark" = settings.themeMode === "light" ? "light" : "dark";
+  const themeMode: ThemeMode = resolveThemeMode(settings.themeMode);
 
-  const handleTheme = (m: "light" | "dark") => {
+  const handleTheme = (m: ThemeMode) => {
     update("themeMode", m);
     void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
     // Persist immediately: the Command Hub home has no Save button. Patch only the theme: re-saving the whole
@@ -1289,10 +1290,10 @@ function AuthTab({ settings, update }: {
       <div className="settings-section">
         <div className="settings-section-title">Window Theme</div>
         <div className="setting-desc" style={{ marginBottom: 8 }}>
-          Liquid frosted glass — dark or light theme across all windows, analyses, and mapper.
+          Liquid frosted glass — dark, light, or follow the system across all windows, analyses, and mapper.
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          {(["light", "dark"] as const).map((m) => (
+          {(["light", "dark", "system"] as const).map((m) => (
             <button
               key={m}
               className={`settings-btn ${((settings.themeMode ?? "dark") === m) ? "settings-btn--primary" : ""}`}
@@ -1303,7 +1304,7 @@ function AuthTab({ settings, update }: {
                 invoke("settings_patch", { patch: { themeMode: m } }).catch(() => {});
               }}
             >
-              {m === "light" ? "☀ Light (Frosted Glass)" : "🌙 Dark (Liquid Glass)"}
+              {m === "light" ? "☀ Light (Frosted Glass)" : m === "dark" ? "🌙 Dark (Liquid Glass)" : "🖥 Follow System"}
             </button>
           ))}
         </div>

@@ -462,6 +462,35 @@
   transform: none;
 }
 
+/* Per-word karaoke inside the black capsule (real timings only — the
+   schedule's own word data; never an estimator). Spoken words settle to
+   the plain white of a static caption, the currently-sung word glows
+   warm amber, and not-yet-spoken words sit dimmer so the read position
+   is unmistakable. Spans are inline and keep the trail space inside the
+   span (the parent's white-space: pre-wrap renders it), so line
+   re-wrapping is identical to the plain-text render. */
+.caption-word {
+  display: inline;
+  color: #ffffff;
+  opacity: 1;
+  transition: color 140ms ease, opacity 140ms ease;
+}
+
+.caption-word--spoken {
+  color: #ffffff;
+  opacity: 1;
+}
+
+.caption-word--active {
+  color: #ffd479;
+  opacity: 1;
+}
+
+.caption-word--pending {
+  color: #ffffff;
+  opacity: 0.45;
+}
+
 /* Live caption (plan Phase 4) — the user's OWN words, growing while they
    still talk. Shares .response-caption's position/font/shadow; a touch
    dimmer than the assistant's reply so the two read as distinct even

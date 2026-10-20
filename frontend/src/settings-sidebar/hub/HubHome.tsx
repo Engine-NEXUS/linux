@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import type { ThemeMode } from "../../sidebar/theme";
 import { formatCount, initialOf, requestsSubtitle, type HubAccount, type UsageStats } from "./hubModel";
 
 export type HubPage = "home" | "keys" | "memory" | "audio" | "display" | "connections" | "advanced";
@@ -18,8 +19,8 @@ interface AccountsApi {
 interface Props {
   acc: AccountsApi;
   insights: { keyCount: number | null; usage: UsageStats | null; mcp: number | null };
-  themeMode: "light" | "dark";
-  onTheme: (m: "light" | "dark") => void;
+  themeMode: ThemeMode;
+  onTheme: (m: ThemeMode) => void;
   onOpen: (p: HubPage) => void;
 }
 
@@ -250,12 +251,12 @@ export function HubHome({ acc, insights, themeMode, onTheme, onOpen }: Props) {
       <Row
         icon={ICONS.theme}
         title="Change Theme"
-        sub="Light mode or dark mode"
+        sub="Light, dark, or follow the system"
         right={
           <span className="hx-seg" role="group" aria-label="Theme">
-            {(["light", "dark"] as const).map((m) => (
+            {(["light", "dark", "system"] as const).map((m) => (
               <button key={m} className={`hx-seg-btn ${themeMode === m ? "hx-seg-btn--on" : ""}`} onClick={() => onTheme(m)}>
-                {m === "light" ? "Light" : "Dark"}
+                {m === "light" ? "Light" : m === "dark" ? "Dark" : "System"}
               </button>
             ))}
           </span>

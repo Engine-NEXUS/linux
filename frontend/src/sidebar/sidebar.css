@@ -334,6 +334,108 @@ html[data-theme="light"] body[data-platform="linux"] .sidebar-card {
   overflow: hidden;
 }
 
+/* ── Last heard (editable last command) ─────────────────────────
+   The sidebar is the only window that can take keyboard focus (the
+   stage is a click-through overlay), so the correction field lives
+   here, above the scroll area, always one click from a fix. */
+.sidebar-last-heard {
+  position: relative;
+  z-index: 3;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px 10px;
+  border: 1px solid var(--apple-border-default);
+  border-radius: 12px;
+  background: var(--apple-surface-muted);
+  text-shadow: none;
+}
+
+.sidebar-last-heard__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sidebar-last-heard__label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--apple-text-secondary);
+}
+
+.sidebar-last-heard__hint {
+  font-size: 10.5px;
+  color: var(--apple-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-last-heard__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-last-heard__input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--apple-border-default);
+  background: var(--apple-surface-base);
+  color: var(--apple-text-primary);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.sidebar-last-heard__input::placeholder {
+  color: var(--apple-text-tertiary);
+}
+
+.sidebar-last-heard__input:focus {
+  border-color: var(--apple-focus-ring);
+  box-shadow: 0 0 0 3px rgba(250, 88, 106, 0.18);
+}
+
+.sidebar-last-heard__send {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--apple-border-strong);
+  background: var(--apple-surface-raised);
+  color: var(--apple-text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.sidebar-last-heard__send:hover:not(:disabled) {
+  background: var(--apple-surface-strong);
+  border-color: var(--apple-focus-ring);
+}
+
+.sidebar-last-heard__send:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
 /* ═══════════════════════════════════════════════════════════════
    Feature 86 — Spatial Dashboard (cards matching stage pins)
    Liquid-glass cards on the translucent dark panel.

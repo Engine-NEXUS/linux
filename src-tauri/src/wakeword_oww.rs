@@ -3980,6 +3980,9 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                         intent_label,
                         pre_parsed,
                     };
+                    // Sidebar's editable "last heard" row reads this cache; empty
+                    // transcripts (a silent miss) are ignored inside.
+                    crate::last_heard::remember_transcript_text(&final_payload.text);
                     if !final_payload.text.is_empty() {
                         if let Ok(v) = serde_json::to_value(&final_payload) {
                             crate::stage::stash_transcript_if_not_ready(v);

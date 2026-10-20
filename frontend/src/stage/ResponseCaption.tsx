@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { initCaptionListener, onCaptionLineUpdate, CaptionLineEvent } from "../audio/captionScheduler";
+import { readAlongFromEvent } from "../sidebar/readAlong";
 
 interface OrbRect {
   x: number;
@@ -85,6 +86,11 @@ export function ResponseCaption() {
   const currentText = lineEvent.text || "";
   if (!currentText.trim()) return null;
 
+  // Per-word karaoke from the scheduler's REAL word data (Edge word
+  // boundaries; the scheduler's own reveal schedule for local engines).
+  // `null` falls back to the plain-text render — never an estimate.
+  const readAlong = lineEvent ? readAlongFromEvent(lineEvent) : null;
+
   const phaseClass =
     lineEvent.phase === "active"
       ? "caption-black-capsule--active"
@@ -101,7 +107,16 @@ export function ResponseCaption() {
       }}
     >
       <div className={`caption-black-capsule ${phaseClass}`}>
-        <span className="caption-black-text">{currentText}</span>
+        <span className="caption-black-text">
+          {readAlong
+            ? readAlong.map((w, i) => (
+                <span key={i} className={`caption-word caption-word--${w.state}`}>
+                  {w.text}
+                  {i < readAlong.length - 1 ? " " : ""}
+                </span>
+              ))
+            : currentText}
+        </span>
       </div>
     </div>
   );
