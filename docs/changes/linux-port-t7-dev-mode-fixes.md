@@ -1,5 +1,13 @@
 # Linux port T7 — dev-mode fixes found on the target machine
 
+> **Superseded in part (2026-10-21).** The GDK rule below changed: on a Wayland
+> layer-shell desktop with `libgtk-layer-shell0`, NEXUS now runs on native Wayland
+> (T8). The microphone probe order changed too: `default` first, then `pulse`,
+> hardware, and the raw `pipewire` PCM last, each probe behind a deadline, and
+> devices reopened one at a time (T7b and the DMIC fix). Current behaviour:
+> `docs/features/141-linux-native-shell-and-aura.md`.
+
+
 Scope: `src-tauri/src/gdk_backend_linux.rs`, `src-tauri/src/audio_linux.rs`,
 and the small Linux-gated call-outs in `src-tauri/src/wakeword_oww.rs`.
 
