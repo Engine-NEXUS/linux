@@ -85,6 +85,9 @@ pub fn is_side_effect(intent: &ParsedIntent) -> bool {
             | ParsedIntent::ScreenClick { .. }
             | ParsedIntent::GhostAction { .. }
             | ParsedIntent::ScreenRead { .. }
+            // Locating a target reads the screen (and may spend a vision
+            // call), so it is a side effect like the other screen grounding.
+            | ParsedIntent::ScreenLocate { .. }
             | ParsedIntent::BrowserTab { .. }
             | ParsedIntent::BrowserCloseTab { .. }
             | ParsedIntent::BrowserSearch { .. }
@@ -328,7 +331,13 @@ pub fn center_for(intent: &ParsedIntent) -> &'static str {
         | ParsedIntent::ExitGhostControl
         | ParsedIntent::GhostAction { .. }
         | ParsedIntent::ScreenClick { .. }
-        | ParsedIntent::ScreenRead { .. } => "GhostCenter",
+        | ParsedIntent::ScreenRead { .. }
+        // The screen agent (locate / silence / replay / re-point) — the same
+        // center as the other screen grounding.
+        | ParsedIntent::ScreenLocate { .. }
+        | ParsedIntent::StopSpeech
+        | ParsedIntent::RepeatScreen
+        | ParsedIntent::PointAgain => "GhostCenter",
 
         ParsedIntent::Greeting { .. }
         | ParsedIntent::NeedMoreInfo { .. } => "GreetingCenter",

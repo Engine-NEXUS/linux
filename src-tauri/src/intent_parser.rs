@@ -154,6 +154,21 @@ pub enum ParsedIntent {
     /// Read back the Nth on-screen actionable ("what's the 2nd button").
     #[serde(rename = "screen_read")]
     ScreenRead { ordinal: u32 },
+    /// Point at a named on-screen target ("where is the save button",
+    /// "point at X", "find the X on my screen").
+    #[serde(rename = "screen_locate")]
+    ScreenLocate { target: String },
+    /// Stop speaking immediately ("stop speaking" → TTS stop + hide the
+    /// pointer). Bare "stop" stays MediaStop / live-cancel — do not touch
+    /// those.
+    #[serde(rename = "stop_speech")]
+    StopSpeech,
+    /// Replay the last screen answer ("repeat that" → re-speak + re-show).
+    #[serde(rename = "repeat_screen")]
+    RepeatScreen,
+    /// Re-show the last pointer without a new capture ("point again").
+    #[serde(rename = "point_again")]
+    PointAgain,
     /// Switch browser tab ("move to the 4th tab" → Ctrl+4).
     #[serde(rename = "browser_tab")]
     BrowserTab { index: u32 },
@@ -364,6 +379,10 @@ pub fn intent_to_label(intent: &ParsedIntent) -> &'static str {
         ParsedIntent::PointerClick { .. } => "pointer_click",
         ParsedIntent::ScreenClick { .. } => "screen_click",
         ParsedIntent::ScreenRead { .. } => "screen_read",
+        ParsedIntent::ScreenLocate { .. } => "screen_locate",
+        ParsedIntent::StopSpeech => "stop_speech",
+        ParsedIntent::RepeatScreen => "repeat_screen",
+        ParsedIntent::PointAgain => "point_again",
         ParsedIntent::BrowserTab { .. } => "browser_tab",
         ParsedIntent::BrowserCloseTab { .. } => "browser_close_tab",
         ParsedIntent::BrowserSearch { .. } => "browser_search",
@@ -527,7 +546,17 @@ fn strip_wake_prefix(text: &str) -> Option<String> {
 }
 
 pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
-    if let Some(result) = parse_deterministic_inner(transcript) {
+    parse_deterministic_with(transcript, false)
+}
+
+/// The deterministic parser with the runtime "a question is pending" flag.
+///
+/// `confirmation_pending` is INJECTED rather than read from a global, so the
+/// parser stays a pure function and the one thing the flag changes — whether
+/// the screen-voice replay phrases may claim the turn — is unit-testable.
+/// See [`parse_screen_voice`].
+pub fn parse_deterministic_with(transcript: &str, confirmation_pending: bool) -> Option<ParseResult> {
+    if let Some(result) = parse_deterministic_inner(transcript, confirmation_pending) {
         return Some(result);
     }
     // Retry: strip one wake prefix and re-run the FULL pipeline
@@ -537,12 +566,12 @@ pub fn parse_deterministic(transcript: &str) -> Option<ParseResult> {
     // empty (bare wake words keep their first-pass result).
     let lowered = transcript.trim().to_lowercase();
     if let Some(stripped) = strip_wake_prefix(&lowered) {
-        return parse_deterministic_inner(&stripped);
+        return parse_deterministic_inner(&stripped, confirmation_pending);
     }
     None
 }
 
-fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
+fn parse_deterministic_inner(transcript: &str, confirmation_pending: bool) -> Option<ParseResult> {
     let text = transcript.trim().to_lowercase();
     let text = normalize_whitespace(&text);
     // Strip trailing punctuation that STT often appends (e.g. "Open the PR list."
@@ -687,6 +716,22 @@ fn parse_deterministic_inner(transcript: &str) -> Option<ParseResult> {
     // Must precede live/open: "press the 3rd button" is grounding, not a
     // hotkey; "open 4th tab" is a tab switch, not an app.
     if let Some(result) = parse_screen_command(&text) {
+        return Some(result);
+    }
+
+    // --- Screen locate ("where is the save button", "point at X") ---
+    // Must precede open/close/search: "shut up" is silence, not "close up";
+    // "show me again" is a re-point, not an app launch; "find the save
+    // button" is grounding, not a web search.
+    if let Some(result) = parse_screen_locate(&text) {
+        return Some(result);
+    }
+
+    // --- Screen voice flow (silence / replay / re-point) ---
+    // LLM-free by design: silence, replay and re-point never re-query a
+    // model. `confirmation_pending` keeps a pending question's "repeat"
+    // with that question.
+    if let Some(result) = parse_screen_voice(&text, confirmation_pending) {
         return Some(result);
     }
 
@@ -4631,6 +4676,142 @@ fn parse_screen_command(text: &str) -> Option<ParseResult> {
                     });
                 }
             }
+        }
+    }
+    None
+}
+
+// ─── Screen agent: locate a named target, silence, replay ───────────────
+
+/// UI nouns that mark a phrase as pointing at on-screen chrome rather
+/// than a web search or an app ("find the save button" vs "find pizza").
+const SCREEN_UI_NOUNS: &[&str] = &[
+    "button", "link", "menu", "dialog", "tab", "icon", "window", "field", "box", "bar", "panel",
+    "option", "slider", "checkbox", "input", "popup", "toolbar", "sidebar", "cursor", "pointer",
+    "textbox", "dropdown", "dialogue", "clock", "tray", "desktop", "taskbar", "dock", "status",
+    "title", "header", "footer",
+    // NOTE: "list" is deliberately excluded — "show me the pr list" is a PR
+    // command, not pointing ("list" alone is content, not chrome).
+    "table", "row", "column", "card", "banner", "notification", "alert",
+];
+
+/// Does this phrase name on-screen chrome?
+fn has_ui_noun(s: &str) -> bool {
+    SCREEN_UI_NOUNS.iter().any(|n| s.contains(n))
+}
+
+/// Strip trailing screen-scope tails ("on my screen", "on screen", "for me").
+fn strip_screen_tail(s: &str) -> &str {
+    for tail in [" on my screen", " on the screen", " on screen", " for me"] {
+        if let Some(rest) = s.strip_suffix(tail) {
+            return rest.trim();
+        }
+    }
+    s
+}
+
+/// A deterministic screen-agent hit.
+///
+/// 0.9 rather than 1.0: it IS a phrase-grammar match, but a narrower one
+/// than the open/close grammars, and the confidence is what the ownership
+/// gate reads.
+fn screen_agent_hit(intent: ParsedIntent) -> Option<ParseResult> {
+    Some(ParseResult {
+        intent,
+        confidence: 0.9,
+        source: "deterministic".to_string(),
+    })
+}
+
+/// "where is the save button" / "point at X" / "find the X on my screen" →
+/// ScreenLocate.
+///
+/// The pointing verbs ("point at", "point to", "locate") ALWAYS ground: they
+/// can only mean the screen. "where is" / "find" / "show me" ground only when
+/// the tail is scoped to the screen or names UI chrome — otherwise they are a
+/// web search or an app ("find restaurants", "where is the eiffel tower").
+fn parse_screen_locate(text: &str) -> Option<ParseResult> {
+    // Explicit pointing verbs always ground.
+    for prefix in ["point at ", "point to ", "locate "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let target = strip_screen_tail(rest).trim();
+            if !target.is_empty() {
+                return screen_agent_hit(ParsedIntent::ScreenLocate {
+                    target: target.to_string(),
+                });
+            }
+        }
+    }
+    // "where is X": only when scoped to the screen or naming UI chrome.
+    for prefix in ["where is ", "where's ", "where are "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let target = strip_screen_tail(rest).trim();
+            let scoped = target.len() != rest.trim().len();
+            if !target.is_empty() && (scoped || has_ui_noun(target)) {
+                return screen_agent_hit(ParsedIntent::ScreenLocate {
+                    target: target.to_string(),
+                });
+            }
+        }
+    }
+    // "find X" / "show me X": same rule — otherwise it is a web search or an
+    // app open ("find restaurants", "show me chrome" must fall through).
+    for prefix in ["find ", "show me "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            let target = strip_screen_tail(rest).trim();
+            let scoped = target.len() != rest.trim().len();
+            if !target.is_empty() && (scoped || has_ui_noun(target)) {
+                return screen_agent_hit(ParsedIntent::ScreenLocate {
+                    target: target.to_string(),
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Screen-voice short-circuits: silence, replay, re-point.
+///
+/// LLM-free by design — silence, replay and re-point never re-query a model.
+///
+/// `confirmation_pending` — while NEXUS is waiting for the answer to a
+/// question IT asked, the word "repeat" belongs to that question: "repeat"
+/// is the branch's re-ask slot (`orchestrator::speak_prompt_and_hold(…,
+/// "repeat")`), so the replay phrases are NOT claimed here and the pending
+/// confirmation keeps the turn. The flag is an ARGUMENT, not a global read,
+/// so this stays a pure function.
+///
+/// NOTE: bare "stop" is MediaStop / live-cancel — never match it here.
+pub fn parse_screen_voice(text: &str, confirmation_pending: bool) -> Option<ParseResult> {
+    for phrase in ["stop speaking", "stop talking", "be quiet", "shut up"] {
+        if text == phrase {
+            return screen_agent_hit(ParsedIntent::StopSpeech);
+        }
+    }
+    if !confirmation_pending {
+        for phrase in [
+            "repeat",
+            "repeat that",
+            "say it again",
+            "say that again",
+            "what did you say",
+            "come again",
+            "pardon",
+        ] {
+            if text == phrase {
+                return screen_agent_hit(ParsedIntent::RepeatScreen);
+            }
+        }
+    }
+    for phrase in [
+        "point again",
+        "show it again",
+        "show me again",
+        "where was it",
+        "where was that",
+    ] {
+        if text == phrase {
+            return screen_agent_hit(ParsedIntent::PointAgain);
         }
     }
     None
@@ -9743,6 +9924,209 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod screen_agent_tests {
+    use super::*;
+
+    fn intent(t: &str) -> Option<ParsedIntent> {
+        parse_deterministic(t).map(|r| r.intent)
+    }
+
+    fn located(t: &str) -> Option<String> {
+        match intent(t) {
+            Some(ParsedIntent::ScreenLocate { target }) => Some(target),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn screen_locate_forms() {
+        for (phrase, want) in [
+            ("where is the save button", "the save button"),
+            ("where's the search bar", "the search bar"),
+            ("point at the close icon", "the close icon"),
+            ("point to the settings menu on my screen", "the settings menu"),
+            ("find the save button", "the save button"),
+            ("find the address bar on screen", "the address bar"),
+            ("show me the submit button", "the submit button"),
+            ("locate the downloads folder", "the downloads folder"),
+        ] {
+            assert_eq!(located(phrase).as_deref(), Some(want), "{phrase}");
+        }
+    }
+
+    #[test]
+    fn screen_locate_does_not_eat_search_or_apps() {
+        // No UI noun and no screen scope → it must stay a search / an app.
+        for phrase in [
+            "find restaurants",
+            "show me chrome",
+            "find biryani near me",
+            "where is the eiffel tower",
+            "where's the nearest hospital",
+        ] {
+            assert!(
+                !matches!(intent(phrase), Some(ParsedIntent::ScreenLocate { .. })),
+                "{phrase} must not locate"
+            );
+        }
+    }
+
+    #[test]
+    fn screen_ordinal_forms_still_win() {
+        // Ordinal grounding keeps priority over the locate grammar.
+        assert!(matches!(
+            intent("what's the 2nd button"),
+            Some(ParsedIntent::ScreenRead { ordinal: 2 })
+        ));
+        assert!(matches!(
+            intent("click the 3rd option"),
+            Some(ParsedIntent::ScreenClick { ordinal: 3 })
+        ));
+    }
+
+    #[test]
+    fn stop_speech_forms() {
+        for phrase in ["stop speaking", "stop talking", "be quiet", "shut up"] {
+            assert!(
+                matches!(intent(phrase), Some(ParsedIntent::StopSpeech)),
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_stop_stays_media_stop() {
+        // Bare "stop" belongs to MediaStop — the screen-voice grammar must
+        // not steal it.
+        assert!(
+            matches!(intent("stop"), Some(ParsedIntent::MediaStop)),
+            "bare stop must stay MediaStop"
+        );
+    }
+
+    #[test]
+    fn shut_up_is_silence_not_a_close_command() {
+        // "shut" is a close verb on this branch ("shut down", "shut X"), so
+        // "shut up" used to become CloseApp("up"). The silence grammar runs
+        // first.
+        assert!(
+            matches!(intent("shut up"), Some(ParsedIntent::StopSpeech)),
+            "shut up must be StopSpeech"
+        );
+    }
+
+    #[test]
+    fn repeat_forms() {
+        for phrase in [
+            "repeat",
+            "repeat that",
+            "say it again",
+            "say that again",
+            "what did you say",
+        ] {
+            assert!(
+                matches!(intent(phrase), Some(ParsedIntent::RepeatScreen)),
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn point_again_forms() {
+        for phrase in [
+            "point again",
+            "show it again",
+            "show me again",
+            "where was it",
+            "where was that",
+        ] {
+            assert!(
+                matches!(intent(phrase), Some(ParsedIntent::PointAgain)),
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn show_me_again_is_a_repoint_not_an_app_launch() {
+        // "show" is an open verb on this branch, so "show me again" used to
+        // become OpenApp("me again").
+        assert!(
+            matches!(intent("show me again"), Some(ParsedIntent::PointAgain)),
+            "show me again must be PointAgain"
+        );
+    }
+
+    #[test]
+    fn a_pending_confirmation_keeps_the_word_repeat() {
+        // "repeat" is the branch's re-ask slot for a spoken question
+        // (orchestrator::speak_prompt_and_hold(…, "repeat")). While a
+        // confirmation is pending, the question owns that word: the screen
+        // replay must NOT claim the turn.
+        for phrase in ["repeat", "repeat that", "say it again", "what did you say"] {
+            assert!(
+                parse_screen_voice(phrase, true).is_none(),
+                "{phrase} must belong to the pending question"
+            );
+            assert!(
+                matches!(
+                    parse_screen_voice(phrase, false).map(|r| r.intent),
+                    Some(ParsedIntent::RepeatScreen)
+                ),
+                "{phrase} must be a replay when nothing is pending"
+            );
+        }
+    }
+
+    #[test]
+    fn the_deterministic_parser_respects_a_pending_confirmation() {
+        assert!(matches!(
+            parse_deterministic_with("repeat", false).map(|r| r.intent),
+            Some(ParsedIntent::RepeatScreen)
+        ));
+        assert!(
+            parse_deterministic_with("repeat", true).is_none(),
+            "a pending confirmation must win the word 'repeat'"
+        );
+        // The other screen-voice phrases are unaffected by the flag.
+        assert!(matches!(
+            parse_deterministic_with("be quiet", true).map(|r| r.intent),
+            Some(ParsedIntent::StopSpeech)
+        ));
+        assert!(matches!(
+            parse_deterministic_with("point again", true).map(|r| r.intent),
+            Some(ParsedIntent::PointAgain)
+        ));
+    }
+
+    #[test]
+    fn the_wake_prefix_still_reaches_the_screen_voice_grammar() {
+        // "Nexus, be quiet" arrives with the wake word still in the text.
+        assert!(matches!(
+            intent("nexus be quiet"),
+            Some(ParsedIntent::StopSpeech)
+        ));
+        assert!(matches!(
+            intent("nexus point again"),
+            Some(ParsedIntent::PointAgain)
+        ));
+    }
+
+    #[test]
+    fn the_new_intents_have_nlu_labels() {
+        assert_eq!(
+            intent_to_label(&ParsedIntent::ScreenLocate {
+                target: "save button".to_string()
+            }),
+            "screen_locate"
+        );
+        assert_eq!(intent_to_label(&ParsedIntent::StopSpeech), "stop_speech");
+        assert_eq!(intent_to_label(&ParsedIntent::RepeatScreen), "repeat_screen");
+        assert_eq!(intent_to_label(&ParsedIntent::PointAgain), "point_again");
+    }
+}
 
 #[cfg(test)]
 mod wa_chat_tests {

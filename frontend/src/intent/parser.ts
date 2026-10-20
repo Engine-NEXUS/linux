@@ -48,6 +48,12 @@ export type Intent =
   | { action: "enter_ghostwriter"; contact?: string }
   | { action: "screen_click"; ordinal: number }
   | { action: "screen_read"; ordinal: number }
+  // The screen agent: locate a named target, silence, replay the last
+  // screen answer, re-show the last point. Parsed on the Rust side.
+  | { action: "screen_locate"; target: string }
+  | { action: "stop_speech" }
+  | { action: "repeat_screen" }
+  | { action: "point_again" }
   | { action: "browser_tab"; index: number }
   | { action: "browser_new_tab" }
   | { action: "browser_close_tab"; index?: number }

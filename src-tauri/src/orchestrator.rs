@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use serde::Serialize;use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::intent_parser::{parse_deterministic, ParsedIntent};
+use crate::intent_parser::{parse_deterministic_with, ParsedIntent};
 use crate::network;
 
 // ─── Types ─────────────────────────────────────────────────────────────
@@ -303,6 +303,9 @@ async fn speak_prompt_and_hold<R: Runtime>(
 ) -> Result<ProcessResult, String> {
     const CLARIFICATION_TIMEOUT_MS: u64 = 10_000;
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    // The question now owns the next reply: "repeat" is its re-ask slot, so
+    // the screen-voice replay must not claim the turn while it waits.
+    mark_clarification_pending();
     emit(
         app,
         &OrchestratorEvent::Clarify {
@@ -395,6 +398,69 @@ pub(crate) fn clear_active_request(request_id: &str) {
 /// over the user.
 pub(crate) fn has_active_request() -> bool {
     ACTIVE_REQUEST.lock().unwrap().is_some()
+}
+
+// ─── Screen agent: the last answer, the last point, the pending question ──
+//
+// Three pieces of state, all process-global and all cheap:
+//
+// * `LAST_SCREEN_ANSWER` / `LAST_SCREEN_POINT` — what the screen agent said
+//   and where it pointed. "repeat that" replays the first, "point again"
+//   re-shows the second. Both expire (a point on a screen that has since
+//   changed is worse than no point at all).
+// * `CLARIFICATION_PENDING` — NEXUS asked a question and is waiting for the
+//   answer. While that is true, the word "repeat" belongs to that question
+//   ("repeat" is the branch's re-ask slot — see `speak_prompt_and_hold`).
+
+/// The last spoken screen answer and the moment it was spoken.
+static LAST_SCREEN_ANSWER: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+
+/// The last point the screen agent showed: (x, y, label, when).
+static LAST_SCREEN_POINT: Mutex<Option<(f64, f64, String, std::time::Instant)>> = Mutex::new(None);
+
+/// How long a screen answer / point stays replayable.
+const SCREEN_ANSWER_TTL: Duration = Duration::from_secs(120);
+
+/// Pure: is a stored screen answer / point still fresh?
+fn screen_fresh(at: std::time::Instant, now: std::time::Instant) -> bool {
+    now.saturating_duration_since(at) < SCREEN_ANSWER_TTL
+}
+
+/// Remember the last screen answer and the point it showed.
+fn remember_screen_point(answer: &str, x: f64, y: f64, label: String) {
+    let now = std::time::Instant::now();
+    *LAST_SCREEN_ANSWER.lock().unwrap() = Some((answer.to_string(), now));
+    *LAST_SCREEN_POINT.lock().unwrap() = Some((x, y, label, now));
+}
+
+/// A question NEXUS asked that is still waiting for its answer.
+///
+/// The deadline is the same window the Clarify event advertises, so the
+/// flag can never outlive the question it belongs to.
+static CLARIFICATION_PENDING: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// How long a spoken question keeps the turn. Matches the Clarify event's
+/// own timeout.
+const CLARIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Mark that a question has been spoken and is waiting for its answer.
+fn mark_clarification_pending() {
+    *CLARIFICATION_PENDING.lock().unwrap() =
+        Some(std::time::Instant::now() + CLARIFICATION_TIMEOUT);
+}
+
+/// Is a spoken question still waiting for its answer?
+///
+/// The flag is CONSUMED by the read: the turn that answers the question is
+/// the last turn it owns.
+fn take_clarification_pending() -> bool {
+    let mut g = CLARIFICATION_PENDING.lock().unwrap();
+    let pending = match g.as_ref() {
+        Some(deadline) => std::time::Instant::now() < *deadline,
+        None => false,
+    };
+    *g = None;
+    pending
 }
 
 // ─── ML parsing fallback ──────────────────────────────────────────────
@@ -648,6 +714,12 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         | ParsedIntent::ScreenClick { .. }
         | ParsedIntent::GhostAction { .. }
         | ParsedIntent::ScreenRead { .. }
+        // The screen agent (locate / silence / replay / re-point) is local
+        // on every platform: no Worker round-trip, no cloud answer.
+        | ParsedIntent::ScreenLocate { .. }
+        | ParsedIntent::StopSpeech
+        | ParsedIntent::RepeatScreen
+        | ParsedIntent::PointAgain
         | ParsedIntent::BrowserTab { .. }
         | ParsedIntent::BrowserCloseTab { .. }
         | ParsedIntent::BrowserSearch { .. }
@@ -786,14 +858,20 @@ pub async fn process_transcript<R: Runtime>(
     // 1. Parse intent: deterministic (fast, <1ms) → brain (admin) → NLU → Unknown
     // The full pipeline ensures that phrases trained in BERT-Mini or classified
     // by the Qwen brain are actually used for routing, not just observed.
+    //
+    // `confirmation_pending` — NEXUS asked a question and is waiting for the
+    // answer. While that is true the word "repeat" belongs to that question
+    // (it is the branch's re-ask slot), so the screen-voice replay must not
+    // claim the turn.
+    let confirmation_pending = take_clarification_pending();
     let parse_result = if crate::ghost::session_active() {
         crate::ghost_center::parse(&transcript).map(|task| crate::intent_parser::ParseResult {
             intent: ParsedIntent::GhostAction { task },
             confidence: 1.0,
             source: "deterministic-ghost-center".to_string(),
-        }).or_else(|| parse_deterministic(&transcript))
+        }).or_else(|| parse_deterministic_with(&transcript, confirmation_pending))
     } else {
-        parse_deterministic(&transcript)
+        parse_deterministic_with(&transcript, confirmation_pending)
     };
 
     // If deterministic missed:
@@ -1080,6 +1158,21 @@ pub async fn process_transcript<R: Runtime>(
         }
         ParsedIntent::WatchScreenEmail => {
             return run_watch_screen_email(app).await;
+        }
+        // ─── The screen agent ────────────────────────────────────────
+        // Point at a named target, silence, replay the last answer, or
+        // re-show the last point. All local: no Worker round-trip.
+        ParsedIntent::ScreenLocate { target } => {
+            return run_screen_locate(app, target.clone()).await;
+        }
+        ParsedIntent::StopSpeech => {
+            return run_stop_speech(app).await;
+        }
+        ParsedIntent::RepeatScreen => {
+            return run_repeat_screen(app).await;
+        }
+        ParsedIntent::PointAgain => {
+            return run_point_again(app).await;
         }
         ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_search" => {
             let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -7264,6 +7357,304 @@ async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Resul
     Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
 }
 
+// ─── The screen agent: locate, silence, replay, re-point ──────────────────
+
+/// How long the ghost guidance pointer stays on screen (ms).
+#[cfg(not(target_os = "linux"))]
+const GHOST_POINTER_MS: u64 = 6_000;
+
+/// Show the pointer marker at a physical-pixel point.
+///
+/// Linux: the pointer module's own marker (`pointer:show`), which carries
+/// the Table-B visibility rules — an unidentified or excluded foreground
+/// window means NO marker, so the marker can never be drawn over a screen
+/// the gate would refuse to capture.
+///
+/// Windows: the ghost guidance pointer (`ghost:point`) — the marker the
+/// Windows stage already renders.
+fn show_point<R: Runtime>(app: &AppHandle<R>, x: f64, y: f64, label: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        crate::pointer::show_direct(app, x, y, label.to_string());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::ghost::point_at_target(app, x as i32, y as i32, label, GHOST_POINTER_MS);
+    }
+}
+
+/// The visible screen text as snap-able boxes, in SCREEN pixels.
+///
+/// Windows: the OS OCR engine — one rect per line, native resolution.
+/// Linux: the local RapidOCR sidecar over a FULL-RESOLUTION capture. The
+/// portal grabs the whole screen, so the boxes are already screen pixels,
+/// which is the space the vision tier reports its point in.
+#[cfg(target_os = "windows")]
+async fn screen_text_boxes() -> Vec<crate::ocr::OcrBox> {
+    crate::ocr::screen_text_boxes()
+}
+
+#[cfg(target_os = "linux")]
+async fn screen_text_boxes() -> Vec<crate::ocr::OcrBox> {
+    // A full-resolution capture of its own: the OCR boxes must live in the
+    // SAME pixel space as the vision point, and the vision tier downsamples
+    // its image, so the two cannot share it. The capture primitive carries
+    // the privacy gate.
+    //
+    // `u32::MAX` is the downscale width that means "do not downscale": the
+    // capture helpers treat `max_w` as an upper bound on the image width, so
+    // an enormous value leaves the image at the screen's own resolution —
+    // which is what puts the OCR boxes in screen pixels.
+    let shot = tokio::task::spawn_blocking(|| {
+        crate::vision::capture_plain_jpeg_base64_w(u32::MAX)
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some((b64, _w, _h)) = shot else {
+        return Vec::new();
+    };
+    use base64::Engine;
+    let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
+        return Vec::new();
+    };
+    match crate::ocr::ocr_image(&jpeg).await {
+        Ok(boxes) => crate::ocr::merge_lines(boxes),
+        Err(e) => {
+            tracing::warn!("screen locate: the OCR tier failed — {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// macOS: no OCR engine is wired up here, so there are no boxes to snap to
+/// and the vision tier's own coordinates are used unchanged — OCR snapping is
+/// simply off on macOS.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+async fn screen_text_boxes() -> Vec<crate::ocr::OcrBox> {
+    Vec::new()
+}
+
+/// How far (px) an OCR box may be from the model's point and still be
+/// considered the same target. A tenth of the screen width: far enough for a
+/// sloppy model answer, close enough that a same-named control on the other
+/// side of the screen is never mistaken for the target.
+fn ocr_snap_max_dist() -> f64 {
+    // `screen::primary_monitor_size` only exists on Windows and Linux. macOS
+    // never produces OCR boxes (`screen_text_boxes` is empty there), so a
+    // fixed standard width keeps this helper total without calling it.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let w = crate::screen::primary_monitor_size()
+        .unwrap_or((1920, 1080))
+        .0;
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let w = 1920;
+    (w as f64 * 0.1).clamp(120.0, 400.0)
+}
+
+/// Point at a named on-screen target.
+///
+/// Two tiers, in the order that costs the least:
+///
+/// 1. **The semantic tier (Linux)** — the accessibility tree already knows
+///    where the button is. Exact, free, and it never touches the screen: no
+///    capture, no model call, no quota. It is also the only tier that works
+///    on a native Wayland session, where synthetic input does not exist.
+/// 2. **The vision tier** — a capture plus a vision-model lookup. Used on
+///    Windows (there is no semantic tier there) and on Linux when the
+///    semantic tier misses (canvas UIs, Chromium skeleton trees).
+///
+/// The vision point is then snapped onto the OCR text the user meant
+/// (`ocr::snap_to_text`), so the marker lands on the word rather than on
+/// the model's guess.
+///
+/// Every capture passes the pre-capture privacy gate: on Linux the gate
+/// lives inside the capture primitive itself, and it is ALSO checked here so
+/// a refusal is SPOKEN instead of looking like "not found".
+async fn run_screen_locate<R: Runtime>(
+    app: AppHandle<R>,
+    target: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let want = target.trim().to_string();
+    if want.is_empty() {
+        return say_and_finish(&app, request_id, "Which element should I point at, sir?".into());
+    }
+
+    // ── Tier 1: the semantic tier (Linux only) ──────────────────────────
+    #[cfg(target_os = "linux")]
+    {
+        // The lookup is a BLOCKING call (an accessibility-bus round trip)
+        // inside an async function — keep it off the tokio worker threads.
+        let found = tokio::task::spawn_blocking({
+            let query = want.clone();
+            move || crate::screen::find_by_name(&query)
+        })
+        .await
+        .unwrap_or(None);
+        if let Some(el) = found {
+            let (cx, cy) = crate::live::commands::mouse::element_center(&el);
+            let label = el.name.clone();
+            show_point(&app, cx as f64, cy as f64, &label);
+            let line = format!("The {} is right there, sir.", label);
+            remember_screen_point(&line, cx as f64, cy as f64, label);
+            return say_and_finish(&app, request_id, line);
+        }
+        tracing::info!("screen locate: the semantic tier missed '{want}' — trying vision");
+    }
+
+    // ── The privacy gate, before any pixel leaves the machine ───────────
+    #[cfg(target_os = "linux")]
+    {
+        let gate_app = app.clone();
+        let gate = tokio::task::spawn_blocking(move || {
+            crate::pointer::capture_gate(&gate_app)
+        })
+        .await
+        .unwrap_or(crate::pointer::CaptureGate::UnknownForeground);
+        if !gate.allows_capture() {
+            tracing::warn!("screen locate refused: {}", gate.spoken());
+            return say_and_finish(&app, request_id, gate.spoken());
+        }
+    }
+
+    // ── Tier 2: the vision tier ─────────────────────────────────────────
+    let groq_key = crate::commands::read_groq_api_key(&app);
+    let gemini_key = crate::commands::read_api_key(&app, "gemini");
+    if groq_key.is_empty() && gemini_key.is_empty() {
+        return say_and_finish(
+            &app,
+            request_id,
+            "I can't look at the screen, sir — no vision key is configured.".into(),
+        );
+    }
+    let usage_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let order = crate::vision::read_vision_provider(&usage_dir);
+    let located = crate::vision::locate_with_fallback(
+        &want,
+        &groq_key,
+        &gemini_key,
+        &order,
+        &usage_dir,
+        &crate::vision::shared_vision_client(),
+    )
+    .await;
+
+    let Some(found) = located else {
+        return say_and_finish(
+            &app,
+            request_id,
+            format!("I couldn't find the {} on screen, sir.", want),
+        );
+    };
+
+    let (mut px, mut py) = (found.el.x as f64, found.el.y as f64);
+    // Snap the model's point onto the text the user meant. The OCR tier is
+    // local and free; a failure just leaves the model's own coordinates.
+    let boxes = screen_text_boxes().await;
+    if let Some((sx, sy)) =
+        crate::ocr::snap_to_text(&boxes, &want, px, py, ocr_snap_max_dist())
+    {
+        tracing::info!("screen locate: OCR snapped ({px:.0}, {py:.0}) → ({sx:.0}, {sy:.0})");
+        px = sx;
+        py = sy;
+    }
+    show_point(&app, px, py, &want);
+    let line = format!("The {} is right there, sir.", want);
+    remember_screen_point(&line, px, py, want.clone());
+    say_and_finish(&app, request_id, line)
+}
+
+/// Stop speaking immediately: cut the audio and hide the pointer marker.
+///
+/// NO farewell line — the user asked for silence.
+///
+/// **Ownership.** The same words ("stop talking", "be quiet") are also
+/// wake-level barge phrases (`wakeword_oww::BARGE_STOP_EXTRA`): a barge
+/// candidate whose transcript is exactly a stop phrase cuts the speech
+/// INSIDE the wake loop and never becomes a command. That path owns the
+/// barge case. This intent owns the other case — a typed or out-of-turn
+/// transcript that reaches the orchestrator as a command (and a wake turn
+/// whose transcript arrived with the wake word in it). The two never both
+/// fire: the barge path consumes the transcript, so the orchestrator never
+/// sees it.
+async fn run_stop_speech<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    // The Rust-side playback.
+    let _ = crate::tts::stop_tts();
+    // The frontend's audio and the pending caption.
+    let _ = app.emit("tts:stop", ());
+    // A pointer that is still on screen is noise once the user asked for
+    // silence.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = crate::pointer::emit_hide(&app);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::ghost::point_off(&app);
+    }
+    // Close the turn without speaking: the frontend resets the orb on
+    // `done`, and a spoken line would defeat the whole point.
+    emit(
+        &app,
+        &OrchestratorEvent::Done {
+            request_id: request_id.clone(),
+        },
+    );
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Replay the last screen answer (the spoken line + a fresh marker when the
+/// point is still valid). Fully local: no capture, no model call, no quota.
+async fn run_repeat_screen<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let now = std::time::Instant::now();
+    let answer = LAST_SCREEN_ANSWER
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|(_, at)| screen_fresh(*at, now));
+    let Some((text, _)) = answer else {
+        return say_and_finish(
+            &app,
+            request_id,
+            "I haven't pointed at anything yet, sir.".into(),
+        );
+    };
+    // A still-valid point comes back with the answer; a stale one is left
+    // alone (the screen has moved on since).
+    let point = LAST_SCREEN_POINT.lock().unwrap().clone();
+    if let Some((x, y, label, at)) = point {
+        if screen_fresh(at, now) {
+            show_point(&app, x, y, &label);
+        }
+    }
+    say_and_finish(&app, request_id, text)
+}
+
+/// Re-show the last point without a new capture (no quota, no model call).
+async fn run_point_again<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let now = std::time::Instant::now();
+    let point = LAST_SCREEN_POINT.lock().unwrap().clone();
+    match point {
+        Some((x, y, label, at)) if screen_fresh(at, now) => {
+            show_point(&app, x, y, &label);
+            say_and_finish(&app, request_id, "Here it is again, sir.".into())
+        }
+        _ => say_and_finish(
+            &app,
+            request_id,
+            "Point at what, sir? Ask me where something is first.".into(),
+        ),
+    }
+}
+
 /// Open the NEXUS Command Hub sidebar.
 async fn run_open_settings<R: Runtime>(
     app: AppHandle<R>,
@@ -8635,7 +9026,44 @@ mod tests {
         assert!(!stop(true, ""));
     }
 
+    #[test]
+    fn a_screen_answer_expires_after_the_ttl() {
+        use super::screen_fresh;
+        use super::SCREEN_ANSWER_TTL;
+        let now = std::time::Instant::now();
+        // Fresh now, fresh just under the TTL, stale just over it.
+        assert!(screen_fresh(now, now));
+        assert!(screen_fresh(now - SCREEN_ANSWER_TTL + std::time::Duration::from_secs(1), now));
+        assert!(!screen_fresh(now - SCREEN_ANSWER_TTL - std::time::Duration::from_secs(1), now));
+        // A timestamp from the future (the clock moved) is treated as
+        // "just now" rather than panicking — saturating arithmetic.
+        assert!(screen_fresh(now + std::time::Duration::from_secs(1), now));
+    }
+
+    #[test]
+    fn a_spoken_question_owns_exactly_one_reply() {
+        use super::{mark_clarification_pending, take_clarification_pending};
+        // Nothing pending to start with.
+        assert!(!take_clarification_pending());
+        mark_clarification_pending();
+        // The next turn sees the pending question…
+        assert!(take_clarification_pending());
+        // …and it is consumed: the question does not keep the turn.
+        assert!(!take_clarification_pending());
+    }
+
+    #[test]
+    fn the_screen_agent_intents_route_locally() {
+        use super::route_intent;
+        use crate::intent_parser::ParsedIntent::*;
+        assert_eq!(route_intent(&ScreenLocate { target: "save".into() }), Subsystem::LocalCommand);
+        assert_eq!(route_intent(&StopSpeech), Subsystem::LocalCommand);
+        assert_eq!(route_intent(&RepeatScreen), Subsystem::LocalCommand);
+        assert_eq!(route_intent(&PointAgain), Subsystem::LocalCommand);
+    }
+
     use super::*;
+    use crate::intent_parser::parse_deterministic;
 
     #[test]
     fn test_protocol_version_is_1() {
