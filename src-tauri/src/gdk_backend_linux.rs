@@ -13,6 +13,12 @@
 //! "Overlay window: degraded"). The decision has to be made where it covers
 //! EVERY launch: `main()`, before Tauri initialises GTK.
 //!
+//! For that to work the launchers must not decide it either: `nexus.mjs`
+//! and the installed `.desktop` entries used to export `GDK_BACKEND=x11`
+//! unconditionally, which would point GTK at an X server that may not exist
+//! and stop the app from starting. They no longer set it — this module is
+//! the single source of truth.
+//!
 //! The choice is deliberate, never silent:
 //! - an explicit `GDK_BACKEND` from the user always wins;
 //! - `DISPLAY` must be set (XWayland is available) before X11 is forced —

@@ -520,7 +520,7 @@ fn execute(kind: PowerKind) -> Result<(), String> {
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn execute(_kind: PowerKind) -> Result<(), String> {
-    Err("power commands are only supported on Windows and Linux".into())
+    Err("power commands are only supported on Windows".into())
 }
 
 #[cfg(test)]

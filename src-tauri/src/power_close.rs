@@ -82,6 +82,13 @@ pub trait CloseEnv {
     fn list(&self) -> Vec<Win>;
     fn close(&self, w: &Win);
     fn sleep_ms(&self, ms: u64);
+    /// How often the window set is re-checked while waiting for the closes
+    /// to land. Windows polls fast (a `EnumWindows` call is free); Linux
+    /// spawns `wmctrl`, so it polls slower. The default keeps the Windows
+    /// behaviour exactly as it was.
+    fn poll_ms(&self) -> u64 {
+        POLL_MS
+    }
 }
 
 const POLL_MS: u64 = 250;
@@ -92,10 +99,11 @@ pub fn close_all(env: &dyn CloseEnv, wait_ms: u64) -> Outcome {
     for w in &targets {
         env.close(w);
     }
+    let poll = env.poll_ms();
     let mut waited = 0u64;
     loop {
-        env.sleep_ms(POLL_MS);
-        waited += POLL_MS;
+        env.sleep_ms(poll);
+        waited += poll;
         let now = env.list();
         let remaining: Vec<&Win> = targets.iter().filter(|t| now.iter().any(|n| n.hwnd == t.hwnd)).collect();
         if remaining.is_empty() {
@@ -256,6 +264,9 @@ pub mod linux {
         "I can't close your other apps on Wayland, sir — anything unsaved will be lost.";
     pub const NO_TOOL_REASON: &str =
         "I can't ask your other apps to close, sir — anything unsaved will be lost.";
+    /// `wmctrl` is installed but cannot talk to the X server.
+    pub const TOOL_BROKEN_REASON: &str =
+        "I can't reach your window manager, sir — anything unsaved will be lost.";
 
     /// The pure decision (unit-tested): can we ask the other apps to close?
     ///
@@ -275,20 +286,80 @@ pub mod linux {
     /// Can this session ask the other apps to close? `Err(reason)` when it
     /// cannot — the caller speaks the reason and only continues on the
     /// user's confirmation.
-    pub fn can_close_apps() -> Result<(), &'static str> {
+    ///
+    /// This is a real probe, not a "is the binary installed" check: `wmctrl`
+    /// can be present while the X server is unreachable, and then it closes
+    /// nothing at all. That must read as "cannot", never as "nothing open".
+    pub fn can_close_apps() -> Result<(), String> {
         match strategy(crate::session::is_wayland(), wmctrl::installed()) {
-            Strategy::Wmctrl => Ok(()),
-            Strategy::Wayland => Err(WAYLAND_REASON),
-            Strategy::NoTool => Err(NO_TOOL_REASON),
+            Strategy::Wmctrl => match wmctrl::list() {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("{TOOL_BROKEN_REASON} ({e})")),
+            },
+            Strategy::Wayland => Err(WAYLAND_REASON.to_string()),
+            Strategy::NoTool => Err(NO_TOOL_REASON.to_string()),
         }
     }
 
+    /// The result of the Linux close step.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum CloseResult {
+        /// Everything that was asked to close has closed.
+        AllClosed { closed: usize },
+        /// Some windows are still open (usually a "save your work?" prompt).
+        Refused { closed: usize, still_open: Vec<String> },
+        /// This session cannot ask the other apps to close at all (native
+        /// Wayland, or no `wmctrl`) — nothing was closed.
+        CannotClose { reason: String },
+        /// The tool that can close windows is not working — nothing was
+        /// closed and we must say so instead of reporting a clean shutdown.
+        ToolFailed { reason: String },
+    }
+
+    /// What NEXUS says when the other apps could not be closed at all.
+    pub fn cannot_close_line() -> String {
+        "I couldn't close your other apps, sir.".to_string()
+    }
+
+    /// What NEXUS says when the window tool itself failed, so we cannot even
+    /// tell whether the apps closed.
+    pub fn tool_failed_line() -> String {
+        "I couldn't check your other apps, sir.".to_string()
+    }
+
     /// The X11 windows `wmctrl` can see, as the closer sees them.
-    pub struct LinuxEnv;
+    ///
+    /// `last_error` remembers a failed listing: an empty window list and a
+    /// broken `wmctrl` look the same from the outside, and the difference is
+    /// the difference between "nothing was open" and "we closed nothing".
+    pub struct LinuxEnv {
+        last_error: std::cell::RefCell<Option<String>>,
+    }
+
+    impl LinuxEnv {
+        pub fn new() -> Self {
+            Self { last_error: std::cell::RefCell::new(None) }
+        }
+
+        /// The last listing failure, if the last listing failed.
+        pub fn last_error(&self) -> Option<String> {
+            self.last_error.borrow().clone()
+        }
+    }
 
     impl CloseEnv for LinuxEnv {
         fn list(&self) -> Vec<Win> {
-            wmctrl::list()
+            let windows = match wmctrl::list() {
+                Ok(w) => {
+                    *self.last_error.borrow_mut() = None;
+                    w
+                }
+                Err(e) => {
+                    *self.last_error.borrow_mut() = Some(e);
+                    return vec![];
+                }
+            };
+            windows
                 .into_iter()
                 .filter_map(|w| {
                     let title = w.title.trim();
@@ -320,6 +391,42 @@ pub mod linux {
 
         fn sleep_ms(&self, ms: u64) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+
+        /// Every poll on Linux spawns a `wmctrl` process, so it polls far
+        /// less often than the (free) Windows `EnumWindows` poll.
+        fn poll_ms(&self) -> u64 {
+            1_000
+        }
+    }
+
+    /// Close everything, and report honestly what happened.
+    ///
+    /// A `wmctrl` that cannot list the windows is a FAILURE, not an empty
+    /// room: the caller must not power the machine off while believing the
+    /// apps were closed.
+    pub fn close_everything(wait_ms: u64) -> CloseResult {
+        match strategy(crate::session::is_wayland(), wmctrl::installed()) {
+            // Native Wayland: no client may ask another application to close.
+            Strategy::Wayland => {
+                return CloseResult::CannotClose { reason: WAYLAND_REASON.to_string() }
+            }
+            // No `wmctrl`: there is no way to ask an X11 window to close.
+            Strategy::NoTool => {
+                return CloseResult::CannotClose { reason: NO_TOOL_REASON.to_string() }
+            }
+            Strategy::Wmctrl => {}
+        }
+        let env = LinuxEnv::new();
+        let outcome = super::close_all(&env, wait_ms);
+        if let Some(reason) = env.last_error() {
+            return CloseResult::ToolFailed {
+                reason: format!("{TOOL_BROKEN_REASON} ({reason})"),
+            };
+        }
+        match outcome {
+            super::Outcome::AllClosed { closed } => CloseResult::AllClosed { closed },
+            super::Outcome::Refused { closed, still_open } => CloseResult::Refused { closed, still_open },
         }
     }
 
@@ -371,17 +478,29 @@ pub mod linux {
         }
 
         /// The windows the X server knows about.
-        pub fn list() -> Vec<Window> {
-            let Ok(out) = std::process::Command::new("wmctrl").arg("-l").output() else {
-                return vec![];
-            };
+        ///
+        /// A failure is an ERROR, never an empty list: "wmctrl could not talk
+        /// to the X server" and "no windows are open" must not look the same,
+        /// or the shutdown would power the machine off while believing the
+        /// apps had been closed.
+        pub fn list() -> Result<Vec<Window>, String> {
+            let out = std::process::Command::new("wmctrl")
+                .arg("-l")
+                .output()
+                .map_err(|e| format!("wmctrl could not be started: {e}"))?;
             if !out.status.success() {
-                return vec![];
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let detail = stderr.lines().next().unwrap_or("").trim();
+                return Err(if detail.is_empty() {
+                    format!("wmctrl -l exited with {}", out.status)
+                } else {
+                    format!("wmctrl -l failed: {detail}")
+                });
             }
-            String::from_utf8_lossy(&out.stdout)
+            Ok(String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter_map(parse_line)
-                .collect()
+                .collect())
         }
 
         /// Ask one window to close (what its X button does).
@@ -459,6 +578,43 @@ mod linux_tests {
         assert_eq!(parse_window_id("0x03a00003"), Some(0x03a00003));
         assert_eq!(parse_window_id("0X03A00003"), Some(0x03a00003));
         assert_eq!(parse_window_id("not-an-id"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_broken_or_missing_wmctrl_is_an_error_not_an_empty_room() {
+        // Either wmctrl is missing (spawn error) or it cannot reach the X
+        // server (non-zero exit). Both must be ERRORS: an empty list would
+        // tell the shutdown that nothing was open, and the machine would
+        // power off with the user's work still running.
+        match wmctrl::list() {
+            Ok(windows) => {
+                assert!(windows.iter().all(|w| w.id.starts_with("0x")), "{windows:?}");
+            }
+            Err(e) => {
+                assert!(!e.trim().is_empty(), "the error must say what went wrong");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_poll_is_slower_than_the_windows_one() {
+        // Every Linux poll spawns a `wmctrl` process, so it must not poll
+        // as often as the (free) Windows EnumWindows poll.
+        use super::CloseEnv;
+        let env = super::linux::LinuxEnv::new();
+        assert!(env.poll_ms() >= 500, "the Linux poll must not be the 250 ms default");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_broken_window_tool_is_announced_not_hidden() {
+        let line = super::linux::tool_failed_line();
+        assert!(!line.trim().is_empty(), "the failure must be spoken, not hidden");
+        assert!(line.contains("couldn't check"), "{line}");
+        let line = super::linux::cannot_close_line();
+        assert!(line.contains("couldn't close"), "{line}");
     }
 }
 
