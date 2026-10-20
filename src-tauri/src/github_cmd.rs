@@ -18,9 +18,9 @@
 //!                 └── execute()               → octocrab API call
 //! ```
 //!
-//! Token: fetched from the Worker via `GET /oauth/github-token?user_id=...`
-//! and cached in memory for the session. The client_secret never leaves
-//! the Worker.
+//! Token: fetched from the Worker with the device bearer credential and the
+//! temporary legacy `user_id` migration parameter, then cached in memory for
+//! the session. The client_secret never leaves the Worker.
 //!
 //! Why octocrab: 16.8M downloads, actively maintained, typed semantic API
 //! + low-level HTTP fallback for endpoints not yet covered.
@@ -61,26 +61,29 @@ async fn fetch_token_from_worker(
     worker_url: &str,
     user_id: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "{}/oauth/github-token?user_id={}",
-        worker_url.trim_end_matches('/'),
-        user_id
-    );
-    tracing::info!("github_cmd: fetching token from worker: {}", url);
+    let url = crate::worker_proxy::build_worker_url(
+        worker_url,
+        "/oauth/github-token",
+        None,
+        Some(user_id),
+    )?;
+    tracing::info!("github_cmd: fetching token from Worker");
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
-    let resp = client
-        .get(&url)
+    let resp = crate::worker_proxy::apply_to(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("token fetch: {e}"))?;
 
     if resp.status() == 404 {
         return Err("GitHub not connected. Please connect GitHub in the NEXUS setup.".into());
+    }
+    if resp.status() == 401 || resp.status() == 403 {
+        return Err(crate::worker_proxy::DEVICE_NOT_AUTHORIZED_MESSAGE.into());
     }
     if !resp.status().is_success() {
         let status = resp.status();

@@ -13,6 +13,7 @@ use tauri_plugin_autostart::ManagerExt;
 // Phase D: voice_profile is now available for both wakeword-oww and wakeword-sherpa
 use crate::voice_profile;
 use crate::app_registry;
+pub use crate::worker_proxy::worker_request;
 
 // ─── Pending sidebar content ───────────────────────────────────────
 //

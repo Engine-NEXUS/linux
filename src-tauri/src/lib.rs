@@ -102,6 +102,7 @@ pub(crate) mod router;
 pub(crate) mod mcp_client;
 pub(crate) mod auth_vault;
 pub(crate) mod identity_state;
+pub mod worker_proxy;
 pub(crate) mod ghostwriter;
 pub mod screen;
 pub mod shortcuts;
@@ -1081,6 +1082,7 @@ pub fn run() {
             commands::close_setup_window,
             commands::save_server_config,
             commands::get_server_config,
+            worker_proxy::worker_request,
             commands::claim_profile,
             commands::get_identity_status,
             commands::refresh_identity_status,
