@@ -245,29 +245,32 @@ _FOCUS_STATE_JS = (
     "JSON.stringify({focus: document.hasFocus(), vis: document.visibilityState})"
 )
 
+# How long a single focus probe may take.
+#
+# A background tab the browser has FROZEN (Chrome/Brave Memory Saver freezes
+# background tabs after a few minutes) does not run renderer tasks, so
+# `Runtime.evaluate` never answers and the CDP client would wait its full
+# 30 s per target. The probe is therefore given a hard deadline: a frozen or
+# vanished target is reported as "unknown", and the request continues.
+FOCUS_PROBE_TIMEOUT = float(os.environ.get("CDP_FOCUS_TIMEOUT", "1.5"))
 
-async def _page_focus_state(t: dict) -> dict:
-    """`hasFocus()` / `visibilityState` for one page target.
+_FOCUS_UNKNOWN = {"focus": False, "visible": False, "known": False}
 
-    A BACKGROUND tab of the same browser answers hasFocus() = false and
-    visibilityState = "hidden"; the tab the user is looking at answers
-    true / "visible". That is how the foreground target is found.
-    """
-    try:
-        async with Cdp(t["webSocketDebuggerUrl"]) as c:
-            r = await c.call(
-                "Runtime.evaluate",
-                {"expression": _FOCUS_STATE_JS, "returnByValue": True},
-            )
-    except CdpError:
-        return {"focus": False, "visible": False, "known": False}
+
+async def _page_focus_state_inner(t: dict) -> dict:
+    """The probe itself — see `_page_focus_state` for the contract."""
+    async with Cdp(t["webSocketDebuggerUrl"]) as c:
+        r = await c.call(
+            "Runtime.evaluate",
+            {"expression": _FOCUS_STATE_JS, "returnByValue": True},
+        )
     v = (r.get("result") or {}).get("value")
     try:
         d = json.loads(v) if isinstance(v, str) else (v or {})
     except (TypeError, ValueError):
-        return {"focus": False, "visible": False, "known": False}
+        return dict(_FOCUS_UNKNOWN)
     if not isinstance(d, dict):
-        return {"focus": False, "visible": False, "known": False}
+        return dict(_FOCUS_UNKNOWN)
     return {
         "focus": bool(d.get("focus")),
         "visible": d.get("vis") == "visible",
@@ -275,7 +278,61 @@ async def _page_focus_state(t: dict) -> dict:
     }
 
 
-async def chromium_foreground_target(port: int, want: str | None) -> dict | None:
+async def _page_focus_state(t: dict) -> dict:
+    """`hasFocus()` / `visibilityState` for one page target.
+
+    A BACKGROUND tab of the same browser answers hasFocus() = false and
+    visibilityState = "hidden"; the tab the user is looking at answers
+    true / "visible". That is how the foreground target is found.
+
+    The probe is BOUNDED and never fails the request: a frozen target, a
+    vanished target or a refused connection are all "I cannot tell", which
+    is reported as `known: False`.
+    """
+    try:
+        return await asyncio.wait_for(
+            _page_focus_state_inner(t), timeout=FOCUS_PROBE_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        # A frozen background tab: it will never answer.
+        return dict(_FOCUS_UNKNOWN)
+    except CdpError:
+        # The target is gone, or the transport failed.
+        return dict(_FOCUS_UNKNOWN)
+    except Exception as e:  # noqa: BLE001 — a connect failure is "unknown" too
+        # `websockets.connect` raises OSError / WebSocketException, neither of
+        # which is a CdpError. Those must not escape and turn the intended
+        # 409 into a 500.
+        log.warning("focus probe failed for %s: %s", t.get("url", ""), e)
+        return dict(_FOCUS_UNKNOWN)
+
+
+def narrow_by_title(candidates: list[dict], expected_title: str) -> list[dict]:
+    """The candidates whose title matches the expected foreground window.
+
+    A cheap, RENDERER-FREE filter: it is applied BEFORE any focus probe, so
+    a browser with N tabs costs one probe instead of N — and a background
+    tab the user is not looking at is never probed at all.
+
+    An empty expected title keeps every candidate (the caller then relies on
+    the focus probe alone).
+    """
+    want = (expected_title or "").strip().lower()
+    if not want:
+        return list(candidates)
+    out: list[dict] = []
+    for t in candidates:
+        title = str(t.get("title") or "").strip().lower()
+        if not title:
+            continue
+        if want == title or want in title or title in want:
+            out.append(t)
+    return out
+
+
+async def chromium_foreground_target(
+    port: int, want: str | None, expected_title: str = ""
+) -> dict | None:
     """The page target the user is actually looking at.
 
     The accessibility tree is per TARGET, so the identity check and the
@@ -298,10 +355,16 @@ async def chromium_foreground_target(port: int, want: str | None) -> dict | None
             if want in (t.get("url") or "") or want == (t.get("title") or ""):
                 return t
         return None
+    # Narrow FIRST by the expected foreground title — a cheap, renderer-free
+    # filter — so a browser with N tabs costs one probe, not N, and a frozen
+    # background tab is never probed at all.
+    candidates = narrow_by_title(pages, expected_title)
+    if not candidates:
+        return None
     states: list[dict] = []
-    for t in pages:
+    for t in candidates:
         states.append(await _page_focus_state(t))
-    return choose_focused_target(pages, states)
+    return choose_focused_target(candidates, states)
 
 
 async def direct_ax(port: int, target: str | None) -> list[dict]:
@@ -475,7 +538,7 @@ _MAIN_FOCUS = """
   const { webContents } = process.mainModule.require('electron');
   const w = webContents.getAllWebContents().find(x => x.id === __WCID__);
   if (!w) return null;
-  const raw = await w.webContents.executeJavaScript(
+  const raw = await w.executeJavaScript(
     "JSON.stringify({focus: document.hasFocus(), vis: document.visibilityState})"
   );
   return JSON.parse(raw);
@@ -560,21 +623,35 @@ class Electron:
 
         A renderer of a background window answers hasFocus() = false; the
         window the user is looking at answers true / "visible".
+
+        Bounded, like the Chromium probe: a renderer that does not answer
+        (a frozen window, a vanished target, a refused connection) is
+        "I cannot tell", never a stall and never a failed request.
         """
         body = _MAIN_FOCUS.replace("__WCID__", str(wcid))
         try:
-            v = await self.main_eval(body)
+            v = await asyncio.wait_for(
+                self.main_eval(body), timeout=FOCUS_PROBE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            return dict(_FOCUS_UNKNOWN)
         except CdpError:
-            return {"focus": False, "visible": False, "known": False}
+            # The renderer is gone, or the transport failed.
+            return dict(_FOCUS_UNKNOWN)
+        except Exception as e:  # noqa: BLE001 — a connect failure is "unknown" too
+            log.warning("renderer focus probe failed for %s: %s", wcid, e)
+            return dict(_FOCUS_UNKNOWN)
         if not isinstance(v, dict):
-            return {"focus": False, "visible": False, "known": False}
+            return dict(_FOCUS_UNKNOWN)
         return {
             "focus": bool(v.get("focus")),
             "visible": v.get("vis") == "visible",
             "known": True,
         }
 
-    async def foreground_renderer(self, want: str | None) -> dict | None:
+    async def foreground_renderer(
+        self, want: str | None, expected_title: str = ""
+    ) -> dict | None:
         """The renderer the user is actually looking at.
 
         The accessibility tree is per RENDERER, so the identity check and
@@ -594,10 +671,15 @@ class Electron:
                 if want in (r.get("url") or "") or want == (r.get("title") or ""):
                     return r
             return None
+        # Narrow FIRST by the expected foreground title — a cheap,
+        # renderer-free filter — so only the plausible window is probed.
+        candidates = narrow_by_title(windows, expected_title)
+        if not candidates:
+            return None
         states: list[dict] = []
-        for r in windows:
+        for r in candidates:
             states.append(await self.renderer_focus(r["id"]))
-        return choose_focused_target(windows, states)
+        return choose_focused_target(candidates, states)
 
     async def ax(self, wcid: int) -> list[dict]:
         """Fetch the accessibility tree, warming it if the first read is partial.
@@ -814,6 +896,12 @@ async def chromium_identity(port: int, target: str | None) -> dict:
                     out["app"] = out["product"].split("/")[0].lower()
         except CdpError:
             pass
+        except Exception as e:  # noqa: BLE001 — a connect failure is "unknown"
+            # `websockets.connect` raises OSError / WebSocketException, and
+            # neither is a CdpError. An endpoint we cannot even connect to
+            # cannot prove anything, and it must not turn the intended 409
+            # into a 500.
+            log.warning("could not read the browser identity on port %s: %s", port, e)
     return out
 
 
@@ -829,6 +917,8 @@ async def electron_identity(port: int, target: str | None) -> dict:
             out["app"] = str(await e.app_name() or "")
     except CdpError:
         pass
+    except Exception as e:  # noqa: BLE001 — a connect failure is "unknown"
+        log.warning("could not read the electron identity on port %s: %s", port, e)
     return out
 
 
@@ -844,7 +934,9 @@ async def endpoint_identity(port: int, kind: str, target: str | None) -> dict:
     return await chromium_identity(port, target)
 
 
-async def foreground_target(port: int, kind: str, want: str | None) -> dict | None:
+async def foreground_target(
+    port: int, kind: str, want: str | None, expected_title: str = ""
+) -> dict | None:
     """The target the user is actually looking at, on this endpoint.
 
     None means "unknown" — zero or more than one candidate qualifies. The
@@ -853,10 +945,13 @@ async def foreground_target(port: int, kind: str, want: str | None) -> dict | No
     if kind == "electron":
         try:
             async with Electron(port) as e:
-                return await e.foreground_renderer(want)
+                return await e.foreground_renderer(want, expected_title)
         except CdpError:
             return None
-    return await chromium_foreground_target(port, want)
+        except Exception as e:  # noqa: BLE001 — a connect failure is "unknown"
+            log.warning("electron foreground lookup failed on port %s: %s", port, e)
+            return None
+    return await chromium_foreground_target(port, want, expected_title)
 
 
 # ── Matching ─────────────────────────────────────────────────────────────────
@@ -1058,9 +1153,16 @@ async def activate(request: Request) -> JSONResponse:
     identity: dict = {}
     for p in ports:
         kind = "chromium" if p in r["direct_ports"] else "electron"
-        ident = await endpoint_identity(p, kind, target)
-        # The foreground target on this endpoint, resolved FIRST.
-        fg = await foreground_target(p, kind, target)
+        try:
+            ident = await endpoint_identity(p, kind, target)
+            # The foreground target on this endpoint, resolved FIRST.
+            fg = await foreground_target(p, kind, target, expected_title)
+        except Exception as e:  # noqa: BLE001 — one bad endpoint is not fatal
+            # A port that cannot be reached or driven is skipped, not fatal:
+            # the next port may be the one in front, and if none is, the
+            # refusal below is the answer.
+            log.warning("skipping endpoint on port %s: %s", p, e)
+            continue
         # The application AND the target must prove they are the ones in
         # front. `endpoint_matches` is the whole rule.
         if not endpoint_matches(expected_app, expected_title, ident, fg):
@@ -1094,6 +1196,9 @@ async def activate(request: Request) -> JSONResponse:
                 out = await e.click(wcid, name, role)
     except CdpError as e:
         return _err(str(e), 502)
+    except Exception as e:  # noqa: BLE001 — a transport failure is a 502, not a 500
+        log.warning("activate failed on port %s: %s", p, e)
+        return _err(f"the debug endpoint could not be driven: {e}", 502)
 
     if not out.get("ok"):
         return _err(out.get("error", "click failed"), 404, name=name,

@@ -117,6 +117,90 @@ def test_a_double_dash_inside_a_path_is_not_an_argument():
     ) == "brave"
 
 
+# ── The focus probe ────────────────────────────────────────────────────────
+
+
+def test_the_focus_script_calls_execute_javascript_on_the_webcontents():
+    # `w` IS the WebContents (it comes from getAllWebContents().find), so it
+    # has no `.webContents` property. Calling `w.webContents.executeJavaScript`
+    # threw a TypeError, the probe reported "unknown", and EVERY Electron
+    # endpoint was refused — the CDP tier is the only tier that can act
+    # inside an Electron app, so the feature was dead.
+    script = cdp_server._MAIN_FOCUS
+    assert "w.executeJavaScript(" in script
+    assert "w.webContents.executeJavaScript(" not in script
+    # The renderer is looked up the same way the other bodies do it.
+    assert "webContents.getAllWebContents().find(x => x.id === __WCID__)" in script
+
+
+def test_a_target_that_never_answers_is_unknown_and_does_not_stall(monkeypatch):
+    # A background tab the browser has FROZEN does not run renderer tasks, so
+    # the probe never answers. It must be bounded and reported as unknown.
+    import asyncio
+
+    class _NeverAnswers:
+        def __init__(self, ws_url):
+            self.ws_url = ws_url
+
+        async def __aenter__(self):
+            await asyncio.sleep(3600)  # a frozen renderer
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+    monkeypatch.setattr(cdp_server, "Cdp", _NeverAnswers)
+    monkeypatch.setattr(cdp_server, "FOCUS_PROBE_TIMEOUT", 0.05)
+
+    state = asyncio.run(
+        cdp_server._page_focus_state({"webSocketDebuggerUrl": "ws://x"})
+    )
+    assert state["known"] is False
+    assert state["focus"] is False
+
+
+def test_a_refused_connection_is_unknown_not_a_server_error(monkeypatch):
+    # `websockets.connect` raises OSError, which is not a CdpError: it used to
+    # escape the probe and turn the intended 409 into an HTTP 500.
+    import asyncio
+
+    class _Refuses:
+        def __init__(self, ws_url):
+            self.ws_url = ws_url
+
+        async def __aenter__(self):
+            raise OSError("connection refused")
+
+        async def __aexit__(self, *exc):
+            return None
+
+    monkeypatch.setattr(cdp_server, "Cdp", _Refuses)
+
+    state = asyncio.run(
+        cdp_server._page_focus_state({"webSocketDebuggerUrl": "ws://x"})
+    )
+    assert state["known"] is False
+
+
+def test_candidates_are_narrowed_by_the_expected_title_before_any_probe():
+    # The narrowing is renderer-free and happens FIRST, so a browser with N
+    # tabs costs one probe instead of N — and a frozen background tab is never
+    # probed at all.
+    tabs = [
+        {"title": "GitHub - Notifications", "url": "https://github.com/notifications"},
+        {"title": "GitHub", "url": "https://github.com/"},
+    ]
+    narrowed = cdp_server.narrow_by_title(tabs, "GitHub — Brave")
+    assert len(narrowed) == 1
+    assert narrowed[0]["title"] == "GitHub"
+
+
+def test_an_empty_expected_title_keeps_every_candidate():
+    tabs = [{"title": "A"}, {"title": "B"}]
+    assert len(cdp_server.narrow_by_title(tabs, "")) == 2
+    assert len(cdp_server.narrow_by_title(tabs, "   ")) == 2
+
+
 # ── The whole decision, with a fake endpoint ────────────────────────────────
 
 
