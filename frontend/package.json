@@ -13,7 +13,7 @@
     "@mediapipe/tasks-vision": "0.10.21",
     "@number-flow/react": "^0.6.2",
     "@radix-ui/react-slider": "^1.4.7",
-    "@ricky0123/vad-web": "^0.0.30",
+    "@ricky0123/vad-web": "0.0.31",
     "@tauri-apps/api": "^2.1.0",
     "@tauri-apps/plugin-shell": "^2.0.0",
     "@xyflow/react": "^12.11.5",

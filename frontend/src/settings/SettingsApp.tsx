@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { stopTts, type VoicePersona, ICONIC_PERSONAS } from "../audio/ttsPlayer";
 import { initThemeSync, applyThemeMode, resolveThemeMode } from "../sidebar/theme";
+import { globalHotkeyHint, globalHotkeyLabel } from "../platform";
 import { McpServersPanel } from "../settings-sidebar/McpServersPanel";
 
 /**
@@ -50,7 +51,7 @@ interface Settings {
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: true,
-  hotkey: "Ctrl+Space",
+  hotkey: globalHotkeyLabel(),
   autoHideDelay: 8,
   wakeWordEnabled: true,
   wakePhrase: "NEXUS",
@@ -275,7 +276,7 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Global hotkey</span>
-            <span className="nx-row-hint">Press this key combo to wake NEXUS</span>
+            <span className="nx-row-hint">{globalHotkeyHint("Press this key combo to wake NEXUS")}</span>
           </div>
           <input className="nx-input" value={settings.hotkey} onChange={(e) => update("hotkey", e.target.value)} />
         </div>

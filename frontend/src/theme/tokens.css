@@ -77,6 +77,25 @@
   --nx-warning-bg: rgba(217, 119, 6, 0.08);
 }
 
+/* ── Linux (WebKitGTK) ───────────────────────────────────────────────
+   The Linux build has no native window blur and no backdrop capture,
+   and WebKitGTK's backdrop-filter cannot composite against a
+   transparent window. The translucent "liquid glass" surfaces would
+   therefore show the desktop straight through the window, so paint them
+   opaque on Linux instead (the Linux branch used opaque tokens for the
+   same reason). body[data-platform] is set by platform.ts in each
+   window's entry point. */
+body[data-platform="linux"] {
+  --nx-bg:          #0c0c10;
+  --nx-bg-card:     #1a1a20;
+  --nx-bg-elevated: #22222a;
+}
+:root[data-theme="light"] body[data-platform="linux"] {
+  --nx-bg:          #f4f4f8;
+  --nx-bg-card:     #ffffff;
+  --nx-bg-elevated: #ffffff;
+}
+
 /* Theme-independent tokens (shared by dark and light) */
 :root {
   /* ── Typography ─────────────────────────────────────────────── */

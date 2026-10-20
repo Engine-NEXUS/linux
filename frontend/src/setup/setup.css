@@ -20,6 +20,17 @@ html, body, #root {
   overflow: hidden;
 }
 
+/* ── Linux (WebKitGTK) ───────────────────────────────────────────────
+   The Linux build has no native window blur and no backdrop capture,
+   and WebKitGTK's backdrop-filter cannot composite against a
+   transparent window. The wizard card is therefore painted opaque
+   (see theme/tokens.css) and the area around it gets the same
+   backdrop, so the window never shows an unpainted surface.
+   body[data-platform] is set by platform.ts (setup/main.tsx). */
+body[data-platform="linux"] {
+  background: var(--nx-bg) !important;
+}
+
 /* ── Layout ──────────────────────────────────────────────────── */
 .setup-root {
   max-width: 480px;
