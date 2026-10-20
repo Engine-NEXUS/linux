@@ -1091,26 +1091,11 @@ pub(crate) mod engine {
                 );
             }
 
-            // ─── WebRTC VAD pre-gate check (v4) ───────────────────
-            // Energy gate already passed. WebRTC VAD provides voice activity hints
-            // but fails-open so soft initial consonants (/n/ in "NEXUS") are never chopped.
-            {
-                let mut voiced = 0usize;
-                for sub in chunk.chunks(320) {
-                    if sub.len() < 320 {
-                        continue;
-                    }
-                    let pcm: Vec<i16> = sub
-                        .iter()
-                        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
-                        .collect();
-                    if self.webrtc_vad.0.is_voice_segment(&pcm).unwrap_or(true) {
-                        voiced += 1;
-                    }
-                }
-                // Fail-open: do not discard onset frames; let the neural classifier decide
-                let _ = voiced;
-            }
+            // A WebRTC VAD pass used to run here on every chunk, but its result was
+            // discarded (fail-open, so soft onsets like the /n/ of "NEXUS" are never
+            // chopped) — pure per-chunk cost. A real VAD gate in front of the
+            // embedding model would cut idle CPU in noisy rooms, but it must be
+            // validated against the wake-word recall set first.
 
             // AGC: amplify quiet speech to target RMS with calibrated pre-gain
             // This ensures consistent model input across different laptop microphones.

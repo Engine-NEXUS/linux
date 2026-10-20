@@ -61,7 +61,20 @@ Two paths, chosen at start-up (`gdk_backend_linux::choose`, pure and tested):
 
 cpal 0.15's ALSA enumeration opens every listed PCM in both directions and keeps it open while the `Device` lives. Holding `hw:sofhdadsp,6` — PipeWire's own microphone source — kept PipeWire from opening it, so capture through `default`/`pulse` stalled in `snd_pcm_prepare`, and the probe fell back to the raw device, taking the mic away from every other app. Probing now keeps only names and reopens one device at a time (`reopen_input_device`); every probe also runs behind a hard deadline on its own thread. Result: `default` accepted in 2.2 s.
 
-## 5. Known limits
+## 5. Performance (wake word)
+
+The wake word runs ONNX inference (tract: mel → embedding → classifier) on every 80 ms chunk above the silence gate, which a laptop room passes most of the time. Measured on the target:
+
+| Build | Per chunk | Idle CPU (Rust process) |
+|---|---|---|
+| dev, unoptimised dependencies (before) | 88–113 ms avg, 521 ms max — behind real time | 119% |
+| dev, inference crates at opt-level 3 (now) | 8.4 ms avg, 13.7 ms max | 19% |
+
+- `Cargo.toml`: `[profile.dev.package.<crate>]` and `[profile.release.package.<crate>]` set `opt-level = 3` for `tract-*`, `ndarray`, `matrixmultiply`, `rustfft`, `num-complex`, `webrtc-vad`. In release this is 6–10% faster per chunk than the profile's `"s"` (standalone benchmark with the app's models, six interleaved runs: best 12.0 vs 13.4 ms, median 14.5 vs 15.4 ms); the rest of the binary stays size-optimised; the Windows installer profile `dist` is unchanged. Optimising *every* dependency in dev forces a full-tree rebuild that exhausts a 7.6 GB machine — keep it scoped.
+- A WebRTC VAD pass whose result was discarded ran on every chunk; removed.
+- Deferred: a VAD gate before the embedding model (would cut idle CPU in noisy rooms) — it must first be checked against the wake-word recall set.
+
+## 6. Known limits
 
 - Multi-monitor: the stage and the drawer are pinned to the first monitor.
 - Panel attribution is exact on COSMIC only; elsewhere the orb may keep a small gap from an edge without a panel.

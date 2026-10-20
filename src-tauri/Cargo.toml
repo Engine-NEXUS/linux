@@ -249,6 +249,34 @@ opt-level = 0
 debug = true
 incremental = true   # fast recompile on small changes
 
+# The inference and DSP crates are optimised even in dev builds. The wake
+# word runs ONNX inference (tract) on every 80 ms microphone chunk; unoptimised
+# it took 88-113 ms per chunk (measured), so the engine fell behind real time
+# and pegged a core. Only these crates: optimising every dependency forces a
+# heavy rebuild of the whole tree.
+[profile.dev.package.tract-core]
+opt-level = 3
+[profile.dev.package.tract-linalg]
+opt-level = 3
+[profile.dev.package.tract-data]
+opt-level = 3
+[profile.dev.package.tract-hir]
+opt-level = 3
+[profile.dev.package.tract-onnx]
+opt-level = 3
+[profile.dev.package.tract-nnef]
+opt-level = 3
+[profile.dev.package.ndarray]
+opt-level = 3
+[profile.dev.package.matrixmultiply]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
+[profile.dev.package.num-complex]
+opt-level = 3
+[profile.dev.package.webrtc-vad]
+opt-level = 3
+
 [profile.release]
 # "s" = optimize for binary size (10-30% faster to compile than "z",
 # almost identical output size in practice for this codebase).
@@ -261,6 +289,34 @@ lto = "thin"
 codegen-units = 4
 strip = true
 panic = "abort"
+
+# The wake word runs ONNX inference on every 80 ms microphone chunk. For the
+# inference and DSP crates speed beats size: measured with the app's own
+# models (tract 0.23.4, mel -> embedding -> classifier), opt-level 3 was 6-10%
+# faster per chunk than "s" (best 12.0 vs 13.4 ms, median 14.5 vs 15.4 ms).
+# Everything else stays size-optimised.
+[profile.release.package.tract-core]
+opt-level = 3
+[profile.release.package.tract-linalg]
+opt-level = 3
+[profile.release.package.tract-data]
+opt-level = 3
+[profile.release.package.tract-hir]
+opt-level = 3
+[profile.release.package.tract-onnx]
+opt-level = 3
+[profile.release.package.tract-nnef]
+opt-level = 3
+[profile.release.package.ndarray]
+opt-level = 3
+[profile.release.package.matrixmultiply]
+opt-level = 3
+[profile.release.package.rustfft]
+opt-level = 3
+[profile.release.package.num-complex]
+opt-level = 3
+[profile.release.package.webrtc-vad]
+opt-level = 3
 
 # [profile.dist] — use this ONLY when building the final installer
 # (pwsh ./scripts/build.ps1 already passes the right flags).
