@@ -821,6 +821,9 @@ pub fn init_window_cache() {
 pub enum FocusOutcome {
     /// A window was found and actually raised.
     Focused,
+    /// The app's process is running, but its window is not mapped yet. The
+    /// caller should wait for the window — not start a second copy.
+    WindowNotReady,
     /// The app IS running, but this session cannot raise its window. The
     /// string is a speakable explanation for the user.
     RunningCannotFocus(String),
@@ -844,6 +847,17 @@ pub fn focus_existing(entry: &AppEntry) -> FocusOutcome {
     // here and every repeat of "open notepad" launched ANOTHER one (7 windows in a live test).
     // A live scan costs a few ms and is the only honest answer to "is it already open?".
     refresh_window_cache();
+    // Linux first: the window that belongs to the app's running process is
+    // the exact match. The title rarely equals the `.desktop` name ("Text
+    // Editor" vs "gedit", "Firefox" vs "Mozilla Firefox"), so the PID is
+    // what identifies the window.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(outcome) = linux_focus_running_window(entry) {
+            return outcome;
+        }
+    }
+
     {
         let cache = WINDOW_CACHE.read();
         let own_pid = std::process::id();
@@ -875,24 +889,78 @@ pub fn focus_existing(entry: &AppEntry) -> FocusOutcome {
         }
     }
 
-    // No window matched. On Linux the app can still be running with no
-    // visible window — native Wayland has no window list at all — so ask the
-    // process table before claiming "not running" and launching a second copy.
+    // The app's process is up, but no window of it could be raised.
     #[cfg(target_os = "linux")]
     {
-        if let Some(exec) = entry_exec(entry) {
-            let names = app_registry_linux::exec_process_names(exec);
-            if app_registry_linux::any_process_running(&names) {
-                // EWMH can still raise the window by title on X11.
-                if app_registry_linux::focus_by_title(&entry.display_name) {
-                    return FocusOutcome::Focused;
-                }
-                return FocusOutcome::RunningCannotFocus(cannot_focus_reason());
-            }
+        if let Some(outcome) = linux_window_not_ready(entry) {
+            return outcome;
         }
     }
 
     FocusOutcome::NotRunning
+}
+
+/// Linux: the pids of the app's running processes.
+///
+/// `None` when the app is not running. The process table is read once per
+/// call and the snapshot is reused for a short while, so the wait loop
+/// behind "open X" does not scan /proc a dozen times in a row.
+#[cfg(target_os = "linux")]
+fn linux_running_pids(entry: &AppEntry) -> Option<Vec<u32>> {
+    let exec = entry_exec(entry)?;
+    let names = app_registry_linux::exec_process_names(exec);
+    if names.is_empty() {
+        return None;
+    }
+    let pids = app_registry_linux::process_snapshot().pids_for(&names);
+    if pids.is_empty() {
+        None
+    } else {
+        Some(pids)
+    }
+}
+
+/// Linux: raise the window that belongs to the app's running process.
+///
+/// `None` when the app is not running, or when it runs without a window of
+/// its own — the caller then tries the name-based paths.
+#[cfg(target_os = "linux")]
+fn linux_focus_running_window(entry: &AppEntry) -> Option<FocusOutcome> {
+    let pids = linux_running_pids(entry)?;
+    let windows: Vec<(u64, u32)> = WINDOW_CACHE
+        .read()
+        .iter()
+        .map(|w| (w.hwnd.max(0) as u64, w.pid))
+        .collect();
+    let id = app_registry_linux::window_id_for_pids(&windows, &pids)?;
+    if focus_window(id as isize) {
+        return Some(FocusOutcome::Focused);
+    }
+    let blocked = app_registry_linux::focus_blocked_reason_now();
+    Some(app_registry_linux::focus_outcome(
+        app_registry_linux::FocusFacts::WindowFound,
+        false,
+        blocked.as_deref(),
+    ))
+}
+
+/// Linux: the app runs, but no window of it could be raised.
+///
+/// The window may simply not be mapped yet — the app is still starting — so
+/// the caller waits for it instead of starting a second copy.
+#[cfg(target_os = "linux")]
+fn linux_window_not_ready(entry: &AppEntry) -> Option<FocusOutcome> {
+    let _pids = linux_running_pids(entry)?;
+    // Last chance to raise it: the display-name regex.
+    if app_registry_linux::focus_by_title(&entry.display_name) {
+        return Some(FocusOutcome::Focused);
+    }
+    let blocked = app_registry_linux::focus_blocked_reason_now();
+    Some(app_registry_linux::focus_outcome(
+        app_registry_linux::FocusFacts::ProcessOnly,
+        false,
+        blocked.as_deref(),
+    ))
 }
 
 /// The command line of a desktop entry, if that is how the app is launched.
@@ -907,10 +975,9 @@ fn entry_exec(entry: &AppEntry) -> Option<&str> {
 /// Speakable explanation for why an already-running app could not be raised.
 #[cfg(target_os = "linux")]
 fn cannot_focus_reason() -> String {
-    match app_registry_linux::focus_blocked_reason_now() {
-        Some(reason) => format!("I can't bring it to the front, sir — {reason}."),
-        None => "I couldn't raise that window, sir.".to_string(),
-    }
+    app_registry_linux::blocked_reason_message(
+        app_registry_linux::focus_blocked_reason_now().as_deref(),
+    )
 }
 
 /// Speakable explanation for why an already-running app could not be raised.

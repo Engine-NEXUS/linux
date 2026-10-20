@@ -30,10 +30,14 @@
 //!      Wayland, so the process table answers that instead — which is what
 //!      stops a second copy of an already-open app from being launched.
 
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use super::{build_search_names, AppEntry, LaunchMethod};
+use super::{build_search_names, AppEntry, FocusOutcome, LaunchMethod};
 
 // ─── Desktop entry model ───────────────────────────────────────────────────
 
@@ -922,35 +926,146 @@ pub fn exec_process_names(exec: &str) -> Vec<String> {
     vec![base.to_lowercase()]
 }
 
-/// True when a process with one of those names is running.
-pub fn any_process_running(names: &[String]) -> bool {
-    if names.is_empty() {
-        return false;
+/// A snapshot of the process table.
+///
+/// The focus path asks "is this app running?" on every attempt, and a full
+/// /proc scan is not free — the snapshot is read once and the answer is then
+/// read off it.
+#[derive(Debug, Clone)]
+pub struct ProcessSnapshot {
+    /// (lowercase process name, pid) for every running process.
+    processes: Vec<(String, u32)>,
+}
+
+impl ProcessSnapshot {
+    /// Read the whole process table once.
+    pub fn capture() -> Self {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            false,
+            ProcessRefreshKind::new(),
+        );
+        let processes = sys
+            .processes()
+            .iter()
+            .map(|(pid, process)| {
+                (
+                    process.name().to_string_lossy().to_lowercase(),
+                    pid.as_u32(),
+                )
+            })
+            .collect();
+        ProcessSnapshot { processes }
     }
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        false,
-        ProcessRefreshKind::new(),
-    );
-    for process in sys.processes().values() {
-        let name = process.name().to_string_lossy().to_lowercase();
-        for candidate in names {
-            if candidate.is_empty() {
-                continue;
-            }
-            if name == candidate.as_str() {
-                return true;
-            }
-            // A longer candidate may match a decorated process name
-            // ("firefox" inside "firefox-esr").
-            if candidate.len() >= 4 && name.contains(candidate.as_str()) {
-                return true;
+
+    /// The pids of the processes whose name matches one of `names`.
+    pub fn pids_for(&self, names: &[String]) -> Vec<u32> {
+        if names.is_empty() {
+            return Vec::new();
+        }
+        let mut pids: Vec<u32> = Vec::new();
+        for (process_name, pid) in &self.processes {
+            for candidate in names {
+                if candidate.is_empty() {
+                    continue;
+                }
+                // A longer candidate may match a decorated process name
+                // ("firefox" inside "firefox-esr").
+                if process_name == candidate.as_str()
+                    || (candidate.len() >= 4 && process_name.contains(candidate.as_str()))
+                {
+                    pids.push(*pid);
+                    break;
+                }
             }
         }
+        pids
     }
-    false
+}
+
+/// How long a process-table snapshot is reused before it is read again.
+const PROCESS_SNAPSHOT_TTL: Duration = Duration::from_millis(1000);
+
+/// The process table, read at most once per [`PROCESS_SNAPSHOT_TTL`].
+///
+/// The wait loop behind "open X" polls every 250 ms, so without this the
+/// whole table would be scanned a dozen times in a row.
+pub fn process_snapshot() -> Arc<ProcessSnapshot> {
+    static CACHE: Lazy<Mutex<Option<(Instant, Arc<ProcessSnapshot>)>>> =
+        Lazy::new(|| Mutex::new(None));
+
+    let mut cache = CACHE.lock();
+    if let Some((at, snapshot)) = cache.as_ref() {
+        if at.elapsed() < PROCESS_SNAPSHOT_TTL {
+            return Arc::clone(snapshot);
+        }
+    }
+    let snapshot = Arc::new(ProcessSnapshot::capture());
+    *cache = Some((Instant::now(), Arc::clone(&snapshot)));
+    snapshot
+}
+
+/// The EWMH id of the window owned by one of `pids`.
+///
+/// `windows` is the `wmctrl -l -p` output as (id, pid) pairs. The pid is
+/// exact while the title is not: a `.desktop` entry is called "Text Editor"
+/// while its window is called "gedit", and "Firefox" while its window is
+/// "Mozilla Firefox".
+pub fn window_id_for_pids(windows: &[(u64, u32)], pids: &[u32]) -> Option<u64> {
+    if pids.is_empty() {
+        return None;
+    }
+    windows
+        .iter()
+        .find(|(_, pid)| pids.contains(pid))
+        .map(|(id, _)| *id)
+}
+
+/// What a focus attempt found, before anything was raised.
+///
+/// "Not running" is not a fact here: that case needs no mapping — it is
+/// simply [`FocusOutcome::NotRunning`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusFacts {
+    /// A window belonging to the app was found.
+    WindowFound,
+    /// The app's process is running, but no window was found for it.
+    ProcessOnly,
+}
+
+/// Map the facts of a focus attempt onto the outcome the caller sees.
+///
+/// Pure (unit-tested). `raised` says whether the window actually came up;
+/// `blocked` is the speakable reason when this session cannot raise another
+/// app's window at all (native Wayland has no EWMH).
+pub fn focus_outcome(facts: FocusFacts, raised: bool, blocked: Option<&str>) -> FocusOutcome {
+    match facts {
+        FocusFacts::WindowFound => {
+            if raised {
+                FocusOutcome::Focused
+            } else {
+                FocusOutcome::RunningCannotFocus(blocked_reason_message(blocked))
+            }
+        }
+        FocusFacts::ProcessOnly => match blocked {
+            Some(reason) => {
+                FocusOutcome::RunningCannotFocus(blocked_reason_message(Some(reason)))
+            }
+            // The app is up but its window is not mapped yet: the caller
+            // waits for it instead of starting a second copy.
+            None => FocusOutcome::WindowNotReady,
+        },
+    }
+}
+
+/// The spoken sentence for "this session cannot raise another app's window".
+pub fn blocked_reason_message(blocked: Option<&str>) -> String {
+    match blocked {
+        Some(reason) => format!("I can't bring it to the front, sir — {reason}."),
+        None => "I couldn't raise that window, sir.".to_string(),
+    }
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -1201,5 +1316,93 @@ mod tests {
         assert!(!is_wmctrl_pattern_safe("Rock & Roll"));
         assert!(!is_wmctrl_pattern_safe(""));
         assert!(!is_wmctrl_pattern_safe("   "));
+    }
+
+    // ── PID → window ───────────────────────────────────────────────────────
+
+    #[test]
+    fn the_window_of_the_running_process_is_found_by_pid() {
+        // The window title is useless here: the .desktop entry says
+        // "Text Editor" while the window says "gedit". The pid is exact.
+        let windows = [(0x03e0_0006u64, 21337u32), (0x03e0_0007, 21338)];
+        assert_eq!(window_id_for_pids(&windows, &[21338]), Some(0x03e0_0007));
+        assert_eq!(window_id_for_pids(&windows, &[21337]), Some(0x03e0_0006));
+        // Several pids: the first window of any of them wins.
+        assert_eq!(
+            window_id_for_pids(&windows, &[999, 21337]),
+            Some(0x03e0_0006)
+        );
+    }
+
+    #[test]
+    fn a_process_without_a_window_has_no_window_id() {
+        let windows = [(0x03e0_0006u64, 21337u32)];
+        assert_eq!(window_id_for_pids(&windows, &[4242]), None);
+        assert_eq!(window_id_for_pids(&windows, &[]), None);
+        assert_eq!(window_id_for_pids(&[], &[21337]), None);
+    }
+
+    // ── Outcome mapping ────────────────────────────────────────────────────
+
+    #[test]
+    fn a_raised_window_is_focused() {
+        assert_eq!(
+            focus_outcome(FocusFacts::WindowFound, true, None),
+            FocusOutcome::Focused
+        );
+    }
+
+    #[test]
+    fn a_window_that_could_not_be_raised_says_why() {
+        let outcome = focus_outcome(
+            FocusFacts::WindowFound,
+            false,
+            Some("wmctrl is not installed, so I cannot raise windows here"),
+        );
+        match outcome {
+            FocusOutcome::RunningCannotFocus(reason) => {
+                assert!(reason.contains("wmctrl"), "reason was: {reason}");
+            }
+            other => panic!("expected RunningCannotFocus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_running_process_without_a_window_waits_for_it() {
+        // X11 with wmctrl: the window may simply not be mapped yet, so the
+        // caller waits instead of starting a second copy.
+        assert_eq!(
+            focus_outcome(FocusFacts::ProcessOnly, false, None),
+            FocusOutcome::WindowNotReady
+        );
+    }
+
+    #[test]
+    fn a_running_process_on_wayland_is_refused_with_a_reason() {
+        // Native Wayland: nothing can raise the window, now or later.
+        let outcome = focus_outcome(
+            FocusFacts::ProcessOnly,
+            false,
+            Some("this is a native Wayland session"),
+        );
+        match outcome {
+            FocusOutcome::RunningCannotFocus(reason) => {
+                assert!(reason.contains("Wayland"), "reason was: {reason}");
+            }
+            other => panic!("expected RunningCannotFocus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_mapping_never_claims_the_app_is_not_running() {
+        // "Not running" needs no mapping: it is simply NotRunning.
+        assert_ne!(
+            focus_outcome(FocusFacts::ProcessOnly, false, None),
+            FocusOutcome::NotRunning
+        );
+        assert_ne!(
+            focus_outcome(FocusFacts::WindowFound, true, None),
+            FocusOutcome::NotRunning
+        );
     }
 }

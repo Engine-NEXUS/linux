@@ -872,7 +872,8 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
         // while nothing can raise its window. Saying "not running" there
         // would launch a second copy of an app the user already has open;
         // saying "Ok sir" would be a lie. So the reason is spoken instead.
-        match app_registry::focus_existing(&entry) {
+        let focus = app_registry::focus_existing(&entry);
+        match &focus {
             app_registry::FocusOutcome::Focused => {
                 app_registry::record_usage(target);
                 return Ok(CommandResult {
@@ -888,9 +889,12 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
                 );
                 return Ok(CommandResult {
                     success: false,
-                    message: reason,
+                    message: reason.to_string(),
                 });
             }
+            // The app's process is up but its window is not mapped yet: wait
+            // for it below rather than starting a second copy.
+            app_registry::FocusOutcome::WindowNotReady => {}
             app_registry::FocusOutcome::NotRunning => {}
         }
 
@@ -911,6 +915,8 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
                             message: reason,
                         });
                     }
+                    // Still starting up: keep waiting for the window.
+                    app_registry::FocusOutcome::WindowNotReady => {}
                     app_registry::FocusOutcome::NotRunning => {}
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
@@ -918,6 +924,19 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
             return Ok(CommandResult {
                 success: true,
                 message: "Ok sir.".to_string(),
+            });
+        }
+
+        // The app is running but has no window to raise (a tray app, or one
+        // whose window has not been mapped). Say what is going on instead of
+        // starting a second copy of it.
+        if matches!(&focus, app_registry::FocusOutcome::WindowNotReady) {
+            return Ok(CommandResult {
+                success: false,
+                message: format!(
+                    "{} is running, sir, but its window isn't showing.",
+                    entry.display_name
+                ),
             });
         }
 
@@ -1041,22 +1060,33 @@ fn check_running_and_focus(target: &str, display_name: &str) -> Option<CommandRe
                     // The app *is* running, but "is running" is not "is focused".
                     // Spawning `wmctrl` and discarding the Result claimed success
                     // for an action that on native Wayland does nothing, because
-                    // EWMH is absent there. Now we wait and report the truth, and
-                    // fall back to `None` so the caller launches a fresh instance
-                    // rather than reporting a focus that never happened.
+                    // EWMH is absent there.
                     let focused = crate::app_registry::focus_by_title(display_name);
-                    return if focused {
-                        Some(CommandResult {
+                    if focused {
+                        return Some(CommandResult {
                             success: true,
                             message: format!("{} is already open, sir.", display_name),
-                        })
-                    } else {
-                        tracing::debug!(
-                            "focus of already-running {:?} failed; falling through to launch",
-                            display_name
-                        );
-                        None
-                    };
+                        });
+                    }
+                    // This session cannot raise another app's window at all.
+                    // Say so instead of falling through: the caller would
+                    // launch a SECOND copy of an app that is already running
+                    // (the "7 Notepad windows" regression).
+                    if let Some(reason) =
+                        crate::live::commands::window::focus_unavailable_reason()
+                    {
+                        return Some(CommandResult {
+                            success: false,
+                            message: format!("I can't bring it to the front, sir — {reason}."),
+                        });
+                    }
+                    // X11 with wmctrl: the app runs but no window carries that
+                    // title, so a fresh instance is the right answer here.
+                    tracing::debug!(
+                        "focus of already-running {:?} failed; falling through to launch",
+                        display_name
+                    );
+                    return None;
                 }
                 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
                 {

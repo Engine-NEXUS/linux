@@ -43,21 +43,33 @@ The whole Linux platform layer, declared from the parent module
 * **Focus** — `wmctrl -i -r … -b remove,hidden` restores, `wmctrl -i -a` then
   activates. On native Wayland there is no EWMH, so the call fails honestly
   instead of pretending.
+* **Which window?** The window title rarely equals the `.desktop` name
+  ("Text Editor" vs "gedit", "Firefox" vs "Mozilla Firefox"), so the window
+  of the app is located by the **PID** the `wmctrl -l -p` output carries and
+  raised with `wmctrl -i -a <id>`. The display-name regex is only the last
+  fallback.
 * **"Is it already running?"** — the process table answers this where the
-  window list does not exist (Wayland). Shells, interpreters and terminal
-  emulators are excluded on purpose: running them again *is* how the user
-  asks for a new window.
+  window list does not exist (Wayland). The table is read **once per
+  attempt** and the snapshot is reused for a second, so the wait loop behind
+  "open X" does not scan `/proc` a dozen times in a row. Shells, interpreters
+  and terminal emulators are excluded on purpose: running them again *is* how
+  the user asks for a new window.
 
 ### `src-tauri/src/app_registry.rs`
 
 * `focus_window` now returns whether the window was actually raised. The
   Windows branch is unchanged apart from the trailing `true`; macOS was never
   reaching it (its window cache is always empty) and now reports `false`.
-* New `FocusOutcome { Focused, RunningCannotFocus(String), NotRunning }` and
-  `focus_existing()`, replacing `try_focus_existing() -> bool`. The tri-state
-  is what lets the caller say *"I can't bring it to the front, sir — this is a
-  native Wayland session"* instead of launching a second copy of an app the
-  user already has open.
+* New `FocusOutcome { Focused, WindowNotReady, RunningCannotFocus(String),
+  NotRunning }` and `focus_existing()`, replacing `try_focus_existing() ->
+  bool`. The tri-state is what lets the caller say *"I can't bring it to the
+  front, sir — this is a native Wayland session"* instead of launching a
+  second copy of an app the user already has open. `WindowNotReady` is the
+  third state the wait loop needs: the app's **process** is up but its
+  **window** is not mapped yet, so the caller keeps waiting instead of
+  answering "cannot focus".
+* On Linux the window of the running process is located by PID and raised by
+  id; the display-name regex is only the fallback.
 * New `focus_by_title()` (Linux), the EWMH title form the legacy resolver
   needs.
 * The Linux window cache now uses the fixed wmctrl parser.
@@ -69,10 +81,15 @@ The whole Linux platform layer, declared from the parent module
 
 ### `src-tauri/src/command_executor.rs` (small, outside the owned area)
 
-* `resolve_and_open_app` uses the tri-state: `RunningCannotFocus` is spoken
-  and **no second copy is launched**; `NotRunning` still launches.
+* `resolve_and_open_app` uses the outcome: `RunningCannotFocus` is spoken and
+  **no second copy is launched**; `WindowNotReady` waits (and, if the app was
+  not launched recently, says "X is running, sir, but its window isn't
+  showing" instead of starting a duplicate); `NotRunning` still launches.
 * The Linux branch of `check_running_and_focus` used to spawn `wmctrl` and
-  throw the result away while claiming success. It now waits for the truth.
+  throw the result away while claiming success — and on returning `None` it
+  made the caller launch a **second copy** of an app that was already running
+  (the "7 Notepad windows" regression). It now waits for the truth, and when
+  the session cannot raise windows at all it returns the spoken reason.
 * The Linux legacy `.desktop` grep now goes through the real scanner, so the
   filters apply to it too.
 
