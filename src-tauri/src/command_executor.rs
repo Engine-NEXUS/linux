@@ -922,26 +922,76 @@ pub(crate) fn resolve_and_open_app(target: &str) -> Result<CommandResult, String
         );
 
         // PRIORITY 1: Focus existing window if app is already running
-        if app_registry::try_focus_existing(&entry) {
-            app_registry::record_usage(target);
-            return Ok(CommandResult {
-                success: true,
-                message: "Ok sir.".to_string(),
-            });
+        //
+        // The tri-state matters: on native Wayland the app may be running
+        // while nothing can raise its window. Saying "not running" there
+        // would launch a second copy of an app the user already has open;
+        // saying "Ok sir" would be a lie. So the reason is spoken instead.
+        let focus = app_registry::focus_existing(&entry);
+        match &focus {
+            app_registry::FocusOutcome::Focused => {
+                app_registry::record_usage(target);
+                return Ok(CommandResult {
+                    success: true,
+                    message: "Ok sir.".to_string(),
+                });
+            }
+            app_registry::FocusOutcome::RunningCannotFocus(reason) => {
+                tracing::info!(
+                    "registry hit: '{}' is running but cannot be focused: {}",
+                    entry.display_name,
+                    reason
+                );
+                return Ok(CommandResult {
+                    success: false,
+                    message: reason.to_string(),
+                });
+            }
+            // The app's process is up but its window is not mapped yet: wait
+            // for it below rather than starting a second copy.
+            app_registry::FocusOutcome::WindowNotReady => {}
+            app_registry::FocusOutcome::NotRunning => {}
         }
 
         // A launch a moment ago that has not shown its window yet: wait for it, never start a second
         // copy (repeating "open notepad" used to open one window per repeat).
         if app_registry::recently_launched(&entry) {
             for _ in 0..16 {
-                if app_registry::try_focus_existing(&entry) {
-                    break;
+                match app_registry::focus_existing(&entry) {
+                    app_registry::FocusOutcome::Focused => {
+                        return Ok(CommandResult {
+                            success: true,
+                            message: "Ok sir.".to_string(),
+                        });
+                    }
+                    app_registry::FocusOutcome::RunningCannotFocus(reason) => {
+                        return Ok(CommandResult {
+                            success: false,
+                            message: reason,
+                        });
+                    }
+                    // Still starting up: keep waiting for the window.
+                    app_registry::FocusOutcome::WindowNotReady => {}
+                    app_registry::FocusOutcome::NotRunning => {}
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
             return Ok(CommandResult {
                 success: true,
                 message: "Ok sir.".to_string(),
+            });
+        }
+
+        // The app is running but has no window to raise (a tray app, or one
+        // whose window has not been mapped). Say what is going on instead of
+        // starting a second copy of it.
+        if matches!(&focus, app_registry::FocusOutcome::WindowNotReady) {
+            return Ok(CommandResult {
+                success: false,
+                message: format!(
+                    "{} is running, sir, but its window isn't showing.",
+                    entry.display_name
+                ),
             });
         }
 
@@ -1062,11 +1112,39 @@ fn check_running_and_focus(target: &str, display_name: &str) -> Option<CommandRe
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    let _ = Command::new("wmctrl").args(["-a", display_name]).spawn();
-                    return Some(CommandResult {
-                        success: true,
-                        message: format!("{} is already open, sir.", display_name),
-                    });
+                    use crate::app_registry::app_registry_linux::{
+                        legacy_focus_action, LegacyFocusAction,
+                    };
+
+                    // The app *is* running, but "is running" is not "is focused".
+                    // Spawning `wmctrl` and discarding the Result claimed success
+                    // for an action that on native Wayland does nothing, because
+                    // EWMH is absent there.
+                    //
+                    // The decision is pure (`legacy_focus_action`) so it can be
+                    // unit-tested: a blocked session must never end in
+                    // "launch a copy" — that started a SECOND GIMP.
+                    let focused = crate::app_registry::focus_by_title(display_name);
+                    let blocked = crate::live::commands::window::focus_unavailable_reason();
+                    return match legacy_focus_action(focused, blocked.as_deref()) {
+                        LegacyFocusAction::AlreadyOpen => Some(CommandResult {
+                            success: true,
+                            message: format!("{} is already open, sir.", display_name),
+                        }),
+                        LegacyFocusAction::CannotFocus(message) => Some(CommandResult {
+                            success: false,
+                            message,
+                        }),
+                        LegacyFocusAction::LaunchCopy => {
+                            // X11 with wmctrl: the app runs but no window carries
+                            // that title, so a fresh instance is the right answer.
+                            tracing::debug!(
+                                "focus of already-running {:?} failed; falling through to launch",
+                                display_name
+                            );
+                            None
+                        }
+                    };
                 }
                 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
                 {
@@ -1497,40 +1575,10 @@ fn check_installed_linux(target: &str, display_name: &str) -> Option<CommandResu
 
 #[cfg(target_os = "linux")]
 fn find_desktop_entry(name: &str) -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let dirs = [
-        "/usr/share/applications",
-        "/usr/local/share/applications",
-        &format!("{}/.local/share/applications", home),
-    ];
-
-    let name_lower = name.to_lowercase();
-    let name_no_spaces = name_lower.replace(' ', "-");
-
-    for dir in &dirs {
-        let path = std::path::Path::new(dir);
-        if !path.exists() { continue; }
-        if let Ok(entries) = std::fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_lowercase();
-                if fname.contains(&name_lower) || fname.contains(&name_no_spaces) {
-                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                        for line in content.lines() {
-                            if let Some(exec) = line.strip_prefix("Exec=") {
-                                let clean = exec
-                                    .split_whitespace()
-                                    .filter(|w| !w.starts_with('%'))
-                                    .collect::<Vec<_>>()
-                                    .join(" ");
-                                return Some(clean);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
+    // The desktop-entry filters (Hidden, NoDisplay, OnlyShowIn, NotShowIn,
+    // TryExec) apply here too. The raw file-name grep this replaces could
+    // launch an entry that is not meant for this desktop at all.
+    crate::app_registry::app_registry_linux::find_desktop_exec(name)
 }
 
 // ─── Tier 3: URL fallback ──────────────────────────────────────────────────

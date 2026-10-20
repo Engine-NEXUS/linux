@@ -24,6 +24,16 @@ use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Linux platform layer: `.desktop` discovery, EWMH focus and the process
+/// table. Split out so the shared registry stays platform neutral.
+///
+/// `#[path]` is needed because a child of a non-`mod.rs` module is looked up
+/// under `src/app_registry/` — the same idiom `screen.rs` uses for
+/// `screen_linux.rs`.
+#[cfg(target_os = "linux")]
+#[path = "app_registry_linux.rs"]
+pub(crate) mod app_registry_linux;
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 /// How to launch an app on each platform.
@@ -806,44 +816,209 @@ pub fn init_window_cache() {
         .ok();
 }
 
+/// What happened when NEXUS tried to focus an already-running app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FocusOutcome {
+    /// A window was found and actually raised.
+    Focused,
+    /// The app's process is running, but its window is not mapped yet. The
+    /// caller should wait for the window — not start a second copy.
+    WindowNotReady,
+    /// The app IS running, but this session cannot raise its window. The
+    /// string is a speakable explanation for the user.
+    RunningCannotFocus(String),
+    /// Nothing matching is open.
+    NotRunning,
+}
+
 /// Check if an app is already running and focus its window.
-/// Returns true if an existing window was found and focused.
-/// This is the FIRST priority in the launch flow.
-pub fn try_focus_existing(entry: &AppEntry) -> bool {
+///
+/// Returns what happened, so the caller can tell "focused" from "the process
+/// is up but its window is not mapped yet" from "running but this session
+/// cannot raise it" from "not running". This is the FIRST priority in the
+/// launch flow.
+///
+/// The distinction matters on Linux. A native Wayland session has no way to
+/// raise another app's window, but the app may still be running: reporting
+/// "not running" would make the caller launch a second copy of an app the
+/// user already has open, and reporting "focused" would be a lie the user
+/// sees as a window that never came up.
+pub fn focus_existing(entry: &AppEntry) -> FocusOutcome {
     // The cached list is refreshed only periodically, so a window opened a moment ago was invisible
     // here and every repeat of "open notepad" launched ANOTHER one (7 windows in a live test).
     // A live scan costs a few ms and is the only honest answer to "is it already open?".
     refresh_window_cache();
-    let cache = WINDOW_CACHE.read();
-    if cache.is_empty() {
-        return false;
-    }
-    let own_pid = std::process::id();
 
-    // Process identity first (most reliable), then title identity. Both
-    // require a real name — a generic word like "chat"/"assistant" never
-    // identifies a window (it focused a ChatGPT window and NEXUS's own stage).
-    for pass_title in [false, true] {
-        for w in cache.iter() {
-            if !window_matches_entry(&w.title, &w.process_name, entry, w.pid == own_pid) {
-                continue;
-            }
-            let by_process = process_identity_matches(&w.process_name, entry);
-            if by_process == pass_title {
-                continue; // handled in the other pass
-            }
-            tracing::info!(
-                "focus hit: '{}' matched window '{}' / process '{}' (pid={})",
-                entry.display_name,
-                w.title,
-                w.process_name,
-                w.pid
-            );
-            focus_window(w.hwnd);
-            return true;
+    // Linux: the process table is read ONCE per call and every question
+    // below asks that one snapshot. A cached table would report "not
+    // running" for an app that started a moment ago, and the caller would
+    // launch a second copy of it. Only desktop entries have a process to
+    // look for, so a URL entry skips the scan entirely.
+    #[cfg(target_os = "linux")]
+    let snapshot = if linux_process_names(entry).is_empty() {
+        None
+    } else {
+        Some(app_registry_linux::ProcessSnapshot::capture())
+    };
+
+    // Linux first: the window that belongs to the app's running process is
+    // the exact match. The title rarely equals the `.desktop` name ("Text
+    // Editor" vs "gedit", "Firefox" vs "Mozilla Firefox"), so the PID is
+    // what identifies the window.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(outcome) = linux_focus_running_window(entry, snapshot.as_ref()) {
+            return outcome;
         }
     }
-    false
+
+    {
+        let cache = WINDOW_CACHE.read();
+        let own_pid = std::process::id();
+
+        // Process identity first (most reliable), then title identity. Both
+        // require a real name — a generic word like "chat"/"assistant" never
+        // identifies a window (it focused a ChatGPT window and NEXUS's own stage).
+        for pass_title in [false, true] {
+            for w in cache.iter() {
+                if !window_matches_entry(&w.title, &w.process_name, entry, w.pid == own_pid) {
+                    continue;
+                }
+                let by_process = process_identity_matches(&w.process_name, entry);
+                if by_process == pass_title {
+                    continue; // handled in the other pass
+                }
+                tracing::info!(
+                    "focus hit: '{}' matched window '{}' / process '{}' (pid={})",
+                    entry.display_name,
+                    w.title,
+                    w.process_name,
+                    w.pid
+                );
+                if focus_window(w.hwnd) {
+                    return FocusOutcome::Focused;
+                }
+                return FocusOutcome::RunningCannotFocus(cannot_focus_reason());
+            }
+        }
+    }
+
+    // The app's process is up, but no window of it could be raised.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(outcome) = linux_window_not_ready(entry, snapshot.as_ref()) {
+            return outcome;
+        }
+    }
+
+    // Nothing matching is open: the caller launches the app.
+    #[cfg(target_os = "linux")]
+    let outcome = app_registry_linux::focus_outcome(
+        app_registry_linux::FocusFacts::NotRunning,
+        false,
+        None,
+    );
+    #[cfg(not(target_os = "linux"))]
+    let outcome = FocusOutcome::NotRunning;
+    outcome
+}
+
+/// Linux: the process names the app can run under.
+#[cfg(target_os = "linux")]
+fn linux_process_names(entry: &AppEntry) -> Vec<String> {
+    match entry_exec(entry) {
+        Some(exec) => app_registry_linux::exec_process_names(exec),
+        None => Vec::new(),
+    }
+}
+
+/// Linux: raise the window that belongs to the app's running process.
+///
+/// `None` when the app is not running, or when it runs without a window of
+/// its own — the caller then tries the name-based paths.
+#[cfg(target_os = "linux")]
+fn linux_focus_running_window(
+    entry: &AppEntry,
+    snapshot: Option<&app_registry_linux::ProcessSnapshot>,
+) -> Option<FocusOutcome> {
+    let names = linux_process_names(entry);
+    if names.is_empty() {
+        return None;
+    }
+    let snapshot = snapshot?;
+    // The SAME rule as "is it running?" — an app with no process of its own
+    // has no window to raise either.
+    let pids = app_registry_linux::app_pids(snapshot, &names)?;
+    let windows: Vec<(u64, u32)> = WINDOW_CACHE
+        .read()
+        .iter()
+        .map(|w| (w.hwnd.max(0) as u64, w.pid))
+        .collect();
+    let id = app_registry_linux::window_id_for_pids(&windows, &pids)?;
+    if focus_window(id as isize) {
+        return Some(FocusOutcome::Focused);
+    }
+    let blocked = app_registry_linux::focus_blocked_reason_now();
+    Some(app_registry_linux::focus_outcome(
+        app_registry_linux::FocusFacts::WindowFound,
+        false,
+        blocked.as_deref(),
+    ))
+}
+
+/// Linux: the app runs, but no window of it could be raised.
+///
+/// The window may simply not be mapped yet — the app is still starting — so
+/// the caller waits for it instead of starting a second copy.
+#[cfg(target_os = "linux")]
+fn linux_window_not_ready(
+    entry: &AppEntry,
+    snapshot: Option<&app_registry_linux::ProcessSnapshot>,
+) -> Option<FocusOutcome> {
+    let names = linux_process_names(entry);
+    if names.is_empty() {
+        return None;
+    }
+    let snapshot = snapshot?;
+    // The SAME rule as the window pick above: only the app's own process
+    // counts. A different product with a similar name ("code-insiders" for
+    // "code") must not make the app look like it is running — the caller
+    // would then wait for a window that will never come instead of
+    // launching the app the user asked for.
+    let _pids = app_registry_linux::app_pids(snapshot, &names)?;
+    // Last chance to raise it: the display-name regex.
+    if app_registry_linux::focus_by_title(&entry.display_name) {
+        return Some(FocusOutcome::Focused);
+    }
+    let blocked = app_registry_linux::focus_blocked_reason_now();
+    Some(app_registry_linux::focus_outcome(
+        app_registry_linux::FocusFacts::ProcessOnly,
+        false,
+        blocked.as_deref(),
+    ))
+}
+
+/// The command line of a desktop entry, if that is how the app is launched.
+#[cfg(target_os = "linux")]
+fn entry_exec(entry: &AppEntry) -> Option<&str> {
+    match &entry.launch {
+        LaunchMethod::DesktopExec { exec } => Some(exec.as_str()),
+        _ => None,
+    }
+}
+
+/// Speakable explanation for why an already-running app could not be raised.
+#[cfg(target_os = "linux")]
+fn cannot_focus_reason() -> String {
+    app_registry_linux::blocked_reason_message(
+        app_registry_linux::focus_blocked_reason_now().as_deref(),
+    )
+}
+
+/// Speakable explanation for why an already-running app could not be raised.
+#[cfg(not(target_os = "linux"))]
+fn cannot_focus_reason() -> String {
+    "I couldn't raise that window, sir.".to_string()
 }
 
 /// How long a launch is considered "still starting": a Store app or a slow exe can take seconds to
@@ -937,7 +1112,12 @@ pub(crate) fn window_matches_entry(
 /// Focus a window: restore if minimized, bring to foreground.
 /// Uses AttachThreadInput trick to bypass Windows' focus-stealing prevention
 /// (NEXUS is a background process, so SetForegroundWindow would normally be rejected).
-fn focus_window(hwnd_val: isize) {
+///
+/// Returns whether the window was actually raised. The previous signature
+/// made "did nothing" indistinguishable from "succeeded": `try_focus_existing`
+/// returned `true` unconditionally on every platform, so on Linux the app
+/// told the user "Ok sir" after a no-op.
+fn focus_window(hwnd_val: isize) -> bool {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::HWND;
@@ -976,12 +1156,33 @@ fn focus_window(hwnd_val: isize) {
 
             tracing::debug!("focused window hwnd={}", hwnd_val);
         }
+        true
     }
 
-    #[cfg(not(target_os = "windows"))]
+    // Linux/X11 (including XWayland): EWMH lets any client raise and focus a
+    // window, so this genuinely works — as long as `wmctrl` is installed.
+    // Native Wayland has no EWMH at all, and the call fails honestly there.
+    #[cfg(target_os = "linux")]
+    {
+        app_registry_linux::focus_window_id(hwnd_val)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = hwnd_val;
+        false
     }
+}
+
+/// Focus a window by (partial) title on Linux/X11.
+///
+/// Separate from [`focus_window`] because that one takes a native handle from
+/// the `wmctrl`-populated cache, whereas callers here only have a display name.
+/// Both go through EWMH; the title form is what `command_executor` needs when it
+/// has detected a running process but not its window id.
+#[cfg(target_os = "linux")]
+pub fn focus_by_title(partial_title: &str) -> bool {
+    app_registry_linux::focus_by_title(partial_title)
 }
 
 /// Refresh the window cache by enumerating all visible windows.
@@ -1053,30 +1254,26 @@ fn refresh_window_cache() {
 
     #[cfg(target_os = "linux")]
     {
-        // Linux: `wmctrl -a` focuses by title. We could cache `wmctrl -l` output.
-        use std::process::Command;
-        let output = Command::new("wmctrl").args(["-l", "-p"]).output();
-        if let Ok(out) = output {
-            if out.status.success() {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let mut windows: Vec<CachedWindow> = Vec::new();
-                for line in stdout.lines() {
-                    // wmctrl -l -p format: <hwnd> <desktop> <pid> <host> <title>
-                    let parts: Vec<&str> = line.splitn(5, char::is_whitespace).collect();
-                    if parts.len() < 5 { continue; }
-                    let hwnd = parts[0].parse::<isize>().unwrap_or(0);
-                    let pid = parts[2].parse::<u32>().unwrap_or(0);
-                    let title = parts[4..].join(" ");
-                    windows.push(CachedWindow {
-                        hwnd,
-                        pid,
-                        title,
-                        process_name: String::new(),
-                    });
-                }
-                *WINDOW_CACHE.write() = windows;
-            }
-        }
+        // X11 only: `wmctrl -l -p` lists the X11 windows. On native Wayland
+        // there is no such list, so the cache stays empty and the focus path
+        // falls back to the process table (which does work on Wayland).
+        //
+        // The ids in that output are hexadecimal (`0x03e00006`) and the
+        // columns are padded with runs of spaces — reading them as decimal
+        // and splitting on single spaces is what made the cache empty and
+        // every focus attempt fail.
+        let windows: Vec<CachedWindow> = app_registry_linux::list_windows()
+            .into_iter()
+            .map(|w| CachedWindow {
+                hwnd: w.id as isize,
+                pid: w.pid,
+                title: w.title,
+                process_name: String::new(),
+            })
+            .collect();
+        let count = windows.len();
+        *WINDOW_CACHE.write() = windows;
+        tracing::trace!("window cache refreshed: {} windows", count);
     }
 }
 
@@ -1939,231 +2136,14 @@ fn read_macos_bundle_id(app_path: &std::path::Path) -> Option<String> {
 }
 
 // ─── Linux discovery ───────────────────────────────────────────────────────
+//
+// The Linux implementation lives in `app_registry_linux.rs`: XDG data dirs
+// plus the Flatpak and Snap exports, with the desktop-entry filters
+// (`Hidden`, `NoDisplay`, `OnlyShowIn`, `NotShowIn`, `TryExec`) honoured.
 
 #[cfg(target_os = "linux")]
 fn discover_linux(entries: &mut Vec<AppEntry>) {
-    let home = std::env::var("HOME").unwrap_or_default();
-
-    // XDG data directories
-    let xdg_dirs = std::env::var("XDG_DATA_DIRS")
-        .unwrap_or_else(|_| "/usr/share:/usr/local/share".to_string());
-
-    let mut dirs: Vec<String> = xdg_dirs
-        .split(':')
-        .map(|d| format!("{}/applications", d))
-        .collect();
-    dirs.push(format!("{}/.local/share/applications", home));
-    // Flatpak
-    dirs.push("/var/lib/flatpak/exports/share/applications".to_string());
-    dirs.push(format!("{}/.local/share/flatpak/exports/share/applications", home));
-    // Snap
-    dirs.push("/var/lib/snapd/desktop/applications".to_string());
-
-    for dir in &dirs {
-        let path = std::path::Path::new(dir);
-        if !path.exists() { continue; }
-        if let Ok(readdir) = std::fs::read_dir(path) {
-            for entry in readdir.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_string();
-                if !fname.ends_with(".desktop") { continue; }
-
-                if let Some(app_entry) = parse_desktop_file(&entry.path()) {
-                    entries.push(app_entry);
-                }
-            }
-        }
-    }
-
-    // Also try `flatpak list` for installed Flatpak apps
-    discover_flatpak_apps(entries);
-
-    // PWAs installed via Chrome/Brave/Edge
-    discover_linux_pwas(entries);
-
-    tracing::info!("discovered {} apps from Linux", entries.len());
-}
-
-/// Discover PWAs installed via Chrome, Brave, or Edge on Linux.
-/// These are stored as .desktop files in the browser's profile directory
-/// with Type=Application and WebApp=true.
-#[cfg(target_os = "linux")]
-fn discover_linux_pwas(entries: &mut Vec<AppEntry>) {
-    let home = std::env::var("HOME").unwrap_or_default();
-
-    // Chrome/Brave/Edge store PWAs in their profile directories
-    let pwa_dirs = [
-        // Chrome
-        format!("{}/.local/share/applications/chrome", home),
-        // Brave
-        format!("{}/.local/share/applications/brave", home),
-        // Edge
-        format!("{}/.local/share/applications/microsoft-edge", home),
-        // Generic — some browsers put PWAs directly in applications/
-        format!("{}/.local/share/applications", home),
-    ];
-
-    let existing: std::collections::HashSet<String> = entries
-        .iter()
-        .map(|e| e.display_name.to_lowercase())
-        .collect();
-
-    let mut count = 0;
-    for dir in &pwa_dirs {
-        let path = std::path::Path::new(dir);
-        if !path.exists() { continue; }
-        if let Ok(readdir) = std::fs::read_dir(path) {
-            for entry in readdir.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_string();
-                if !fname.ends_with(".desktop") { continue; }
-
-                // Check if this is a PWA (has WebApp=true or StartupWMClass)
-                if let Some(app_entry) = parse_pwa_desktop_file(&entry.path()) {
-                    if !existing.contains(&app_entry.display_name.to_lowercase()) {
-                        entries.push(app_entry);
-                        count += 1;
-                    }
-                }
-            }
-        }
-    }
-    if count > 0 {
-        tracing::debug!("discovered {} PWAs from Linux browsers", count);
-    }
-}
-
-/// Parse a .desktop file that might be a PWA.
-/// Returns Some(AppEntry) if the file has WebApp=true or is from a browser profile.
-#[cfg(target_os = "linux")]
-fn parse_pwa_desktop_file(path: &std::path::Path) -> Option<AppEntry> {
-    let content = std::fs::read_to_string(path).ok()?;
-    if !content.contains("[Desktop Entry]") { return None; }
-
-    let mut is_webapp = false;
-    let mut name = String::new();
-    let mut exec = String::new();
-    let mut icon = String::new();
-
-    for line in content.lines() {
-        if let Some(val) = line.strip_prefix("Name=") {
-            name = val.to_string();
-        } else if let Some(val) = line.strip_prefix("Exec=") {
-            exec = val.to_string();
-        } else if let Some(val) = line.strip_prefix("Icon=") {
-            icon = val.to_string();
-        } else if line.starts_with("Type=Application") {
-            // Check for WebApp indicator
-        } else if line.contains("WebApp=true") || line.contains("StartupWMClass=") {
-            is_webapp = true;
-        }
-    }
-
-    // Only include if it looks like a PWA
-    if !is_webapp || name.is_empty() || exec.is_empty() { return None; }
-
-    let _ = icon; // icon not used yet
-    let search_names = build_search_names(&name);
-    Some(AppEntry {
-        display_name: name,
-        search_names,
-        launch: LaunchMethod::DesktopExec { exec },
-        use_count: 0,
-        last_used: 0,
-    })
-}
-
-/// Use `flatpak list` to find installed Flatpak apps.
-/// These may not have .desktop files in the standard XDG directories.
-#[cfg(target_os = "linux")]
-fn discover_flatpak_apps(entries: &mut Vec<AppEntry>) {
-    use std::process::Command;
-
-    let output = Command::new("flatpak")
-        .args(["list", "--columns=application,name"])
-        .output();
-
-    let stdout = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return, // flatpak not installed
-    };
-
-    let existing: std::collections::HashSet<String> = entries
-        .iter()
-        .map(|e| e.display_name.to_lowercase())
-        .collect();
-
-    let mut count = 0;
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(2, '\t').collect();
-        if parts.len() < 2 { continue; }
-        let app_id = parts[0];
-        let name = parts[1];
-        if name.is_empty() || existing.contains(&name.to_lowercase()) { continue; }
-
-        // Launch via `flatpak run <app_id>`
-        let exec = format!("flatpak run {}", app_id);
-        let search_names = build_search_names(name);
-        entries.push(AppEntry {
-            display_name: name.to_string(),
-            search_names,
-            launch: LaunchMethod::DesktopExec { exec },
-            use_count: 0,
-            last_used: 0,
-        });
-        count += 1;
-    }
-    if count > 0 {
-        tracing::debug!("discovered {} additional apps from flatpak", count);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn parse_desktop_file(path: &std::path::Path) -> Option<AppEntry> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let mut name = String::new();
-    let mut exec = String::new();
-    let mut no_display = false;
-    let mut in_desktop_entry = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[Desktop Entry]" {
-            in_desktop_entry = true;
-            continue;
-        }
-        if trimmed.starts_with('[') {
-            in_desktop_entry = false;
-            continue;
-        }
-        if !in_desktop_entry { continue; }
-
-        if let Some(val) = trimmed.strip_prefix("Name=") {
-            if name.is_empty() { name = val.to_string(); }
-        } else if let Some(val) = trimmed.strip_prefix("Exec=") {
-            exec = val.to_string();
-        } else if trimmed.starts_with("NoDisplay=true") {
-            no_display = true;
-        }
-    }
-
-    if name.is_empty() || exec.is_empty() || no_display {
-        return None;
-    }
-
-    // Clean exec line: remove field codes like %u, %U, %f, %F
-    let clean_exec = exec
-        .split_whitespace()
-        .filter(|w| !w.starts_with('%'))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let search_names = build_search_names(&name);
-    Some(AppEntry {
-        display_name: name,
-        search_names,
-        launch: LaunchMethod::DesktopExec { exec: clean_exec },
-        use_count: 0,
-        last_used: 0,
-    })
+    app_registry_linux::discover(entries);
 }
 
 // ─── URL fallbacks (all platforms) ─────────────────────────────────────────

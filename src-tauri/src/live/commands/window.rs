@@ -271,6 +271,16 @@ mod windows_impl {
 
 #[cfg(target_os = "linux")]
 mod unix_impl {
+    /// Why another app's window cannot be raised in this session, if it
+    /// cannot.
+    ///
+    /// `None` means focusing may work. The text is speakable: it names the
+    /// actual blocker instead of the vague "couldn't find it running" the
+    /// caller would otherwise say.
+    pub fn focus_unavailable_reason() -> Option<String> {
+        crate::app_registry::app_registry_linux::focus_blocked_reason_now()
+    }
+
     /// Focus a window by partial title match.
     ///
     /// Implemented for real on X11/XWayland via EWMH (`wmctrl -a`), which any
@@ -291,10 +301,11 @@ mod unix_impl {
         if partial_title.trim().is_empty() {
             return false;
         }
-        if !crate::session::has_x11_input() {
+        if let Some(reason) = focus_unavailable_reason() {
             tracing::warn!(
-                "live: cannot focus {:?} — {}",
+                "live: cannot focus {:?} — {} ({})",
                 partial_title,
+                reason,
                 crate::session::diagnostic_line()
             );
             return false;
