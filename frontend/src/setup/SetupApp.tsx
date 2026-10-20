@@ -11,6 +11,7 @@ import { VoiceEnrollment } from "./VoiceEnrollment";
 import { identityBanner, type IdentityBanner } from "./identityBanner";
 import { CURATED_VOICES, previewVoice, stopTts, type VoiceOption, ICONIC_PERSONAS } from "../audio/ttsPlayer";
 import { initThemeSync } from "../sidebar/theme";
+import { globalHotkeyHint, globalHotkeyLabel } from "../platform";
 
 type Step = 0 | 1 | 2 | 3;
 const STEP_LABELS = ["Persona & Voice", "Permissions", "Preferences", "Accounts"];
@@ -28,7 +29,7 @@ export function SetupApp() {
   }, []);
 
   // Settings
-  const [hotkey] = useState("Ctrl+Space");
+  const [hotkey] = useState(globalHotkeyLabel());
   const [wakeWordEnabled, setWakeWordEnabled] = useState(true);
   const [autostart, setAutostart] = useState(true);
   const [ttsVolume, setTtsVolume] = useState(75);
@@ -664,10 +665,10 @@ export function SetupApp() {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px", border: "1px solid var(--nx-border)", borderRadius: "8px" }}>
                     <div>
                       <div style={{ fontWeight: 600, fontSize: "var(--nx-text-sm)" }}>Global Hotkey</div>
-                      <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)" }}>Ctrl+Space — instantly wake/toggle assistant</div>
+                      <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)" }}>{globalHotkeyHint("Ctrl+Space — instantly wake/toggle assistant")}</div>
                     </div>
                     <div style={{ padding: "6px 10px", fontSize: "var(--nx-text-xs)", border: "1px solid var(--nx-border)", borderRadius: "6px", width: "140px", textAlign: "center", color: "var(--nx-text-secondary)", background: "var(--nx-surface-2)" }}>
-                      Ctrl+Space
+                      {globalHotkeyLabel()}
                     </div>
                   </div>
 

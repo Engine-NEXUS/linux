@@ -287,6 +287,37 @@ html[data-glass-luminance="light"] .sidebar-card {
   }
 }
 
+/* ── Linux (WebKitGTK) ──────────────────────────────────────────────
+   Wayland ignores set_position: the window lands compositor-centered
+   with no native blur and no backdrop capture, and WebKitGTK's
+   backdrop-filter claims support where it cannot composite against a
+   transparent window. Always render the card as a solid floating panel
+   on Linux, even where backdrop-filter "works".
+   body[data-platform] is set by platform.ts (sidebar/main.tsx). */
+body[data-platform="linux"] #sidebar-app {
+  align-items: flex-end;
+  justify-content: flex-start;
+  padding: 0;
+}
+body[data-platform="linux"] .sidebar-card {
+  background: #1e1e20;
+  background-image: none;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7);
+}
+/* No backdrop capture on Linux — the live-capture layer would only add a
+   dark gradient over nothing. */
+body[data-platform="linux"] .sidebar-card::before,
+body[data-platform="linux"] .sidebar-card::after {
+  display: none;
+}
+/* Keep the light theme readable on Linux (the card above is dark). */
+html[data-theme="light"] body[data-platform="linux"] .sidebar-card {
+  background: #f2f2f6;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+
 /* ── Topic title (research/analyse responses only) ─────────────── */
 .sidebar-topic-title {
   position: relative;

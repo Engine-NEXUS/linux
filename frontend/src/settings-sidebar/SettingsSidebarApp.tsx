@@ -12,6 +12,7 @@ import {
   type OAuthStatus,
 } from "../setup/oauth";
 import { useAssistant } from "../store/assistant";
+import { globalHotkeyLabel } from "../platform";
 import "./hub/hub.css";
 import { HubHome, type HubPage } from "./hub/HubHome";
 import { ApiKeysPage } from "./hub/ApiKeysPage";
@@ -137,7 +138,7 @@ interface Settings {
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: true,
-  hotkey: "Ctrl+Space",
+  hotkey: globalHotkeyLabel(),
   autoHideDelay: 8,
   wakeWordEnabled: true,
   wakePhrase: "NEXUS",

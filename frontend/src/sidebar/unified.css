@@ -32,6 +32,20 @@
   --hub-danger: #ff3b30;
 }
 
+/* ── Linux (WebKitGTK) ───────────────────────────────────────────────
+   The Linux build has no native window blur and no backdrop capture,
+   and WebKitGTK's backdrop-filter cannot composite against a
+   transparent window. The shell is the visible surface for the
+   Command Hub / Architect / PR List views, so paint it opaque here
+   instead of the translucent Windows glass.
+   body[data-platform] is set by platform.ts (sidebar/main.tsx). */
+body[data-platform="linux"] {
+  --hub-bg: #1e1e20;
+}
+html[data-theme="light"] body[data-platform="linux"] {
+  --hub-bg: #f2f2f6;
+}
+
 .unified-shell {
   width: 100vw;
   height: 100vh;
