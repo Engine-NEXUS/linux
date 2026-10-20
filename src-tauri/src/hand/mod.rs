@@ -21,6 +21,12 @@ pub mod snap;
 /// Live mouse control (move/click/scroll) is implemented and tested for Windows only. Elsewhere hand
 /// mode tracks and shows its overlay but stays in preview: injecting input also needs per-OS
 /// permissions (macOS Accessibility, Wayland portals) and a protected-window guard we do not have yet.
+///
+/// On Linux the reason is concrete rather than theoretical: `enigo` is built with the X11 backend
+/// only, so on a native Wayland session the pointer would move inside the X server while the user's
+/// own cursor never moved — and the mode would claim it had moved it. The same gate the keyboard
+/// path uses (`live::commands::keyboard::typing_decision`) refuses to type into a window it cannot
+/// reach, so hand mode stays a preview here too.
 pub fn live_supported() -> bool {
     cfg!(target_os = "windows")
 }
@@ -1172,5 +1178,12 @@ mod tests {
         assert!(guard_decision("Task Manager", "taskmgr.exe", true, false).is_some());
         // We are admin ourselves: elevated targets are reachable.
         assert!(guard_decision("Task Manager", "taskmgr.exe", true, true).is_none());
+    }
+
+    #[test]
+    fn the_live_pointer_is_windows_only() {
+        // Every other platform stays an honest preview: the pointer must never
+        // be moved (or claimed to have been moved) where no input path exists.
+        assert_eq!(live_supported(), cfg!(target_os = "windows"));
     }
 }
