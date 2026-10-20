@@ -29,4 +29,4 @@ Feature doc: `docs/features/141-linux-native-shell-and-aura.md`. Machine: Pop!_O
 ## Not done / deferred
 
 - The redesign's Rust `audio_levels.rs` bridge and "1 px resize tolerance": not needed on this branch (the aura reads the orb's levels; the stage is sized by layer-shell or by `size_stage_to_monitor`).
-- Windows CI has not been run on this branch; Linux was the priority.
+- Windows CI on the PR: `rust-check-windows` passes (cargo check default / mock-wake / shipped features, dead-code ratchet, 1683 lib tests + integration tests); `worker-check` passes. Three jobs fail identically on `WINDOWS` main and belong to their owners: the IPC contract gate (unwired `agent_watch_*`, `get_return_review`, one-sided events), the NLU Data Foundation check (`d61c517` changed the locked dataset without a reviewed re-freeze), and the NSIS template (`RestartManager_StartSession` macro missing) — the Windows release build itself compiles.
