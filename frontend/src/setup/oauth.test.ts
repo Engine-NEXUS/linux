@@ -266,8 +266,10 @@ describe("OAuth and API Key Worker Proxy Migration (Job 3)", () => {
           url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=xyz",
         });
 
-        const connectPromise = connectOAuth("google", "user-123");
-        await vi.advanceTimersByTimeAsync(10);
+        // The PKCE hash runs on real time, not on the fake clock: wait for the
+        // flow to open the browser before advancing fake time to the poll.
+        const { connectPromise, browserOpened } = startConnect("google", "user-123");
+        await browserOpened;
 
         // Next status check returns connected: true
         invokeMock.mockResolvedValueOnce({
