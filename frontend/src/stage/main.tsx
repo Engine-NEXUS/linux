@@ -356,8 +356,21 @@ function StageApp() {
   );
 }
 
+// Dev-only preview harness: `stage.html?eyeball` in a normal browser (see
+// eyeball/EyeballPanel.tsx). `import.meta.env.DEV` is a build-time constant,
+// so production builds drop this import and the harness chunk entirely.
+const EyeballPanel =
+  import.meta.env.DEV && new URLSearchParams(window.location.search).has("eyeball")
+    ? React.lazy(() => import("../eyeball/EyeballPanel").then((m) => ({ default: m.EyeballPanel })))
+    : null;
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <StageApp />
+    {EyeballPanel && (
+      <React.Suspense fallback={null}>
+        <EyeballPanel />
+      </React.Suspense>
+    )}
   </React.StrictMode>,
 );

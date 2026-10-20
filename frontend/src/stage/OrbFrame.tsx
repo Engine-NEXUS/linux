@@ -380,6 +380,19 @@ export function OrbFrame() {
     };
   }, []);
 
+  // Dev-only preview harness (`stage.html?eyeball`, eyeball/EyeballPanel.tsx):
+  // a plain browser has no Tauri events, so the harness hands the orb its
+  // rect directly. Compiled out of production builds.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const onRect = (e: Event) => {
+      const r = (e as CustomEvent<OrbRect>).detail;
+      if (r) setRect(r);
+    };
+    window.addEventListener("nexus:eyeball-orb-rect", onRect);
+    return () => window.removeEventListener("nexus:eyeball-orb-rect", onRect);
+  }, []);
+
   // Calibration state → visibility override + target/size mirror (moved
   // from App.tsx's "calibration:state" listener).
   useEffect(() => {
