@@ -135,6 +135,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # tauri::generate_context!() needs `frontendDist` (../frontend/dist) to
+      # exist at compile time. This job checks Rust only and never builds the
+      # frontend, so every cargo step failed with "frontendDist ... doesn't
+      # exist" before any Rust was checked. An empty placeholder is enough.
+      - name: Placeholder frontend dist for tauri::generate_context!
+        shell: bash
+        run: mkdir -p frontend/dist && touch frontend/dist/index.html
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install LLVM
