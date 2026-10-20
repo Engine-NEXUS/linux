@@ -228,7 +228,11 @@ def test_a_background_endpoint_does_not_prove_anything():
 
 
 def _state(focus: bool, visible: bool, known: bool = True) -> dict:
-    return {"focus": focus, "visible": visible, "known": known}
+    return {"focus": focus, "visible": visible, "known": known, "timed_out": False}
+
+
+def _timed_out() -> dict:
+    return {"focus": False, "visible": False, "known": False, "timed_out": True}
 
 
 def test_the_tab_that_has_focus_is_the_one_chosen():
@@ -272,6 +276,67 @@ def test_two_visible_targets_without_focus_refuse():
 def test_an_unknown_focus_state_does_not_qualify():
     tabs = [{"title": "GitHub"}]
     assert cdp_server.choose_focused_target(tabs, [_state(False, False, known=False)]) is None
+
+
+# ── An empty title is not a contradiction ──────────────────────────────────
+
+
+def test_an_empty_titled_focused_tab_is_chosen():
+    # A tab whose page has no <title> (a raw JSON view, the built-in PDF
+    # viewer) must not be filtered out: the identity gate treats an empty
+    # target title as a match, so the narrowing must too — and the focus
+    # probe then decides.
+    tabs = [{"title": "", "url": "https://example.com/data.json"}]
+    kept = cdp_server.narrow_by_title(tabs, "Example — Brave")
+    assert len(kept) == 1
+    chosen = cdp_server.choose_focused_target(
+        kept, [_state(True, True)], "Example — Brave"
+    )
+    assert chosen is not None
+    assert chosen["url"] == "https://example.com/data.json"
+
+
+# ── Timed out is not the same as "not focused" ─────────────────────────────
+
+
+def test_a_single_title_matched_candidate_that_timed_out_is_chosen():
+    # The renderer was too busy to answer in time, not "not focused". With one
+    # survivor whose own title matches the foreground, it IS the foreground.
+    tabs = [{"title": "GitHub", "url": "https://github.com/"}]
+    kept = cdp_server.narrow_by_title(tabs, "GitHub — Brave")
+    assert len(kept) == 1
+    chosen = cdp_server.choose_focused_target(kept, [_timed_out()], "GitHub — Brave")
+    assert chosen is not None
+    assert chosen["title"] == "GitHub"
+
+
+def test_a_single_empty_titled_candidate_that_timed_out_is_refused():
+    # Nothing proved which target is in front: an empty title cannot
+    # contradict the expected one, and the probe never answered, so the
+    # foreground is simply unknown.
+    tabs = [{"title": "", "url": "https://example.com/data.json"}]
+    kept = cdp_server.narrow_by_title(tabs, "Example — Brave")
+    assert len(kept) == 1
+    assert (
+        cdp_server.choose_focused_target(kept, [_timed_out()], "Example — Brave")
+        is None
+    )
+
+
+def test_two_candidates_where_one_timed_out_are_refused():
+    # Two survivors and no focus report: the timeout singles nothing out.
+    tabs = [
+        {"title": "GitHub", "url": "https://github.com/"},
+        {"title": "GitHub - Notifications", "url": "https://github.com/n"},
+    ]
+    kept = cdp_server.narrow_by_title(tabs, "GitHub")
+    assert len(kept) == 2
+    assert (
+        cdp_server.choose_focused_target(
+            kept, [_timed_out(), _state(False, False)], "GitHub"
+        )
+        is None
+    )
 
 
 # ── The whole endpoint decision, with fakes ────────────────────────────────

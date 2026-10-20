@@ -250,11 +250,35 @@ _FOCUS_STATE_JS = (
 # A background tab the browser has FROZEN (Chrome/Brave Memory Saver freezes
 # background tabs after a few minutes) does not run renderer tasks, so
 # `Runtime.evaluate` never answers and the CDP client would wait its full
-# 30 s per target. The probe is therefore given a hard deadline: a frozen or
-# vanished target is reported as "unknown", and the request continues.
-FOCUS_PROBE_TIMEOUT = float(os.environ.get("CDP_FOCUS_TIMEOUT", "1.5"))
+# 30 s per target. The probe is therefore given a hard deadline.
+#
+# The deadline is generous on purpose: `w.executeJavaScript` only resolves
+# when the renderer's main thread services the task, and a busy VS Code /
+# Discord renderer (extension activation, a large file, a GC pause, a cold
+# start) routinely takes longer than a second or two. The request budget is
+# 20 s (the Rust client) and the cheap title filter already reduces the
+# probe count to roughly one, so 5 s leaves room for a slow-but-alive
+# renderer while still bounding a frozen one.
+FOCUS_PROBE_TIMEOUT = float(os.environ.get("CDP_FOCUS_TIMEOUT", "5"))
 
-_FOCUS_UNKNOWN = {"focus": False, "visible": False, "known": False}
+# "I could not tell": the probe did not answer, or the transport failed.
+_FOCUS_UNKNOWN = {
+    "focus": False,
+    "visible": False,
+    "known": False,
+    "timed_out": False,
+}
+
+# "The probe did not answer IN TIME" — kept apart from "the renderer answered
+# and does not have focus", because the two deserve different verdicts: a
+# single surviving candidate that merely timed out is very likely the
+# foreground, while an answered "no focus" is a real answer.
+_FOCUS_TIMED_OUT = {
+    "focus": False,
+    "visible": False,
+    "known": False,
+    "timed_out": True,
+}
 
 
 async def _page_focus_state_inner(t: dict) -> dict:
@@ -275,6 +299,7 @@ async def _page_focus_state_inner(t: dict) -> dict:
         "focus": bool(d.get("focus")),
         "visible": d.get("vis") == "visible",
         "known": True,
+        "timed_out": False,
     }
 
 
@@ -294,8 +319,9 @@ async def _page_focus_state(t: dict) -> dict:
             _page_focus_state_inner(t), timeout=FOCUS_PROBE_TIMEOUT
         )
     except asyncio.TimeoutError:
-        # A frozen background tab: it will never answer.
-        return dict(_FOCUS_UNKNOWN)
+        # A frozen background tab, or a busy renderer that did not answer in
+        # time. Kept apart from an answered "no focus".
+        return dict(_FOCUS_TIMED_OUT)
     except CdpError:
         # The target is gone, or the transport failed.
         return dict(_FOCUS_UNKNOWN)
@@ -314,6 +340,12 @@ def narrow_by_title(candidates: list[dict], expected_title: str) -> list[dict]:
     a browser with N tabs costs one probe instead of N — and a background
     tab the user is not looking at is never probed at all.
 
+    The predicate is the SAME one the identity gate uses
+    (`title_matches`): a candidate whose own title is EMPTY cannot
+    contradict the expected one, so it is KEPT and the focus probe decides.
+    Dropping it here would refuse a tab with no `<title>` (a raw JSON view,
+    the built-in PDF viewer) that the gate itself would have accepted.
+
     An empty expected title keeps every candidate (the caller then relies on
     the focus probe alone).
     """
@@ -324,6 +356,9 @@ def narrow_by_title(candidates: list[dict], expected_title: str) -> list[dict]:
     for t in candidates:
         title = str(t.get("title") or "").strip().lower()
         if not title:
+            # No title of its own: it cannot contradict the expected one, so
+            # the focus probe — not this filter — decides.
+            out.append(t)
             continue
         if want == title or want in title or title in want:
             out.append(t)
@@ -364,7 +399,7 @@ async def chromium_foreground_target(
     states: list[dict] = []
     for t in candidates:
         states.append(await _page_focus_state(t))
-    return choose_focused_target(candidates, states)
+    return choose_focused_target(candidates, states, expected_title)
 
 
 async def direct_ax(port: int, target: str | None) -> list[dict]:
@@ -634,7 +669,9 @@ class Electron:
                 self.main_eval(body), timeout=FOCUS_PROBE_TIMEOUT
             )
         except asyncio.TimeoutError:
-            return dict(_FOCUS_UNKNOWN)
+            # A busy renderer that did not answer in time — kept apart from an
+            # answered "no focus".
+            return dict(_FOCUS_TIMED_OUT)
         except CdpError:
             # The renderer is gone, or the transport failed.
             return dict(_FOCUS_UNKNOWN)
@@ -647,6 +684,7 @@ class Electron:
             "focus": bool(v.get("focus")),
             "visible": v.get("vis") == "visible",
             "known": True,
+            "timed_out": False,
         }
 
     async def foreground_renderer(
@@ -679,7 +717,7 @@ class Electron:
         states: list[dict] = []
         for r in candidates:
             states.append(await self.renderer_focus(r["id"]))
-        return choose_focused_target(candidates, states)
+        return choose_focused_target(candidates, states, expected_title)
 
     async def ax(self, wcid: int) -> list[dict]:
         """Fetch the accessibility tree, warming it if the first read is partial.
@@ -820,17 +858,25 @@ def title_matches(foreground_title: str, target_title: str) -> bool:
     return f == t or t in f or f in t
 
 
-def choose_focused_target(candidates: list[dict], states: list[dict]) -> dict | None:
+def choose_focused_target(
+    candidates: list[dict], states: list[dict], expected_title: str = ""
+) -> dict | None:
     """The target the user is looking at, from the candidates' focus states.
 
     `candidates` and `states` are parallel lists: the targets and their
-    `{focus, visible, known}` states.
+    `{focus, visible, known, timed_out}` states.
 
     Pure, so the rule is unit-tested with fakes:
       * exactly one target has focus → that one;
       * more than one has focus → ambiguous, so nothing;
       * none has focus but exactly one is visible → that one;
-      * otherwise → nothing (the foreground is unknown).
+      * otherwise, the UNKNOWN cases. A probe that TIMED OUT is not the same
+        as an answered "no focus": when exactly one candidate survived the
+        title filter, and its own title is non-empty and matches the
+        expected foreground title, then a timed-out probe means the renderer
+        was simply too busy to answer — that candidate IS the foreground.
+        In every other unknown case, nothing is returned: the foreground is
+        not established, and the caller must refuse.
 
     Returning None is a REFUSAL, not a reason to fall back to an arbitrary
     tab: the first non-blank page target is usually a background one.
@@ -851,6 +897,18 @@ def choose_focused_target(candidates: list[dict], states: list[dict]) -> dict | 
     ]
     if len(visible) == 1:
         return visible[0]
+    # Unknown. A single survivor whose probe merely timed out is the
+    # foreground: nothing else is in the running, and its own title says so.
+    if len(candidates) == 1:
+        only = candidates[0]
+        st = states[0] if states else {}
+        title = str(only.get("title") or "").strip()
+        if (
+            st.get("timed_out")
+            and title
+            and title_matches(expected_title, title)
+        ):
+            return only
     return None
 
 
