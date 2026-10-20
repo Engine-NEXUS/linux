@@ -40,3 +40,21 @@ pub fn enable_process_ecoqos() {
 
 #[cfg(not(target_os = "windows"))]
 pub fn enable_process_ecoqos() {}
+
+// ─── Linux: the logind session ─────────────────────────────────────────
+//
+// `systemctl poweroff|reboot|suspend` and `loginctl lock-session|
+// terminate-session` all act on a *session*. `XDG_SESSION_ID` names the
+// session the display manager started for this user; without it, loginctl
+// falls back to the caller's own session — which on a normal desktop login is
+// the same one.
+
+/// The logind session id of the current desktop session, if the environment
+/// names one.
+#[cfg(target_os = "linux")]
+pub fn session_id() -> Option<String> {
+    std::env::var("XDG_SESSION_ID")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}

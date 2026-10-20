@@ -66,7 +66,7 @@ impl PowerKind {
         match self {
             PowerKind::Shutdown => "Shut down your laptop, sir? I'll note what's open first so I can offer to reopen it.",
             PowerKind::Restart => "Restart your laptop, sir? I'll note what's open first so I can offer to reopen it.",
-            PowerKind::SignOut => "Sign you out of Windows, sir? I'll note what's open first.",
+            PowerKind::SignOut => sign_out_ask(),
             PowerKind::Sleep => "Putting the laptop to sleep.",
             PowerKind::Lock => "Locking the screen.",
         }
@@ -81,6 +81,57 @@ impl PowerKind {
             PowerKind::Lock => "locking",
         }
     }
+}
+
+/// The spoken confirmation for signing out. "Windows" only exists on
+/// Windows, so the wording follows the platform.
+fn sign_out_ask() -> &'static str {
+    #[cfg(target_os = "linux")]
+    let line = "Sign you out of this session, sir? I'll note what's open first.";
+    #[cfg(not(target_os = "linux"))]
+    let line = "Sign you out of Windows, sir? I'll note what's open first.";
+    line
+}
+
+// ─── The command that does it ─────────────────────────────────────────
+
+/// A command as a program plus its arguments. Pure data so the mapping from
+/// a spoken power action to a command line can be unit-tested without
+/// touching the machine.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerCommand {
+    pub program: &'static str,
+    pub args: Vec<String>,
+}
+
+/// The Linux command for `kind`.
+///
+/// * shutdown  -> `systemctl poweroff`
+/// * restart   -> `systemctl reboot`
+/// * sleep     -> `systemctl suspend`
+/// * lock      -> `loginctl lock-session [SESSION]`
+/// * sign out  -> `loginctl terminate-session [SESSION]`
+///
+/// `SESSION` is the logind session id (`XDG_SESSION_ID`). It is optional:
+/// loginctl falls back to the caller's own session, which is the same session
+/// on a normal desktop login.
+#[cfg(target_os = "linux")]
+pub fn linux_power_command(kind: PowerKind, session_id: Option<&str>) -> PowerCommand {
+    let session = session_id.map(str::trim).filter(|s| !s.is_empty());
+    let (program, mut args): (&'static str, Vec<String>) = match kind {
+        PowerKind::Shutdown => ("systemctl", vec!["poweroff".into()]),
+        PowerKind::Restart => ("systemctl", vec!["reboot".into()]),
+        PowerKind::Sleep => ("systemctl", vec!["suspend".into()]),
+        PowerKind::Lock => ("loginctl", vec!["lock-session".into()]),
+        PowerKind::SignOut => ("loginctl", vec!["terminate-session".into()]),
+    };
+    if matches!(kind, PowerKind::Lock | PowerKind::SignOut) {
+        if let Some(s) = session {
+            args.push(s.to_string());
+        }
+    }
+    PowerCommand { program, args }
 }
 
 // ─── Parsing ─────────────────────────────────────────────────────────
@@ -450,9 +501,26 @@ fn execute(kind: PowerKind) -> Result<(), String> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn execute(kind: PowerKind) -> Result<(), String> {
+    // systemd owns the machine's power state on Linux; logind owns the
+    // session (lock / sign out). Both are what GNOME and COSMIC honour.
+    let session = crate::power::session_id();
+    let cmd = linux_power_command(kind, session.as_deref());
+    let status = std::process::Command::new(cmd.program)
+        .args(&cmd.args)
+        .status()
+        .map_err(|e| format!("{}: {e}", cmd.program))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{} {} exited with {status}", cmd.program, cmd.args.join(" ")))
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn execute(_kind: PowerKind) -> Result<(), String> {
-    Err("power commands are only supported on Windows".into())
+    Err("power commands are only supported on Windows and Linux".into())
 }
 
 #[cfg(test)]
@@ -574,6 +642,51 @@ mod tests {
             assert_eq!(PowerKind::from_str(k.as_str()), Some(k));
         }
         assert_eq!(PowerKind::from_str("nope"), None);
+    }
+
+    #[test]
+    fn the_sign_out_question_names_the_platform() {
+        // "Windows" only exists on Windows.
+        #[cfg(target_os = "linux")]
+        assert!(PowerKind::SignOut.ask().contains("session"), "{}", PowerKind::SignOut.ask());
+        #[cfg(not(target_os = "linux"))]
+        assert!(PowerKind::SignOut.ask().contains("Windows"), "{}", PowerKind::SignOut.ask());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_power_commands_map_to_systemd_and_logind() {
+        // Shutdown / restart / sleep go to systemd.
+        assert_eq!(
+            linux_power_command(PowerKind::Shutdown, None),
+            PowerCommand { program: "systemctl", args: vec!["poweroff".to_string()] }
+        );
+        assert_eq!(
+            linux_power_command(PowerKind::Restart, None),
+            PowerCommand { program: "systemctl", args: vec!["reboot".to_string()] }
+        );
+        assert_eq!(
+            linux_power_command(PowerKind::Sleep, None),
+            PowerCommand { program: "systemctl", args: vec!["suspend".to_string()] }
+        );
+        // Lock / sign out act on the logind session.
+        assert_eq!(
+            linux_power_command(PowerKind::Lock, Some("3")),
+            PowerCommand { program: "loginctl", args: vec!["lock-session".to_string(), "3".to_string()] }
+        );
+        assert_eq!(
+            linux_power_command(PowerKind::SignOut, Some("3")),
+            PowerCommand { program: "loginctl", args: vec!["terminate-session".to_string(), "3".to_string()] }
+        );
+        // Without a session id loginctl acts on the caller's own session.
+        assert_eq!(
+            linux_power_command(PowerKind::Lock, None),
+            PowerCommand { program: "loginctl", args: vec!["lock-session".to_string()] }
+        );
+        assert_eq!(
+            linux_power_command(PowerKind::SignOut, Some("  ")),
+            PowerCommand { program: "loginctl", args: vec!["terminate-session".to_string()] }
+        );
     }
 }
 

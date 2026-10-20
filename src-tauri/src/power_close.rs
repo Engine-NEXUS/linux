@@ -224,6 +224,244 @@ impl CloseEnv for RealEnv {
     }
 }
 
+// ─── Linux ────────────────────────────────────────────────────────────
+//
+// The Windows path above asks every top-level window to close the way its X
+// button does. Linux has no equivalent API: the closest thing is `wmctrl -c`,
+// which asks an *X11* window to close, and only X11 windows are visible to
+// it. On a native Wayland session (COSMIC, GNOME Wayland) no client may ask
+// another application to close at all — so the honest answer there is "I can't
+// close your other apps", not a silent skip.
+//
+// `wmctrl` is optional on most desktops (it is not installed on the target
+// machine), so its absence is a first-class case too.
+
+#[cfg(target_os = "linux")]
+pub mod linux {
+    use super::{CloseEnv, Win};
+
+    /// What the "close everything" step can do in this session.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Strategy {
+        /// X11 session with `wmctrl`: the windows can be asked to close.
+        Wmctrl,
+        /// Native Wayland: no client may ask another application to close.
+        Wayland,
+        /// X11 session, but `wmctrl` is not installed.
+        NoTool,
+    }
+
+    /// Why the other apps cannot be closed — spoken to the user.
+    pub const WAYLAND_REASON: &str =
+        "I can't close your other apps on Wayland, sir — anything unsaved will be lost.";
+    pub const NO_TOOL_REASON: &str =
+        "I can't ask your other apps to close, sir — anything unsaved will be lost.";
+
+    /// The pure decision (unit-tested): can we ask the other apps to close?
+    ///
+    /// A Wayland session cannot, whatever is installed — `wmctrl` only sees
+    /// X11 windows, and the native Wayland apps (which is what the user runs)
+    /// are invisible to it. An X11 session can, provided `wmctrl` is there.
+    pub fn strategy(session_is_wayland: bool, has_wmctrl: bool) -> Strategy {
+        if session_is_wayland {
+            Strategy::Wayland
+        } else if has_wmctrl {
+            Strategy::Wmctrl
+        } else {
+            Strategy::NoTool
+        }
+    }
+
+    /// Can this session ask the other apps to close? `Err(reason)` when it
+    /// cannot — the caller speaks the reason and only continues on the
+    /// user's confirmation.
+    pub fn can_close_apps() -> Result<(), &'static str> {
+        match strategy(crate::session::is_wayland(), wmctrl::installed()) {
+            Strategy::Wmctrl => Ok(()),
+            Strategy::Wayland => Err(WAYLAND_REASON),
+            Strategy::NoTool => Err(NO_TOOL_REASON),
+        }
+    }
+
+    /// The X11 windows `wmctrl` can see, as the closer sees them.
+    pub struct LinuxEnv;
+
+    impl CloseEnv for LinuxEnv {
+        fn list(&self) -> Vec<Win> {
+            wmctrl::list()
+                .into_iter()
+                .filter_map(|w| {
+                    let title = w.title.trim();
+                    if title.is_empty() {
+                        return None;
+                    }
+                    // NEXUS's own windows are never closed — the stage hosts
+                    // the orb, and closing it would take the overlay down.
+                    if title.starts_with("NEXUS") {
+                        return None;
+                    }
+                    let hwnd = parse_window_id(&w.id)?;
+                    Some(Win {
+                        hwnd,
+                        // wmctrl reports no executable name; the title is the
+                        // only thing a user would recognise ("Firefox is
+                        // asking to save, sir.").
+                        exe: title.to_string(),
+                        class: String::new(),
+                        title: title.to_string(),
+                    })
+                })
+                .collect()
+        }
+
+        fn close(&self, w: &Win) {
+            wmctrl::close(w.hwnd);
+        }
+
+        fn sleep_ms(&self, ms: u64) {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+
+    /// "0x03a00003" -> the window id as a number.
+    pub fn parse_window_id(id: &str) -> Option<isize> {
+        let hex = id.trim().trim_start_matches("0x").trim_start_matches("0X");
+        i64::from_str_radix(hex, 16).ok().map(|v| v as isize)
+    }
+
+    /// The `wmctrl` command line.
+    pub mod wmctrl {
+        /// One window as `wmctrl -l` reports it.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct Window {
+            pub id: String,
+            pub title: String,
+        }
+
+        /// Pure parser for one `wmctrl -l` line:
+        /// `0x03a00003  0  hostname  Firefox - Private` -> id + title.
+        ///
+        /// The line is `id desktop hostname title`, the title being the rest
+        /// of the line (it may contain spaces). The id is hexadecimal.
+        pub fn parse_line(line: &str) -> Option<Window> {
+            let mut rest = line.trim_start();
+            let id = take_field(&mut rest)?;
+            if !id.starts_with("0x") {
+                return None;
+            }
+            let _desktop = take_field(&mut rest)?;
+            let _host = take_field(&mut rest)?;
+            let title = rest.trim().to_string();
+            if title.is_empty() {
+                return None;
+            }
+            Some(Window { id, title })
+        }
+
+        /// The next whitespace-delimited field, advancing `rest`.
+        fn take_field(rest: &mut &str) -> Option<String> {
+            let s = rest.trim_start();
+            if s.is_empty() {
+                return None;
+            }
+            let end = s.find(char::is_whitespace).unwrap_or(s.len());
+            let field = s[..end].to_string();
+            *rest = &s[end..];
+            Some(field)
+        }
+
+        /// The windows the X server knows about.
+        pub fn list() -> Vec<Window> {
+            let Ok(out) = std::process::Command::new("wmctrl").arg("-l").output() else {
+                return vec![];
+            };
+            if !out.status.success() {
+                return vec![];
+            }
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(parse_line)
+                .collect()
+        }
+
+        /// Ask one window to close (what its X button does).
+        pub fn close(id: isize) -> bool {
+            std::process::Command::new("wmctrl")
+                .arg("-c")
+                .arg(format!("0x{id:x}"))
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+
+        /// Is `wmctrl` installed?
+        pub fn installed() -> bool {
+            let Some(path) = std::env::var_os("PATH") else {
+                return false;
+            };
+            std::env::split_paths(&path).any(|dir| is_executable(&dir.join("wmctrl")))
+        }
+
+        fn is_executable(path: &std::path::Path) -> bool {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(path)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod linux_tests {
+    #[cfg(target_os = "linux")]
+    use super::linux::{parse_window_id, strategy, wmctrl, Strategy};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wayland_can_never_close_the_other_apps() {
+        // Even with wmctrl installed, a native Wayland session has no way to
+        // ask another application to close.
+        assert_eq!(strategy(true, true), Strategy::Wayland);
+        assert_eq!(strategy(true, false), Strategy::Wayland);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn x11_needs_wmctrl() {
+        assert_eq!(strategy(false, true), Strategy::Wmctrl);
+        assert_eq!(strategy(false, false), Strategy::NoTool);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn wmctrl_lines_are_parsed() {
+        let w = wmctrl::parse_line("0x03a00003  0  hostname  Firefox - Private").unwrap();
+        assert_eq!(w.id, "0x03a00003");
+        assert_eq!(w.title, "Firefox - Private");
+        // Tabs and extra spaces are tolerated.
+        let w = wmctrl::parse_line("0x03a00004\t0\thost\tA  B").unwrap();
+        assert_eq!(w.id, "0x03a00004");
+        assert_eq!(w.title, "A  B");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rubbish_lines_are_ignored() {
+        assert!(wmctrl::parse_line("").is_none());
+        assert!(wmctrl::parse_line("   ").is_none());
+        assert!(wmctrl::parse_line("03000003 0 host Title").is_none(), "no 0x prefix");
+        assert!(wmctrl::parse_line("0x03a00003 0 host").is_none(), "no title");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn window_ids_are_hexadecimal() {
+        assert_eq!(parse_window_id("0x03a00003"), Some(0x03a00003));
+        assert_eq!(parse_window_id("0X03A00003"), Some(0x03a00003));
+        assert_eq!(parse_window_id("not-an-id"), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

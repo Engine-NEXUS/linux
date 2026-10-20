@@ -5881,6 +5881,15 @@ fn shutdown_blocker<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     if crate::ghost::drill_running() {
         return Some("I'm still working on a task, sir.".to_string());
     }
+    // Linux: on a session that cannot ask the other apps to close (native
+    // Wayland, or no `wmctrl`), the shutdown is confirmed once — unsaved work
+    // is the user's to lose, and it must never be dropped silently.
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(reason) = crate::power_close::linux::can_close_apps() {
+            return Some(reason.to_string());
+        }
+    }
     None
 }
 
@@ -5925,6 +5934,39 @@ async fn shutdown_sequence<R: Runtime>(app: AppHandle<R>, generation: u64) {
             }
             Some(crate::power_close::Outcome::AllClosed { closed }) => println!("[POWER] closed {closed} windows"),
             None => println!("[POWER] close step failed to run; continuing"),
+        }
+    }
+    // Linux: the X11 windows are asked to close through `wmctrl`. On a native
+    // Wayland session no client may ask another application to close — the
+    // user was already told and confirmed that before this sequence started
+    // (see `shutdown_blocker`), so the step continues instead of pretending.
+    #[cfg(target_os = "linux")]
+    {
+        match crate::power_close::linux::can_close_apps() {
+            Err(reason) => {
+                println!("[POWER] cannot close the other apps here: {reason}");
+            }
+            Ok(()) => {
+                let outcome = tauri::async_runtime::spawn_blocking(|| {
+                    crate::power_close::close_all(&crate::power_close::linux::LinuxEnv, 8_000)
+                })
+                .await
+                .ok();
+                match outcome {
+                    Some(crate::power_close::Outcome::Refused { closed, still_open }) => {
+                        println!("[POWER] shutdown stopped: {closed} closed, still open: {still_open:?}");
+                        pc::finish(generation);
+                        let (rid, _) = install_new_request(Subsystem::LocalCommand);
+                        speak_line(&app, crate::power_close::refusal_line(&still_open), &rid);
+                        clear_active_request(&rid);
+                        return;
+                    }
+                    Some(crate::power_close::Outcome::AllClosed { closed }) => {
+                        println!("[POWER] closed {closed} windows")
+                    }
+                    None => println!("[POWER] close step failed to run; continuing"),
+                }
+            }
         }
     }
     // 3. A last chance to say "cancel".
