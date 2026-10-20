@@ -91,33 +91,43 @@ pub fn is_browser_capture(clients: &[String]) -> bool {
     })
 }
 
+/// How long `pactl` may take before it is killed. A wedged PipeWire/PulseAudio
+/// server makes it block forever, and the caller is a tokio runtime worker —
+/// one hung call would kill the meeting-detection task for the session.
+#[cfg(not(test))]
+const PACTL_TIMEOUT_MS: u64 = 2_000;
+
 /// Ask the audio server whether a browser is currently recording.
 ///
-/// Returns `false` for every failure mode (no `pactl`, no session bus, no
+/// Returns `false` for every failure mode (no `pactl`, a hung `pactl`, no
 /// recording streams, a non-zero exit) — the caller treats "unknown" as
 /// "no meeting", exactly like a missing meeting app.
 #[cfg(not(test))]
 pub fn browser_capture_active() -> bool {
-    let output = match std::process::Command::new("pactl")
-        .args(["list", "source-outputs"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::debug!("meeting_linux: pactl not available ({e}) — browser meetings not detected");
-            return false;
+    use crate::proc_linux::BoundedOutcome;
+
+    let mut cmd = std::process::Command::new("pactl");
+    cmd.args(["list", "source-outputs"]);
+    match crate::proc_linux::run_bounded(&mut cmd, PACTL_TIMEOUT_MS) {
+        BoundedOutcome::Finished { success: true, stdout } => {
+            let clients = parse_capture_clients(&stdout);
+            is_browser_capture(&clients)
         }
-    };
-    if !output.status.success() {
-        tracing::debug!(
-            "meeting_linux: 'pactl list source-outputs' failed: {}",
-            output.status
-        );
-        return false;
+        BoundedOutcome::Finished { success: false, .. } => {
+            tracing::debug!("meeting_linux: 'pactl list source-outputs' failed");
+            false
+        }
+        BoundedOutcome::TimedOut => {
+            tracing::debug!(
+                "meeting_linux: 'pactl list source-outputs' timed out after {PACTL_TIMEOUT_MS} ms — browser meetings not detected"
+            );
+            false
+        }
+        BoundedOutcome::NotStarted => {
+            tracing::debug!("meeting_linux: pactl not available — browser meetings not detected");
+            false
+        }
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let clients = parse_capture_clients(&text);
-    is_browser_capture(&clients)
 }
 
 /// Ask the audio server whether a browser is currently recording — test double.

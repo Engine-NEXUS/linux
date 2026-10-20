@@ -28,6 +28,19 @@ pub fn mpris_method_for(command: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Does this MPRIS2 method take an argument?
+///
+/// The root interface's `Activate` takes an `a{sv} platform_data` map (an
+/// empty one means "no extra data"); the Player methods (Play/Pause/Next/…)
+/// take no arguments at all. Sending the wrong body makes the player reject
+/// the call with `InvalidArgs`.
+///
+/// Pure — unit-tested.
+#[allow(dead_code)] // live on Linux (the only platform with an MPRIS transport)
+pub fn mpris_method_takes_args(interface: &str) -> bool {
+    interface == MPRIS_ROOT_IFACE
+}
+
 /// How long a single D-Bus call may take before it is abandoned. The desktop
 /// is another program and it may never answer — a media command must not wait
 /// for it forever.
@@ -72,17 +85,37 @@ pub async fn send_mpris_command(command: &str) -> Result<String, String> {
 
     let mut sent = 0;
     for player in &mpris_players {
-        let res = tokio::time::timeout(
-            DBUS_TIMEOUT,
-            connection.call_method(
-                Some(player.as_str()),
-                MPRIS_PATH,
-                Some(interface),
-                method,
-                &(),
-            ),
-        )
-        .await;
+        // MPRIS2's root `Activate(a{sv} platform_data)` takes a MAP: sending
+        // an empty body makes the player reject the call with `InvalidArgs`
+        // ("open spotify" then fails with "couldn't open the music player").
+        // The Player methods (Play/Pause/Next/…) take no arguments at all.
+        let res = if mpris_method_takes_args(interface) {
+            let body: std::collections::HashMap<&str, zbus::zvariant::Value> =
+                std::collections::HashMap::new();
+            tokio::time::timeout(
+                DBUS_TIMEOUT,
+                connection.call_method(
+                    Some(player.as_str()),
+                    MPRIS_PATH,
+                    Some(interface),
+                    method,
+                    &body,
+                ),
+            )
+            .await
+        } else {
+            tokio::time::timeout(
+                DBUS_TIMEOUT,
+                connection.call_method(
+                    Some(player.as_str()),
+                    MPRIS_PATH,
+                    Some(interface),
+                    method,
+                    &(),
+                ),
+            )
+            .await
+        };
         if matches!(res, Ok(Ok(_))) {
             sent += 1;
         }
@@ -163,5 +196,20 @@ mod tests {
         assert!(mpris_method_for("").is_none());
         assert!(mpris_method_for("search").is_none());
         assert!(mpris_method_for("volume up").is_none());
+    }
+
+    #[test]
+    fn only_the_root_activate_takes_an_argument() {
+        // `Activate(a{sv} platform_data)` needs a map; the Player methods
+        // (Play/Pause/Next/…) take nothing.
+        assert!(mpris_method_takes_args("org.mpris.MediaPlayer2"));
+        assert!(!mpris_method_takes_args("org.mpris.MediaPlayer2.Player"));
+        // The mapping and the argument rule have to agree.
+        let (iface, method) = mpris_method_for("open").expect("open maps to Activate");
+        assert_eq!(method, "Activate");
+        assert!(mpris_method_takes_args(iface));
+        let (iface, method) = mpris_method_for("play").expect("play maps to Play");
+        assert_eq!(method, "Play");
+        assert!(!mpris_method_takes_args(iface));
     }
 }

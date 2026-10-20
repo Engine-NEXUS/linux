@@ -200,6 +200,10 @@ keyring = { version = "3", features = ["windows-native"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
 keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-rust"] }
+# WebKitGTK permission handler (auto-approve mic/camera for NEXUS's own
+# origins, so getUserMedia is never denied). Version follows wry's
+# webkit2gtk pin.
+webkit2gtk = { version = "2", features = ["v2_40"] }
 
 # macOS-specific: Apple Keychain support for auth vault
 [target.'cfg(target_os = "macos")'.dependencies]

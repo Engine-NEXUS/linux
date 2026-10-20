@@ -479,13 +479,15 @@ pub async fn transcribe_local(samples: &[i16], client: &reqwest::Client) -> Resu
 
 /// Last spoken "speech recognition is unavailable" notice (millis since epoch).
 /// Rate-limited so a broken STT chain cannot spam one line per turn.
+#[cfg(target_os = "linux")]
 static LAST_STT_FAILURE_NOTICE_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// How long to wait between two spoken "STT is unavailable" notices.
+#[cfg(target_os = "linux")]
 const STT_FAILURE_NOTICE_INTERVAL_MS: u64 = 60_000;
 
-/// Report a failed transcription.
+/// Report a failed transcription — and say so out loud.
 ///
 /// A transcription failure must never be swallowed: on a machine without the
 /// local Python sidecar (and without a cloud STT key) every turn used to come
@@ -495,6 +497,11 @@ const STT_FAILURE_NOTICE_INTERVAL_MS: u64 = 60_000;
 ///
 /// The reason is logged loudly (`[STT-ERR]`, greppable in the unified console)
 /// and spoken at most once a minute.
+///
+/// **Linux only.** On Windows/macOS a failed transcription has always ended
+/// the turn silently (the frontend says "I didn't catch that"), and that
+/// behaviour must not change.
+#[cfg(target_os = "linux")]
 pub fn note_transcription_failure<R: tauri::Runtime>(app: &tauri::AppHandle<R>, err: &str) {
     tracing::error!("stt: transcription failed: {err}");
     println!("[STT-ERR] transcription failed: {err}");

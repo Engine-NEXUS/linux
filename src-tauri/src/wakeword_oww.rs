@@ -3978,9 +3978,16 @@ pub fn run<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
                     // After the transcript event, so the truthful reason is the
                     // last thing said (the frontend answers an empty transcript
                     // with "I didn't catch that", which blames the mic).
+                    //
+                    // Linux only: on Windows/macOS a failed transcription has
+                    // always ended the turn silently, and that behaviour must
+                    // not change.
+                    #[cfg(target_os = "linux")]
                     if let Some(e) = stt_error {
                         crate::stt::note_transcription_failure(&app_for_stt, &e);
                     }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = stt_error;
                 });
             }
         })

@@ -86,6 +86,9 @@ mod mpris;
 mod audio_linux;
 #[cfg(target_os = "linux")]
 mod meeting_linux;
+// Bounded subprocess runs for the Linux desktop tools (wpctl/pactl/amixer).
+#[cfg(target_os = "linux")]
+mod proc_linux;
 pub(crate) mod media_player;
 mod architect;
 mod browser_url;

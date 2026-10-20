@@ -78,6 +78,15 @@ struct State {
 
 pub struct Controller {
     st: Mutex<State>,
+    /// Serialises the OS calls (read the current volume, set the TTS volume,
+    /// restore the original) so their order is exactly the same as when they
+    /// all happened under the state mutex — but WITHOUT holding the state
+    /// mutex across them. The backend is the OS: on Linux it is a
+    /// `wpctl`/`pactl`/`amixer` subprocess, and a wedged audio tool would
+    /// otherwise freeze every other lease holder. The lease is taken on
+    /// every spoken reply, so a hung tool there means no reply is ever
+    /// spoken and the user's volume stays pinned at the TTS level.
+    transition: Mutex<()>,
     backend: Arc<dyn VolumeBackend>,
     baseline_dir: Mutex<Option<PathBuf>>,
     last_beat: AtomicU64,
@@ -121,6 +130,7 @@ impl Controller {
     ) -> Arc<Self> {
         Arc::new(Self {
             st: Mutex::new(State::default()),
+            transition: Mutex::new(()),
             backend,
             baseline_dir: Mutex::new(None),
             last_beat: AtomicU64::new(now_millis()),
@@ -161,55 +171,97 @@ impl Controller {
         self.last_beat.store(now_millis(), Ordering::Relaxed);
     }
 
-    /// Restore the original volume and forget the baseline. Caller holds the state lock.
-    fn do_restore(&self, st: &mut State) {
-        if let Some(b) = st.baseline.take() {
-            tracing::info!("[VOL] restoring original volume {:.2}", b);
-            let _ = self.backend.set(b);
-        }
-        self.clear_baseline_file();
+    /// Put the original volume back. The OS call happens OUTSIDE the state
+    /// mutex — the caller takes the baseline out of the state first.
+    fn restore_to(&self, level: f32) {
+        tracing::info!("[VOL] restoring original volume {:.2}", level);
+        let _ = self.backend.set(level);
     }
 
     pub fn acquire(self: &Arc<Self>, tts_volume: f32) -> Option<TtsVolumeLease> {
         let tts_volume = tts_volume.clamp(0.0, 1.0);
-        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        st.restore_gen = st.restore_gen.wrapping_add(1); // cancel any pending restore
+        // The backend is the OS (on Linux: a `wpctl`/`pactl`/`amixer`
+        // subprocess). It must never run while the state mutex is held: the
+        // lease is taken on every spoken reply, so a wedged audio tool would
+        // stop every reply from being spoken. The transition mutex keeps the
+        // order of the OS calls exactly as it was.
+        let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
         self.heartbeat();
 
-        if st.baseline.is_none() {
+        // (1) Under the lock: cancel a pending restore and note whether the
+        // original volume still has to be read.
+        let need_baseline = {
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            st.restore_gen = st.restore_gen.wrapping_add(1); // cancel any pending restore
+            st.baseline.is_none()
+        };
+
+        // (2) Outside the lock: read the current volume.
+        let current = if need_baseline {
             match self.backend.get() {
-                Ok(cur) => {
-                    st.baseline = Some(cur);
-                    self.persist_baseline(cur);
-                    tracing::info!("[VOL] saved original {:.2}, setting {:.2} for TTS", cur, tts_volume);
-                }
+                Ok(cur) => Some(cur),
                 Err(e) => {
                     // Cannot read => cannot promise to restore => do not touch the volume.
                     tracing::warn!("[VOL] cannot read current volume ({e}); leaving volume untouched");
                     return None;
                 }
             }
+        } else {
+            None
+        };
+
+        // (3) Under the lock: remember the original volume.
+        if let Some(cur) = current {
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            if st.baseline.is_none() {
+                st.baseline = Some(cur);
+                self.persist_baseline(cur);
+                tracing::info!("[VOL] saved original {:.2}, setting {:.2} for TTS", cur, tts_volume);
+            }
         }
+
+        // (4) Outside the lock: set the TTS volume.
         if let Err(e) = self.backend.set(tts_volume) {
             tracing::warn!("[VOL] failed to set TTS volume: {e}");
-            if st.count == 0 {
-                self.do_restore(&mut st);
+            // Nothing else owns the volume → put the original back.
+            let baseline = {
+                let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+                if st.count == 0 {
+                    st.baseline.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(b) = baseline {
+                self.restore_to(b);
+                self.clear_baseline_file();
             }
             return None;
         }
-        st.count += 1;
-        tracing::debug!("[VOL] acquire epoch={} count={}", st.epoch, st.count);
-        let epoch = st.epoch;
-        if !st.watchdog_running {
-            st.watchdog_running = true;
+
+        // (5) Under the lock: take the lease.
+        let (epoch, start_watchdog) = {
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            st.count += 1;
+            tracing::debug!("[VOL] acquire epoch={} count={}", st.epoch, st.count);
+            let epoch = st.epoch;
+            if st.watchdog_running {
+                (epoch, false)
+            } else {
+                st.watchdog_running = true;
+                (epoch, true)
+            }
+        };
+        drop(_transition);
+        if start_watchdog {
             let me = Arc::clone(self);
             std::thread::spawn(move || me.watchdog_loop());
         }
-        drop(st);
         Some(TtsVolumeLease { ctrl: Arc::clone(self), epoch, active: true })
     }
 
     fn release(self: &Arc<Self>, epoch: u64) {
+        let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
         let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
         if epoch != st.epoch {
             tracing::debug!("[VOL] stale lease (epoch {} != {}) ignored", epoch, st.epoch);
@@ -235,25 +287,42 @@ impl Controller {
     }
 
     fn fire_deferred(&self, gen: u64) {
-        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        if gen != st.restore_gen || st.count != 0 {
-            return;
+        let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
+        let baseline = {
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            if gen != st.restore_gen || st.count != 0 {
+                return;
+            }
+            st.baseline.take()
+        };
+        // The OS call happens outside the state mutex.
+        if let Some(b) = baseline {
+            self.restore_to(b);
         }
-        self.do_restore(&mut st);
+        self.clear_baseline_file();
     }
 
     /// Immediate restore (explicit stop, exit, watchdog). Existing leases become stale.
     pub fn force_restore(&self) {
-        let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-        st.epoch = st.epoch.wrapping_add(1);
-        st.count = 0;
-        st.restore_gen = st.restore_gen.wrapping_add(1);
-        self.do_restore(&mut st);
+        let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
+        let baseline = {
+            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+            st.epoch = st.epoch.wrapping_add(1);
+            st.count = 0;
+            st.restore_gen = st.restore_gen.wrapping_add(1);
+            st.baseline.take()
+        };
+        // The OS call happens outside the state mutex.
+        if let Some(b) = baseline {
+            self.restore_to(b);
+        }
+        self.clear_baseline_file();
     }
 
     /// Barge-in: existing leases become stale now, but the volume is restored only if no new
     /// utterance claims it within the restore delay (the next `speak()` follows immediately).
     pub fn defer_restore(self: &Arc<Self>) {
+        let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
         let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
         st.epoch = st.epoch.wrapping_add(1);
         st.count = 0;
@@ -265,22 +334,34 @@ impl Controller {
     fn watchdog_loop(self: Arc<Self>) {
         loop {
             std::thread::sleep(self.watchdog_poll);
-            let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
-            if st.baseline.is_none() {
-                st.watchdog_running = false;
-                return;
-            }
-            if st.count > 0 {
-                let silent = now_millis().saturating_sub(self.last_beat.load(Ordering::Relaxed));
-                if silent as u128 > self.watchdog.as_millis() {
-                    tracing::warn!("[VOL] watchdog: no playback heartbeat for {silent} ms, force-restoring");
-                    st.epoch = st.epoch.wrapping_add(1);
-                    st.count = 0;
-                    st.restore_gen = st.restore_gen.wrapping_add(1);
-                    self.do_restore(&mut st);
+            let _transition = self.transition.lock().unwrap_or_else(|e| e.into_inner());
+            // Read the state under the lock; the OS call happens outside it.
+            let mut restore_to: Option<f32> = None;
+            let mut stop = false;
+            {
+                let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
+                if st.baseline.is_none() {
                     st.watchdog_running = false;
-                    return;
+                    stop = true;
+                } else if st.count > 0 {
+                    let silent = now_millis().saturating_sub(self.last_beat.load(Ordering::Relaxed));
+                    if silent as u128 > self.watchdog.as_millis() {
+                        tracing::warn!("[VOL] watchdog: no playback heartbeat for {silent} ms, force-restoring");
+                        st.epoch = st.epoch.wrapping_add(1);
+                        st.count = 0;
+                        st.restore_gen = st.restore_gen.wrapping_add(1);
+                        st.watchdog_running = false;
+                        restore_to = st.baseline.take();
+                        stop = true;
+                    }
                 }
+            }
+            if stop {
+                if let Some(b) = restore_to {
+                    self.restore_to(b);
+                    self.clear_baseline_file();
+                }
+                return;
             }
         }
     }
@@ -603,35 +684,62 @@ pub fn parse_percent_volume(stdout: &str) -> Option<f32> {
     }
 }
 
+/// How long a single volume tool may take before it is killed. A wedged
+/// PipeWire/PulseAudio server makes `wpctl`/`pactl`/`amixer` block forever,
+/// and the volume lease is taken on every spoken reply — so a hung tool must
+/// cost one timeout, not the reply.
+#[cfg(target_os = "linux")]
+const TOOL_TIMEOUT_MS: u64 = 1_000;
+
+/// Run one volume tool with a hard deadline.
+#[cfg(target_os = "linux")]
+fn run_tool(tool: &str, args: &[&str]) -> crate::proc_linux::BoundedOutcome {
+    let mut cmd = std::process::Command::new(tool);
+    cmd.args(args);
+    crate::proc_linux::run_bounded(&mut cmd, TOOL_TIMEOUT_MS)
+}
+
 #[cfg(target_os = "linux")]
 pub fn get_system_volume() -> Result<f32, String> {
-    use std::process::Command;
+    use crate::proc_linux::BoundedOutcome;
 
     // Try wpctl (PipeWire/WirePlumber)
-    if let Ok(output) = Command::new("wpctl")
-        .args(["get-volume", "@DEFAULT_SINK@"])
-        .output()
-    {
-        if let Some(v) = parse_wpctl_volume(&String::from_utf8_lossy(&output.stdout)) {
-            return Ok(v);
+    match run_tool("wpctl", &["get-volume", "@DEFAULT_SINK@"]) {
+        BoundedOutcome::Finished { success: true, stdout } => {
+            if let Some(v) = parse_wpctl_volume(&stdout) {
+                return Ok(v);
+            }
         }
+        BoundedOutcome::TimedOut => {
+            tracing::warn!("volume: 'wpctl get-volume' timed out after {TOOL_TIMEOUT_MS} ms");
+        }
+        _ => {}
     }
 
     // Fall back to pactl (PulseAudio)
-    if let Ok(output) = Command::new("pactl")
-        .args(["get-sink-volume", "@DEFAULT_SINK@"])
-        .output()
-    {
-        if let Some(v) = parse_percent_volume(&String::from_utf8_lossy(&output.stdout)) {
-            return Ok(v);
+    match run_tool("pactl", &["get-sink-volume", "@DEFAULT_SINK@"]) {
+        BoundedOutcome::Finished { success: true, stdout } => {
+            if let Some(v) = parse_percent_volume(&stdout) {
+                return Ok(v);
+            }
         }
+        BoundedOutcome::TimedOut => {
+            tracing::warn!("volume: 'pactl get-sink-volume' timed out after {TOOL_TIMEOUT_MS} ms");
+        }
+        _ => {}
     }
 
     // Fall back to amixer (ALSA)
-    if let Ok(output) = Command::new("amixer").args(["get", "Master"]).output() {
-        if let Some(v) = parse_percent_volume(&String::from_utf8_lossy(&output.stdout)) {
-            return Ok(v);
+    match run_tool("amixer", &["get", "Master"]) {
+        BoundedOutcome::Finished { success: true, stdout } => {
+            if let Some(v) = parse_percent_volume(&stdout) {
+                return Ok(v);
+            }
         }
+        BoundedOutcome::TimedOut => {
+            tracing::warn!("volume: 'amixer get Master' timed out after {TOOL_TIMEOUT_MS} ms");
+        }
+        _ => {}
     }
 
     Err("volume: all Linux volume tools failed".to_string())
@@ -639,52 +747,41 @@ pub fn get_system_volume() -> Result<f32, String> {
 
 #[cfg(target_os = "linux")]
 pub fn set_system_volume(level: f32) -> Result<(), String> {
-    use std::process::Command;
+    use crate::proc_linux::BoundedOutcome;
 
     let level = level.clamp(0.0, 1.0);
     let pct = (level * 100.0).round() as i32;
     let pct_str = format!("{}%", pct);
 
     // wpctl → pactl → amixer. Each tool is tried in turn: a tool that is
-    // installed but refuses the request must not stop the next one.
-    let attempts: Vec<(&str, Vec<String>)> = vec![
+    // installed but refuses the request must not stop the next one. Every
+    // tool is bounded, so a wedged audio server costs one timeout.
+    let attempts: Vec<(&str, Vec<&str>)> = vec![
         (
             "wpctl",
-            vec![
-                "set-volume".to_string(),
-                "@DEFAULT_SINK@".to_string(),
-                pct_str.clone(),
-            ],
+            vec!["set-volume", "@DEFAULT_SINK@", pct_str.as_str()],
         ),
         (
             "pactl",
-            vec![
-                "set-sink-volume".to_string(),
-                "@DEFAULT_SINK@".to_string(),
-                pct_str.clone(),
-            ],
+            vec!["set-sink-volume", "@DEFAULT_SINK@", pct_str.as_str()],
         ),
-        (
-            "amixer",
-            vec![
-                "-q".to_string(),
-                "set".to_string(),
-                "Master".to_string(),
-                pct_str.clone(),
-            ],
-        ),
+        ("amixer", vec!["-q", "set", "Master", pct_str.as_str()]),
     ];
 
     let mut last_err = String::new();
     for (tool, args) in attempts {
-        match Command::new(tool).args(&args).status() {
-            Ok(s) if s.success() => return Ok(()),
-            Ok(s) => {
-                last_err = format!("{tool} exited with {s}");
-                tracing::debug!("volume: {tool} failed ({s}); trying the next tool");
+        match run_tool(tool, &args) {
+            BoundedOutcome::Finished { success: true, .. } => return Ok(()),
+            BoundedOutcome::Finished { success: false, .. } => {
+                last_err = format!("{tool} exited with an error");
+                tracing::debug!("volume: {tool} failed ({last_err}); trying the next tool");
             }
-            Err(e) => {
-                last_err = format!("{tool}: {e}");
+            BoundedOutcome::TimedOut => {
+                last_err = format!("{tool} timed out after {TOOL_TIMEOUT_MS} ms");
+                tracing::warn!("volume: {tool} timed out; trying the next tool");
+            }
+            BoundedOutcome::NotStarted => {
+                last_err = format!("{tool} is not installed");
             }
         }
     }
