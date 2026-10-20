@@ -9,7 +9,7 @@ import {
 
 export type AssistantState = "idle" | "listening" | "thinking" | "speaking";
 
-interface TranscriptEntry {
+export interface TranscriptEntry {
   role: "user" | "assistant";
   text: string;
   timestamp: number;

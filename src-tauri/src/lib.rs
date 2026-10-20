@@ -136,6 +136,7 @@ pub(crate) mod persona;
 mod missed_intent_logger;
 mod pii_filter;
 pub(crate) mod stage;
+mod last_heard;
 mod system_center;
 mod vision;
 mod webhook;
@@ -1057,6 +1058,8 @@ pub fn run() {
             stage::stage_hide,
             stage::stage_heartbeat,
             stage::stage_take_pending_transcript,
+            last_heard::last_stt_transcript,
+            last_heard::stt_resubmit_transcript,
             stage::stage_set_hitboxes,
             stage::stage_hide_kill,
             ghost::ghost_enter,

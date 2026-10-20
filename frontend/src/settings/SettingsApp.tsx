@@ -45,7 +45,7 @@ interface Settings {
   selectedVoice?: string;
   offlineVoiceModel?: string;
   orbPosition?: "top" | "bottom";
-  themeMode?: "light" | "dark";
+  themeMode?: "light" | "dark" | "system";
   defaultMusicPlayer?: "spotify" | "apple_music";
 }
 
@@ -333,7 +333,7 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
           <div style={{ display: "flex", gap: "8px" }}>
             <button
               type="button"
-              className={`nx-btn ${settings.themeMode !== "light" ? "nx-btn--primary" : ""}`}
+              className={`nx-btn ${settings.themeMode === "dark" ? "nx-btn--primary" : ""}`}
               onClick={() => {
                 update("themeMode", "dark");
                 applyThemeMode("dark");
@@ -350,6 +350,16 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
               }}
             >
               ☀️ Light (Frosted White)
+            </button>
+            <button
+              type="button"
+              className={`nx-btn ${settings.themeMode === "system" ? "nx-btn--primary" : ""}`}
+              onClick={() => {
+                update("themeMode", "system");
+                applyThemeMode("system");
+              }}
+            >
+              🖥 Follow System
             </button>
           </div>
         </div>
