@@ -43,12 +43,15 @@ const ALLOWED_ORIGIN_PREFIXES: &[&str] = &[
     "ipc://localhost",
 ];
 
-/// The origins the Linux media-permission handler treats as NEXUS's own.
+/// The origins that count as NEXUS's own app origins.
 ///
-/// The shared list plus the `tauri://localhost` custom protocol: Tauri v2
-/// serves the embedded frontend from `tauri://localhost` on Linux (on
-/// Windows the same frontend is served from `http://tauri.localhost`), so
-/// without it the production build would deny its own mic request.
+/// The embedded frontend, the dev server and the IPC origin. On Linux the
+/// embedded frontend is served from the `tauri://localhost` custom protocol
+/// (Tauri v2 serves it from `http://tauri.localhost` on Windows) — that one
+/// extra origin is handled inside [`origin_is_own`].
+///
+/// A single definition: two lists under overlapping cfgs would be a
+/// duplicate-definition error on a non-Linux **test** build.
 #[cfg(any(target_os = "linux", test))]
 const OWN_ORIGIN_PREFIXES: &[&str] = &[
     "http://tauri.localhost",
@@ -56,19 +59,11 @@ const OWN_ORIGIN_PREFIXES: &[&str] = &[
     "http://localhost",
     "https://localhost",
     "ipc://localhost",
-    "tauri://localhost",
 ];
 
-/// The same list without the Linux-only custom protocol — compiled on the
-/// other platforms so the rule can be unit-tested everywhere.
-#[cfg(all(not(target_os = "linux"), test))]
-const OWN_ORIGIN_PREFIXES: &[&str] = &[
-    "http://tauri.localhost",
-    "https://tauri.localhost",
-    "http://localhost",
-    "https://localhost",
-    "ipc://localhost",
-];
+/// The Linux-only custom-protocol origin.
+#[cfg(target_os = "linux")]
+const LINUX_OWN_ORIGIN_PREFIXES: &[&str] = &["tauri://localhost"];
 
 /// Is this requesting origin one of NEXUS's own app origins?
 ///
@@ -83,7 +78,22 @@ const OWN_ORIGIN_PREFIXES: &[&str] = &[
 /// Pure — unit-tested without a webview.
 #[cfg(any(target_os = "linux", test))]
 pub fn origin_is_own(origin: &str) -> bool {
-    OWN_ORIGIN_PREFIXES.iter().any(|p| {
+    if matches_own_origin(origin, OWN_ORIGIN_PREFIXES) {
+        return true;
+    }
+    // Tauri v2 serves the embedded frontend from `tauri://localhost` on
+    // Linux, so without this the production build would deny its own mic.
+    #[cfg(target_os = "linux")]
+    if matches_own_origin(origin, LINUX_OWN_ORIGIN_PREFIXES) {
+        return true;
+    }
+    false
+}
+
+/// Does `origin` start with one of `prefixes`, on an origin boundary?
+#[cfg(any(target_os = "linux", test))]
+fn matches_own_origin(origin: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|p| {
         let Some(rest) = origin.strip_prefix(p) else {
             return false;
         };

@@ -210,14 +210,23 @@ impl Controller {
             None
         };
 
-        // (3) Under the lock: remember the original volume.
-        if let Some(cur) = current {
+        // (3) Under the lock: remember the original volume. The baseline file
+        // is written OUTSIDE the lock — a slow or failing filesystem write
+        // must not stall the state mutex that every spoken reply waits on.
+        let to_persist = if let Some(cur) = current {
             let mut st = self.st.lock().unwrap_or_else(|e| e.into_inner());
             if st.baseline.is_none() {
                 st.baseline = Some(cur);
-                self.persist_baseline(cur);
                 tracing::info!("[VOL] saved original {:.2}, setting {:.2} for TTS", cur, tts_volume);
+                Some(cur)
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(cur) = to_persist {
+            self.persist_baseline(cur);
         }
 
         // (4) Outside the lock: set the TTS volume.
