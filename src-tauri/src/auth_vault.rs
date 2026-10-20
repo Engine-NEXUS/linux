@@ -707,6 +707,18 @@ pub fn get_token_for_google_account(account_email: Option<&str>) -> Option<Strin
     get_token("google")
 }
 
+/// Test-only: serialise every test that touches the process-global Google
+/// account registry (the in-memory cache plus the mock keyring entry).
+/// Without it two tests race — one saves an account while the other asserts
+/// on the list length — and the same registry leaks a phone number into the
+/// memory-profile test, which reads it through `refresh_user_profile`.
+#[cfg(test)]
+pub(crate) fn google_registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking test must not poison the lock for the next one.
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -755,6 +767,10 @@ mod tests {
 
     #[test]
     fn google_account_registry_roundtrip_and_primary_switch() {
+        // The registry is process-global (memory cache + mock keyring): hold
+        // the shared guard so a parallel test cannot add or remove accounts
+        // while this one asserts on the list.
+        let _g = google_registry_test_guard();
         let prof1 = GoogleAccountProfile {
             email: "user1@gmail.com".into(),
             name: "User One".into(),
@@ -818,6 +834,8 @@ mod tests {
 
     #[test]
     fn google_profile_phone_address_roundtrip_and_legacy_compat() {
+        // Same registry as the test above — serialise, do not race.
+        let _g = google_registry_test_guard();
         // New fields survive the keychain round-trip.
         let prof = GoogleAccountProfile {
             email: "user3@gmail.com".into(),

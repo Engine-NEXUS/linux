@@ -206,6 +206,64 @@ const PROTECTED_PROCESSES: &[&str] = &[
     "system", "registry", "sihost", "fontdrvhost", "taskhostw", "nexus",
 ];
 
+/// On Linux the desktop shell IS the session: the compositor, the panel and
+/// the display server. Closing one of them tears the session down (or takes
+/// the panel with it), so voice never closes them — the Linux counterpart of
+/// the Windows shell ("explorer"), which is already refused above.
+#[cfg(target_os = "linux")]
+const LINUX_PROTECTED_PROCESSES: &[&str] = &[
+    "cosmic-comp", "cosmic-panel", "cosmic-session", "gnome-shell", "gnome-session",
+    "plasmashell", "plasma-shell", "kwin-x11", "kwin-wayland", "kwin_x11", "kwin_wayland",
+    "mutter", "sway", "weston", "xfce4-session", "xfce4-panel", "lxqt-session",
+    "mate-session-manager", "cinnamon-session", "xwayland", "xorg",
+];
+
+/// The executable's file name, whatever separator style the path uses.
+/// `Path::file_name` only understands the HOST separator, so a Windows path
+/// read on Linux kept its whole "C:\Windows\notepad.exe" as the "name" (and
+/// the protection check below then never matched it). Split on both.
+fn exe_basename(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches(|c| c == '/' || c == '\\');
+    let name = trimmed.rsplit(|c| c == '/' || c == '\\').next().unwrap_or("");
+    // A bare root ("C:\" or "/") is not a file name.
+    if name.is_empty() || name.ends_with(':') {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// "Cosmic Panel" → "cosmic-panel" (a desktop process name and what the user
+/// says are the same word with a different separator).
+#[cfg(target_os = "linux")]
+fn normalize_process_name(name: &str) -> String {
+    name.to_lowercase().replace([' ', '_'], "-")
+}
+
+/// Must this process never be closed by voice? The Windows list applies on
+/// every platform (a Windows-style name is refused everywhere); Linux adds
+/// the desktop session binaries (cosmic / gnome / plasma / Xwayland).
+fn is_protected_process(stem: &str, _display: &str) -> bool {
+    let stem = stem.to_lowercase();
+    if PROTECTED_PROCESSES.contains(&stem.as_str()) {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let candidates = [
+            normalize_process_name(&stem),
+            normalize_process_name(_display),
+        ];
+        LINUX_PROTECTED_PROCESSES
+            .iter()
+            .any(|p| candidates.iter().any(|c| c.as_str() == *p))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 /// What `close_app` will do for a spoken target. Pure apart from the registry read (unit-tested).
 #[derive(Debug, PartialEq)]
 enum ClosePlan {
@@ -220,10 +278,7 @@ fn plan_close(target: &str) -> ClosePlan {
     let (display, exe) = match app_registry::lookup_strict(spoken) {
         Some(entry) => {
             let exe = match &entry.launch {
-                app_registry::LaunchMethod::Exe { path } => std::path::Path::new(path)
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .map(|s| s.to_string()),
+                app_registry::LaunchMethod::Exe { path } => exe_basename(path),
                 _ => None,
             }
             .unwrap_or_else(|| format!("{}.exe", spoken));
@@ -241,7 +296,7 @@ fn plan_close(target: &str) -> ClosePlan {
     };
     let stem = exe.to_lowercase();
     let stem = stem.trim_end_matches(".exe");
-    if PROTECTED_PROCESSES.contains(&stem) {
+    if is_protected_process(stem, &display) {
         return ClosePlan::Refuse(format!("I won't close {}, sir.", capitalize(&display)));
     }
     ClosePlan::Close { display, exe }
@@ -1623,6 +1678,25 @@ mod close_plan_tests {
         assert!(matches!(plan_close("file explorer"), ClosePlan::Refuse(_)));
         assert!(matches!(plan_close("nexus"), ClosePlan::Refuse(_)));
         assert!(matches!(plan_close("svchost"), ClosePlan::Refuse(_)));
+    }
+
+    /// The Linux desktop session is the counterpart of the Windows shell
+    /// ("explorer"): the compositor, the panel and the display server. Voice
+    /// may never close them — it would take the session (or the panel) down.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_desktop_session_is_never_closed() {
+        let _g = test_support::install(vec![app(
+            "Cosmic Panel",
+            &["cosmic panel", "cosmic-panel"],
+            "/usr/bin/cosmic-panel",
+        )]);
+        for spoken in ["cosmic panel", "cosmic-panel", "gnome shell", "xwayland"] {
+            match plan_close(spoken) {
+                ClosePlan::Refuse(m) => assert!(m.contains("won't close"), "{spoken}: {m}"),
+                other => panic!("the desktop session must never be closed ({spoken}): {other:?}"),
+            }
+        }
     }
 
     #[test]

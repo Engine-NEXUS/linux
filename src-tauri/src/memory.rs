@@ -972,6 +972,8 @@ mod tests {
 
     #[test]
     fn test_profile_builder_merge_and_audit() {
+        // Same vault registry as the test below — serialise, do not race.
+        let _g = crate::auth_vault::google_registry_test_guard();
         let d = tmpdir("profile");
         assert!(remember(&d, "name", "Lakshya"));
         std::fs::write(d.join("contacts.json"), r#"{"Mom": "+9111", "Asha": "+9122"}"#).unwrap();
@@ -1027,6 +1029,15 @@ mod tests {
 
     #[test]
     fn test_profile_carries_phone_and_audit_speaks_it() {
+        // `refresh_user_profile` falls back to the PRIMARY Google vault
+        // profile, which is process-global: a parallel vault test that has
+        // an account with a phone number saved would make this summary
+        // speak that number. Serialise on the vault's registry guard and
+        // start from an empty registry.
+        let _g = crate::auth_vault::google_registry_test_guard();
+        for a in crate::auth_vault::get_google_accounts() {
+            let _ = crate::auth_vault::remove_google_account(&a.email);
+        }
         let d = tmpdir("phone");
         assert!(remember(&d, "name", "Lakshya"));
         assert!(refresh_user_profile(&d, Some("me@gmail.com"), None, true));

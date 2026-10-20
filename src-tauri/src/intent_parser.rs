@@ -6557,10 +6557,18 @@ mod tests {
 
     #[test]
     fn test_launch_spotify() {
+        // "open/launch/start <player>" belongs to the media engine (feature
+        // 126): the player is opened through the media controller (Apple
+        // Music / Spotify), not the generic app launcher, so it never
+        // reaches the app registry.
         let result = parse_deterministic("launch spotify");
         assert!(result.is_some());
         let r = result.unwrap();
-        assert!(matches!(r.intent, ParsedIntent::OpenApp { .. }));
+        assert!(
+            matches!(&r.intent, ParsedIntent::OpenMusicPlayer { player } if player.as_deref() == Some("spotify")),
+            "unexpected intent: {:?}",
+            r.intent
+        );
     }
 
     #[test]
@@ -9079,7 +9087,11 @@ mod tests {
 
         let res = parse_deterministic("open spot if I");
         assert!(res.is_some());
-        assert!(matches!(res.unwrap().intent, ParsedIntent::OpenApp { ref target } if target == "spotify"));
+        // The misheard phrase normalizes to "open spotify", which the media
+        // engine claims before the app registry (same as the plain phrase).
+        assert!(
+            matches!(res.unwrap().intent, ParsedIntent::OpenMusicPlayer { ref player } if player.as_deref() == Some("spotify"))
+        );
     }
 
     #[test]
