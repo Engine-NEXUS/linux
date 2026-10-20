@@ -11,11 +11,14 @@
  *  7. Worker exchanges code for tokens (using client secret stored as Worker secret).
  *  8. Tokens are stored per-user in Cloudflare D1. Client gets "connected" confirmation.
  *
- * For API keys (Claude, Devin, etc.) — no OAuth needed. User pastes the key,
- * we POST it to Worker /apikeys/add.
+ * Security: All Worker requests are routed through Rust via the
+ * `worker_request` Tauri command. Rust attaches the device bearer credential from
+ * the OS keyring, so the renderer never receives or handles it. Live provider
+ * tokens are never stored in or returned to the renderer.
  */
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-shell";
 
 // The Worker base URL. In production this comes from the saved config.
@@ -25,6 +28,28 @@ let workerBaseUrl = "";
 export function setSidecarBaseUrl(url: string): void {
   // Strip trailing slash.
   workerBaseUrl = url.replace(/\/+$/, "");
+}
+
+/**
+ * Perform an allowlisted Worker request through Rust.
+ *
+ * Security: these calls used to be direct `fetch`es from the
+ * WebView. The Worker is now deny-by-default and authenticates by a device
+ * credential held in Rust's OS keyring, so the renderer must not make them
+ * itself — and must never receive the credential in order to do so. Rust
+ * attaches it and returns only the response body.
+ */
+export async function workerCall<T = any>(
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  opts: { query?: string; body?: unknown } = {},
+): Promise<T> {
+  return await invoke<T>("worker_request", {
+    method,
+    path,
+    query: opts.query ?? null,
+    body: opts.body ?? null,
+  });
 }
 
 // ---- PKCE utilities ----
@@ -60,7 +85,7 @@ function base64UrlEncode(bytes: Uint8Array): string {
 interface PendingOAuth {
   provider: string;
   codeVerifier: string;
-  userId: string;
+  userId?: string;
   resolve: (success: boolean) => void;
   reject: (err: Error) => void;
 }
@@ -68,14 +93,21 @@ interface PendingOAuth {
 let pending: PendingOAuth | null = null;
 let unlistenDeepLink: UnlistenFn | null = null;
 
+/** Test helper to reset module state between tests. */
+export function __testResetOAuthState(): void {
+  pending = null;
+  unlistenDeepLink = null;
+  workerBaseUrl = "";
+}
+
 /**
- * Connect a Google or GitHub account via OAuth PKCE.
+ * Connect a Google, GitHub, or Swiggy account via OAuth PKCE.
  *
  * Returns a promise that resolves when the OAuth flow completes (or rejects on error/timeout).
  */
 export async function connectOAuth(
   provider: "google" | "github" | "swiggy",
-  userId: string,
+  userId?: string,
   onBrowserOpened?: () => void,
 ): Promise<boolean> {
   if (!workerBaseUrl) {
@@ -86,18 +118,19 @@ export async function connectOAuth(
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = await generateCodeChallenge(codeVerifier);
 
-  // 1. Ask Worker for the authorization URL.
-  console.log(`[OAuth] Fetching auth URL from ${workerBaseUrl}/oauth/auth-url?provider=${provider}&user_id=${encodeURIComponent(userId)}&code_challenge=${codeChallenge}`);
-  const authUrlResp = await fetch(
-    `${workerBaseUrl}/oauth/auth-url?provider=${provider}&user_id=${encodeURIComponent(userId)}&code_challenge=${codeChallenge}`,
-  );
-  if (!authUrlResp.ok) {
-    const err = await authUrlResp.json().catch(() => ({}));
-    const msg = err.error || `Failed to get OAuth URL (${authUrlResp.status})`;
+  // 1. Ask Worker for the authorization URL via the allowlisted Rust proxy.
+  // Security: via Rust so the device credential stays out of the
+  // renderer. No user_id — the Worker derives the account from the device.
+  console.log(`[OAuth] Requesting auth URL for provider=${provider} (via Rust proxy)`);
+  const authUrlData = await workerCall<{ url?: string; error?: string }>("GET", "/oauth/auth-url", {
+    query: `provider=${encodeURIComponent(provider)}&code_challenge=${encodeURIComponent(codeChallenge)}`,
+  });
+  if (!authUrlData?.url) {
+    const msg = authUrlData?.error || "Failed to get OAuth URL";
     console.error(`[OAuth] auth-url failed: ${msg}`);
     throw new Error(msg);
   }
-  const { url } = await authUrlResp.json();
+  const { url } = authUrlData;
   console.log(`[OAuth] Got auth URL: ${url.substring(0, 80)}...`);
 
   // 2. Open the system browser for the user to log in.
@@ -110,8 +143,10 @@ export async function connectOAuth(
     console.warn("[OAuth] shell.open failed, falling back to window.open:", shellErr);
     // Fallback: open in a new browser tab. This works in dev mode and
     // when the shell plugin scope isn't configured.
-    const win = window.open(url, "_blank", "noopener,noreferrer");
-    if (!win) {
+    const win = typeof window !== "undefined" && typeof window.open === "function"
+      ? window.open(url, "_blank", "noopener,noreferrer")
+      : null;
+    if (!win && typeof window !== "undefined" && window.location) {
       // Popup blocked — try location redirect as last resort
       console.warn("[OAuth] window.open blocked, trying location.href redirect");
       window.location.href = url;
@@ -170,6 +205,8 @@ export async function connectOAuth(
         });
       }).then((fn) => {
         unlistenDeepLink = fn;
+      }).catch((e) => {
+        console.warn("[OAuth] Failed to listen to deep-link events:", e);
       });
     }
 
@@ -196,8 +233,8 @@ export async function connectOAuth(
   return result;
 }
 
-/** Handle the OAuth redirect URL (nexus://oauth/callback?provider=...&user_id=...&status=success or ?code=XXX). */
-async function handleOAuthRedirect(rawUrl: string): Promise<void> {
+/** Handle the OAuth redirect URL (nexus://oauth/callback?provider=...&status=success or ?code=XXX). */
+export async function handleOAuthRedirect(rawUrl: string): Promise<void> {
   if (!pending) return;
 
   try {
@@ -220,23 +257,21 @@ async function handleOAuthRedirect(rawUrl: string): Promise<void> {
     }
 
     if (code) {
-      // Exchange code if direct redirect was used
-      const resp = await fetch(`${workerBaseUrl}/oauth/exchange`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      // Exchange code via Rust Worker proxy.
+      // user_id is no longer sent — the Worker binds the state to the
+      // authenticated device (security fix).
+      const resp = await workerCall<{ error?: string }>("POST", "/oauth/exchange", {
+        body: {
           provider: pending.provider,
           code,
           code_verifier: pending.codeVerifier,
           redirect_uri: `${workerBaseUrl}/oauth/callback`,
-          user_id: pending.userId,
           state: url.searchParams.get("state"),
-        }),
+        },
       });
 
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        throw new Error(err.error || `Exchange failed (${resp.status})`);
+      if (resp?.error) {
+        throw new Error(String(resp.error));
       }
 
       pending.resolve(true);
@@ -252,7 +287,8 @@ async function handleOAuthRedirect(rawUrl: string): Promise<void> {
 
 // ---- API key management ----
 // NOTE: addApiKey / removeApiKey / listApiKeys were deleted (audit M5) —
-// zero callers. The Worker /apikeys/* routes they hit are still live.
+// zero callers. The Worker /apikeys/* routes they hit are still live (and on
+// the worker_request allowlist, should a caller come back).
 
 // ---- OAuth status ----
 
@@ -263,22 +299,20 @@ export interface OAuthStatus {
 }
 
 /** Check which OAuth providers are connected for a user. */
-export async function getOAuthStatus(userId: string): Promise<Record<string, OAuthStatus>> {
-  if (!workerBaseUrl) return {};
-  const resp = await fetch(`${workerBaseUrl}/oauth/status?user_id=${encodeURIComponent(userId)}`);
-  if (!resp.ok) return {};
-  const data = await resp.json();
-  return data.providers || {};
+export async function getOAuthStatus(userId?: string): Promise<Record<string, OAuthStatus>> {
+  void userId;
+  try {
+    const data = await workerCall<{ providers?: Record<string, OAuthStatus> }>("GET", "/oauth/status");
+    return data?.providers || {};
+  } catch {
+    return {};
+  }
 }
 
 /** Disconnect an OAuth provider. */
 export async function disconnectOAuth(userId: string, provider: string): Promise<void> {
-  if (!workerBaseUrl) throw new Error("Server URL not configured");
-  const resp = await fetch(`${workerBaseUrl}/oauth/disconnect`, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ user_id: userId, provider }),
-  });
-  if (!resp.ok) throw new Error(`Failed to disconnect (${resp.status})`);
+  void userId;
+  await workerCall("DELETE", "/oauth/disconnect", { body: { provider } });
 }
+
 // NOTE: openInBrowser was deleted (audit M5) — zero callers.

@@ -111,8 +111,7 @@ export function SetupApp() {
   };
 
   const checkServer = useCallback(async () => {
-    if (!serverUrl || !userId) return;
-    setSidecarBaseUrl(serverUrl);
+    if (serverUrl) setSidecarBaseUrl(serverUrl);
     try {
       const status = await getOAuthStatus(userId);
       setOauthStatus(status);
