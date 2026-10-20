@@ -175,22 +175,45 @@ pub fn observed_foreground() -> crate::atspi::Foreground {
     }
 }
 
-/// The policy decision for an operation against the *observed* foreground.
+/// The policy decision for an operation, given an observation.
 ///
 /// Every semantic operation passes through here. The identity checked is the
 /// OBSERVED one (from the accessibility bus), never the name the model
 /// supplied — a prompt injection can rename its target, but it cannot change
 /// what the toolkit reports the focused window to be.
-pub fn foreground_decision(op: crate::policy::Op) -> crate::policy::Decision {
-    let fg = observed_foreground();
+///
+/// Taking the observation as a parameter lets one lookup answer both the
+/// policy question and the "which application is in front?" question — they
+/// must agree, and a second lookup could disagree.
+pub fn decision_for(
+    op: crate::policy::Op,
+    fg: &crate::atspi::Foreground,
+) -> crate::policy::Decision {
     let known = fg.is_known();
-    let sensitive = match &fg {
+    let sensitive = match fg {
         crate::atspi::Foreground::Known { app, .. } => {
             crate::policy::classify_window(app, fg.title().unwrap_or_default())
         }
         crate::atspi::Foreground::Unknown { .. } => None,
     };
     crate::policy::decide(op, known, sensitive, None)
+}
+
+/// The observed foreground **application**, if it could be identified.
+///
+/// `None` means "I could not tell", and that is not a licence to search
+/// everywhere: the accessibility bus carries every application on the
+/// desktop, and an unscoped lookup finds a control with the right name in a
+/// BACKGROUND window — VS Code's "Save" while Brave is in front. Acting on
+/// that is an action in an application the user never referenced.
+///
+/// So every semantic query is scoped to this application, and an operation
+/// that would ACT on a control refuses outright when it is `None`.
+fn observed_foreground_app(fg: &crate::atspi::Foreground) -> Option<String> {
+    match fg {
+        crate::atspi::Foreground::Known { app, .. } if !app.trim().is_empty() => Some(app.clone()),
+        _ => None,
+    }
 }
 
 fn from_atspi(n: AtspiNode) -> Option<SemanticHit> {
@@ -222,6 +245,13 @@ fn from_cdp(n: CdpNode) -> Option<SemanticHit> {
 }
 /// Resolve `name`, optionally constrained to `role`, across both semantic tiers.
 ///
+/// The query is **scoped to the observed foreground application**. The
+/// accessibility bus carries every application on the desktop, so an unscoped
+/// search would find a control with the right name in a BACKGROUND window —
+/// VS Code's "Save" while Brave is in front — and report it as the user's
+/// target. When the foreground cannot be identified, nothing is searched and
+/// nothing is returned.
+///
 /// Blocking by design: the callers are the pre-capture privacy gate and the
 /// locate path, both of which are synchronous today. The request itself runs
 /// on a thread of its own, so this is safe from any calling context.
@@ -230,12 +260,25 @@ pub fn resolve(name: &str, role: Option<&str>) -> Resolution {
         return Resolution::NotFound;
     }
 
+    // One observation answers both questions: the policy question and the
+    // "which application is in front?" question.
+    let fg = observed_foreground();
+
+    // Scope the lookup to the foreground application. Without a name to scope
+    // to, we would be searching every application on the bus.
+    let Some(app) = observed_foreground_app(&fg) else {
+        tracing::info!(
+            "semantic: the foreground application is unknown — not searching for {name:?}"
+        );
+        return Resolution::NotFound;
+    };
+
     // ── Policy gate ──────────────────────────────────────────────────────
     // Every semantic operation passes here first. The identity checked is the
     // OBSERVED one (from the accessibility bus), never the name the model
     // supplied — a prompt injection can rename its target, but it cannot change
     // what GNOME reports the focused window to be. See `policy` for why.
-    match foreground_decision(crate::policy::Op::LocateGeometry) {
+    match decision_for(crate::policy::Op::LocateGeometry, &fg) {
         d if d.may_proceed_unattended() => {}
         Decision::Confirm { reason } => {
             tracing::info!("semantic: {name:?} needs confirmation — {reason}");
@@ -251,9 +294,9 @@ pub fn resolve(name: &str, role: Option<&str>) -> Resolution {
     let want = name.to_string();
     let want_role = role.map(|r| r.to_string());
     let outcome = run_isolated(move || async move {
-        // ── Tier 1: AT-SPI ────────────────────────────────────────────────
+        // ── Tier 1: AT-SPI (scoped to the foreground application) ────────
         let mut last_err: Option<String> = None;
-        match crate::atspi::find(&want, None, want_role.as_deref()).await {
+        match crate::atspi::find(&want, Some(app.as_str()), want_role.as_deref()).await {
             Ok(Some(n)) => {
                 if let Some(h) = from_atspi(n) {
                     return Ok((Some(h), last_err));
@@ -308,14 +351,25 @@ pub fn resolve(name: &str, role: Option<&str>) -> Resolution {
 /// The error carries the policy reason so a caller can say it out loud rather
 /// than reporting "I see nothing" — those are very different answers.
 pub fn list_actionables() -> Result<Vec<SemanticHit>, SemanticError> {
-    match foreground_decision(crate::policy::Op::ReadTree) {
+    let fg = observed_foreground();
+    match decision_for(crate::policy::Op::ReadTree, &fg) {
         d if d.may_proceed_unattended() => {}
         Decision::Deny { reason } => return Err(SemanticError::Denied(reason)),
         Decision::Confirm { reason } => return Err(SemanticError::Denied(reason)),
         Decision::Allow => {}
     }
 
-    match run_isolated(|| async { crate::atspi::actionables(None).await }) {
+    // Scoped to the foreground application, for the same reason `resolve` and
+    // `activate` are: the list must describe the window the user is looking
+    // at, not every window that happens to be on the bus.
+    let Some(app) = observed_foreground_app(&fg) else {
+        return Err(SemanticError::Denied(
+            "I can't tell which window is in front, sir, so I can't list its controls."
+                .to_string(),
+        ));
+    };
+
+    match run_isolated(move || async move { crate::atspi::actionables(Some(app.as_str())).await }) {
         Ok(nodes) => Ok(nodes.into_iter().filter_map(from_atspi).collect()),
         Err(e) => Err(SemanticError::Unavailable(e)),
     }
@@ -327,10 +381,30 @@ pub fn list_actionables() -> Result<Vec<SemanticHit>, SemanticError> {
 /// identity and the toolkit performs the action. That is what makes it work
 /// on a native Wayland session, where synthetic input does not exist.
 ///
+/// The action is **scoped to the observed foreground application**, and it is
+/// REFUSED when the foreground cannot be identified: an unscoped activation
+/// would press a button in a background window — VS Code's "Save" while Brave
+/// is in front — which is an action in an application the user never
+/// referenced.
+///
 /// AT-SPI first (it is the tier that works everywhere), then CDP for
-/// Chromium/Electron, whose AT-SPI tree is a skeleton.
+/// Chromium/Electron, whose AT-SPI tree is a skeleton. The CDP tier is scoped
+/// by debug port rather than by application — it can only see the browser it
+/// is attached to.
 pub fn activate(name: &str, role: Option<&str>) -> Result<ActivationOutcome, SemanticError> {
-    match foreground_decision(crate::policy::Op::Activate) {
+    let fg = observed_foreground();
+
+    // Refuse before anything else: without a known foreground there is no
+    // application to scope the action to.
+    let Some(app) = observed_foreground_app(&fg) else {
+        return Err(SemanticError::Denied(
+            "I can't tell which window is in front, sir, so I won't act on a control \
+             I can't place."
+                .to_string(),
+        ));
+    };
+
+    match decision_for(crate::policy::Op::Activate, &fg) {
         d if d.may_proceed_unattended() => {}
         Decision::Deny { reason } => return Err(SemanticError::Denied(reason)),
         Decision::Confirm { reason } => return Err(SemanticError::Denied(reason)),
@@ -340,7 +414,7 @@ pub fn activate(name: &str, role: Option<&str>) -> Result<ActivationOutcome, Sem
     let want = name.to_string();
     let want_role = role.map(|r| r.to_string());
     let outcome = run_isolated(move || async move {
-        match crate::atspi::activate(&want, None, want_role.as_deref(), "click").await {
+        match crate::atspi::activate(&want, Some(app.as_str()), want_role.as_deref(), "click").await {
             Ok(effect) => Ok(ActivationOutcome {
                 tier: Tier::AtSpi,
                 app: effect.app,
@@ -448,6 +522,58 @@ mod tests {
         let h = hit_with(None);
         assert!(Resolution::Found(h).is_found());
         assert!(!Resolution::NotFound.is_found());
+    }
+
+    // ── Scoping to the observed foreground application ───────────────────
+
+    #[test]
+    fn the_scope_is_the_observed_foreground_application() {
+        let fg = crate::atspi::Foreground::Known {
+            app: "brave".into(),
+            title: "Example — Brave".into(),
+        };
+        assert_eq!(observed_foreground_app(&fg).as_deref(), Some("brave"));
+    }
+
+    #[test]
+    fn an_unknown_foreground_has_no_scope() {
+        // Without a name to scope to, a search would cover every application
+        // on the bus — and find a control with the right name in a BACKGROUND
+        // window.
+        let fg = crate::atspi::Foreground::Unknown {
+            reason: "ambiguous".into(),
+        };
+        assert!(observed_foreground_app(&fg).is_none());
+    }
+
+    #[test]
+    fn a_foreground_without_an_application_name_has_no_scope() {
+        // The bus named a window but not the application it belongs to, so
+        // there is still nothing to scope the query to.
+        let fg = crate::atspi::Foreground::Known {
+            app: "  ".into(),
+            title: "Something".into(),
+        };
+        assert!(observed_foreground_app(&fg).is_none());
+    }
+
+    #[test]
+    fn the_decision_uses_the_observation_it_is_given() {
+        // The policy and the scope must be made from the SAME observation, or
+        // they can disagree about which window is in front.
+        let unknown = crate::atspi::Foreground::Unknown {
+            reason: "ambiguous".into(),
+        };
+        let d = decision_for(crate::policy::Op::Activate, &unknown);
+        assert!(
+            !d.may_proceed_unattended(),
+            "an activation against an unknown window must not proceed unattended"
+        );
+        let known = crate::atspi::Foreground::Known {
+            app: "code".into(),
+            title: "main.rs — nexus".into(),
+        };
+        assert!(decision_for(crate::policy::Op::Activate, &known).may_proceed_unattended());
     }
 
     // ── Pointing vs. naming ───────────────────────────────────────────────

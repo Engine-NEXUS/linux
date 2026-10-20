@@ -77,38 +77,83 @@ pub fn list_actionables() -> Vec<UiElement> {
 /// The reason matters: "I could not identify the window" and "this window has
 /// no controls" are very different answers, and only the first one is safe to
 /// act on.
+///
+/// The list is put through the **same contract as the Windows one**:
+/// `screen::accept_actionable` decides which elements qualify (enabled, on
+/// screen, named, sized, not a password field) and `screen::sort_reading_order`
+/// puts them in reading order, so "the 3rd button" is the 3rd button the user
+/// sees — not the 3rd node in the accessibility tree.
 pub fn list_actionables_with_reason() -> Result<Vec<UiElement>, String> {
     let hits = crate::semantic::list_actionables().map_err(|e| e.spoken())?;
-    Ok(hits
-        .into_iter()
-        .filter_map(|h| {
-            let b = h.bounds?;
-            // GTK's "not yet positioned" sentinel must never become a
-            // clickable rectangle.
-            if !b.is_real() {
-                return None;
-            }
-            Some(UiElement {
-                name: h.name,
-                // The role is the Linux equivalent of the Windows UIA
-                // control type, so downstream filtering on `kind` works.
-                kind: h.role,
-                x: b.x,
-                y: b.y,
-                w: b.w,
-                h: b.h,
-            })
-        })
-        .collect())
+    Ok(to_actionable_list(hits))
+}
+
+/// Turn semantic hits into the actionable list, in reading order.
+///
+/// Pure, so the rules are unit-tested without a live accessibility bus:
+///
+/// * a **credential field** is never a candidate — the policy layer knows
+///   these by their ROLE (a password entry says so), which a name-based
+///   check cannot be trusted to catch;
+/// * the **acceptance rule** is the same one the Windows path uses
+///   (`screen::accept_actionable`): enabled, on screen, named, sized, and not
+///   a password field by name;
+/// * the result is in **reading order**, so "the 3rd button" is the 3rd
+///   button the user sees rather than the 3rd node in the tree.
+pub fn to_actionable_list(hits: Vec<crate::semantic::SemanticHit>) -> Vec<UiElement> {
+    let mut out: Vec<UiElement> = Vec::new();
+    for h in hits {
+        if crate::policy::classify_node(&h.role, &h.name).is_some() {
+            continue;
+        }
+        let Some(b) = h.bounds else { continue };
+        if !b.is_real() {
+            continue;
+        }
+        // The toolkit's state set is its own verdict on the element:
+        //   STATE_ENABLED / STATE_SENSITIVE — the widget responds to input.
+        //   STATE_VISIBLE without STATE_SHOWING — the widget is laid out but
+        //   not rendered (scrolled out of view, or in a collapsed container):
+        //   it cannot be clicked, and offering it as "the 3rd option" sends
+        //   the pointer into the void.
+        // A toolkit that reports no states at all is not disqualifying every
+        // element, so both checks only fire on a positive marker.
+        let enabled = h.states.is_empty()
+            || h
+                .states
+                .iter()
+                .any(|s| s.as_str() == "enabled" || s.as_str() == "sensitive");
+        let offscreen = h.states.iter().any(|s| s.as_str() == "visible")
+            && !h.states.iter().any(|s| s.as_str() == "showing");
+        if !crate::screen::accept_actionable(enabled, offscreen, &h.name, b.w, b.h) {
+            continue;
+        }
+        out.push(UiElement {
+            name: h.name,
+            // The role is the Linux equivalent of the Windows UIA
+            // control type, so downstream filtering on `kind` works.
+            kind: h.role,
+            x: b.x,
+            y: b.y,
+            w: b.w,
+            h: b.h,
+        });
+    }
+    crate::screen::sort_reading_order(out)
 }
 
 /// Find an element by name through the semantic cascade.
 ///
-/// Returns `None` when the element was not found, when the tiers could not
-/// run, or when the hit carries no usable geometry. A CDP hit has no
-/// geometry by construction (its accessibility tree is semantic, not spatial),
-/// so it is never reported as a pointing result — the caller falls through to
-/// the pixel tier instead.
+/// The query is scoped to the **observed foreground application**, so it can
+/// only ever return a control from the window the user is looking at. When
+/// the foreground cannot be identified, nothing is searched and `None` comes
+/// back.
+///
+/// `None` is also the answer when the element was not found, when the tiers
+/// could not run, or when the hit carries no usable geometry. A CDP hit has
+/// no geometry by construction (its accessibility tree is semantic, not
+/// spatial), so it is never reported as a pointing result — the caller falls
+/// through to the pixel tier instead.
 pub fn find_by_name(query: &str) -> Option<UiElement> {
     if query.trim().is_empty() {
         return None;
@@ -466,6 +511,90 @@ mod tests {
         assert!(size.is_some());
         let (w, h) = size.unwrap();
         assert!(w > 0 && h > 0);
+    }
+
+    // ── The actionable list: same contract as the Windows one ─────────────
+
+    fn hit(name: &str, role: &str, x: i32, y: i32, states: &[&str]) -> crate::semantic::SemanticHit {
+        crate::semantic::SemanticHit {
+            name: name.into(),
+            role: role.into(),
+            bounds: Some(crate::atspi::AtspiBounds { x, y, w: 80, h: 30 }),
+            tier: crate::semantic::Tier::AtSpi,
+            actions: vec!["click".into()],
+            states: states.iter().map(|s| s.to_string()).collect(),
+            chromium_skeleton_risk: false,
+        }
+    }
+
+    #[test]
+    fn the_list_is_in_reading_order_not_tree_order() {
+        // "The 3rd button" must be the 3rd button the user SEES, which is the
+        // contract in screen.rs — the AT-SPI walk is in tree order, which is
+        // not the same thing.
+        let els = to_actionable_list(vec![
+            hit("third", "push button", 10, 200, &["enabled", "sensitive", "showing"]),
+            hit("first", "push button", 10, 10, &["enabled", "sensitive", "showing"]),
+            hit("second", "push button", 10, 100, &["enabled", "sensitive", "showing"]),
+        ]);
+        let names: Vec<&str> = els.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn same_row_is_ordered_left_to_right() {
+        // Both elements sit in the SAME 12px row bucket (`y / 12`), which is
+        // what `sort_reading_order` uses: two items a few pixels apart land in
+        // different buckets when they straddle a bucket boundary, and the
+        // order is then by row, not by x.
+        let els = to_actionable_list(vec![
+            hit("right", "push button", 300, 10, &["enabled", "sensitive", "showing"]),
+            hit("left", "push button", 10, 11, &["enabled", "sensitive", "showing"]),
+        ]);
+        assert_eq!(els[0].name, "left");
+        assert_eq!(els[1].name, "right");
+    }
+
+    #[test]
+    fn a_credential_field_is_never_offered() {
+        // The server offers every editable node, and a password entry IS
+        // editable. The policy layer knows it by its ROLE.
+        let els = to_actionable_list(vec![
+            hit("Password", "password text", 10, 10, &["enabled", "sensitive", "showing"]),
+            hit("Save", "push button", 10, 100, &["enabled", "sensitive", "showing"]),
+        ]);
+        assert_eq!(els.len(), 1);
+        assert_eq!(els[0].name, "Save");
+    }
+
+    #[test]
+    fn a_disabled_element_is_not_offered() {
+        // No STATE_ENABLED / STATE_SENSITIVE means the widget is insensitive.
+        let els = to_actionable_list(vec![
+            hit("Save", "push button", 10, 10, &["showing"]),
+            hit("Cancel", "push button", 10, 100, &["enabled", "sensitive", "showing"]),
+        ]);
+        assert_eq!(els.len(), 1);
+        assert_eq!(els[0].name, "Cancel");
+    }
+
+    #[test]
+    fn an_element_that_is_not_shown_is_not_offered() {
+        // Laid out (VISIBLE) but not rendered (no SHOWING): scrolled out of
+        // view or inside a collapsed container. It cannot be clicked.
+        let els = to_actionable_list(vec![
+            hit("Hidden", "push button", 10, 10, &["enabled", "sensitive", "visible"]),
+            hit("Shown", "push button", 10, 100, &["enabled", "sensitive", "visible", "showing"]),
+        ]);
+        assert_eq!(els.len(), 1);
+        assert_eq!(els[0].name, "Shown");
+    }
+
+    #[test]
+    fn an_element_without_geometry_is_not_offered() {
+        let mut h = hit("Save", "push button", 10, 10, &["enabled", "sensitive", "showing"]);
+        h.bounds = None;
+        assert!(to_actionable_list(vec![h]).is_empty());
     }
 
     // ── The portal request path ───────────────────────────────────────────

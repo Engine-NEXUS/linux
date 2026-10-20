@@ -3709,9 +3709,14 @@ async fn run_screen_click<R: Runtime>(
         // exist. The policy gate is inside the semantic tier.
         #[cfg(target_os = "linux")]
         {
-            let els = match crate::screen::list_actionables_with_reason() {
-                Ok(els) => els,
-                Err(e) => {
+            // The semantic lookup is a BLOCKING call (an accessibility-bus
+            // round trip) inside an async function — keep it off the tokio
+            // worker threads.
+            let els = match tokio::task::spawn_blocking(crate::screen::list_actionables_with_reason)
+                .await
+            {
+                Ok(Ok(els)) => els,
+                Ok(Err(e)) => {
                     speak_line(&app, e, &request_id);
                     clear_active_request(&request_id);
                     return Ok(ProcessResult {
@@ -3720,12 +3725,22 @@ async fn run_screen_click<R: Runtime>(
                         handled_locally: true,
                     });
                 }
+                Err(e) => {
+                    tracing::warn!("screen click: the element lookup failed — {e}");
+                    Vec::new()
+                }
             };
             match crate::screen::pick_ordinal(&els, ordinal) {
                 Some(el) => {
                     let name = el.name.clone();
                     let (cx, cy) = crate::live::commands::mouse::element_center(&el);
-                    match crate::system_center::click_element_by_name(&name) {
+                    // The activation is a blocking accessibility call too.
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        crate::system_center::click_element_by_name(&name)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("the click could not be performed: {e}")));
+                    match outcome {
                         Ok(msg) => {
                             // Point at what was clicked, so the user can see
                             // which control the assistant acted on. Any stale
@@ -3735,7 +3750,7 @@ async fn run_screen_click<R: Runtime>(
                                 &app,
                                 cx as f64,
                                 cy as f64,
-                                name.clone(),
+                                el.name.clone(),
                             );
                             speak_line(&app, msg, &request_id)
                         }
@@ -3825,9 +3840,14 @@ async fn run_screen_read<R: Runtime>(
         // Linux: the same accessibility tree, read instead of actuated.
         #[cfg(target_os = "linux")]
         {
-            let els = match crate::screen::list_actionables_with_reason() {
-                Ok(els) => els,
-                Err(e) => {
+            // The semantic lookup is a BLOCKING call (an accessibility-bus
+            // round trip) inside an async function — keep it off the tokio
+            // worker threads.
+            let els = match tokio::task::spawn_blocking(crate::screen::list_actionables_with_reason)
+                .await
+            {
+                Ok(Ok(els)) => els,
+                Ok(Err(e)) => {
                     speak_line(&app, e, &request_id);
                     clear_active_request(&request_id);
                     return Ok(ProcessResult {
@@ -3835,6 +3855,10 @@ async fn run_screen_read<R: Runtime>(
                         subsystem: Subsystem::LocalCommand,
                         handled_locally: true,
                     });
+                }
+                Err(e) => {
+                    tracing::warn!("screen read: the element lookup failed — {e}");
+                    Vec::new()
                 }
             };
             match crate::screen::pick_ordinal(&els, ordinal) {
@@ -3990,8 +4014,16 @@ async fn try_ocr_answer_linux<R: Runtime>(
 ) -> Option<ProcessResult> {
     // The capture primitive carries the privacy gate: an unidentified
     // foreground refuses the capture and this returns None.
-    let (b64, _, _) =
-        crate::vision::capture_plain_jpeg_base64_w(crate::vision::VISION_FAST_W)?;
+    //
+    // The capture is a BLOCKING call (a portal round trip, up to 25 s, plus
+    // the gate's accessibility lookup) and this is an async function — so it
+    // goes to a blocking thread instead of parking a tokio worker.
+    let (b64, _, _) = tokio::task::spawn_blocking(|| {
+        crate::vision::capture_plain_jpeg_base64_w(crate::vision::VISION_FAST_W)
+    })
+    .await
+    .ok()
+    .flatten()?;
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let boxes = match crate::ocr::ocr_image(&bytes).await {
@@ -6578,7 +6610,17 @@ async fn run_screen_analysis<R: Runtime>(
         // capture primitive re-checks it, so there is no path around it.
         #[cfg(target_os = "linux")]
         {
-            let gate = crate::pointer::capture_gate(&app);
+            // The gate is a BLOCKING call (an accessibility-bus round trip)
+            // inside an async function — keep it off the tokio worker.
+            let gate_app = app.clone();
+            let gate = tokio::task::spawn_blocking(move || {
+                crate::pointer::capture_gate(&gate_app)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("screen analysis: the privacy gate failed — {e}");
+                crate::pointer::CaptureGate::UnknownForeground
+            });
             if !gate.allows_capture() {
                 tracing::warn!("screen analysis refused: {}", gate.spoken());
                 speak_line(&app, gate.spoken(), &request_id);
@@ -6630,9 +6672,12 @@ async fn run_screen_analysis<R: Runtime>(
                     let spoken = if !payload.overview.trim().is_empty() {
                         format!("{}, sir.", payload.overview.trim().trim_end_matches('.'))
                     } else {
+                        // Nothing is drawn on the screen on this path, so the
+                        // sentence must not claim that something was
+                        // highlighted.
                         let n = payload.items.len();
                         format!(
-                            "I've highlighted {} {} on your screen, sir.",
+                            "I found {} {} on your screen, sir.",
                             n,
                             if n == 1 { "element" } else { "elements" }
                         )

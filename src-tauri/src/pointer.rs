@@ -504,24 +504,39 @@ impl CaptureGate {
 ///
 /// The order matters and is deliberate:
 ///
-/// 1. **Unknown identity ⇒ refuse.** Before anything else. We cannot rule out
-///    an exclusion when we do not know what we are looking at, and "we could
-///    not tell" must never collapse into "nothing matched" — that collapse is
-///    the bug this whole module exists to prevent.
-/// 2. **Sensitive window ⇒ refuse.** A vault, a bank, a wallet: the built-in
-///    list, always on, independent of the user's own list.
-/// 3. **User's privacy list ⇒ refuse.** Case-insensitive substring, matched
-///    against the OBSERVED app name and title.
+/// 1. **The policy layer decides.** The built-in rules — a sensitive window
+///    is refused, an unidentified window is refused — live in
+///    [`crate::policy::decide`] and nowhere else, so there is exactly one
+///    implementation of them.
+/// 2. **The user's own privacy list**, on top: a case-insensitive substring
+///    match against the OBSERVED app name and title.
+///
+/// The policy's `Decision` does not say WHICH rule fired, so the mapping back
+/// to a spoken reason uses the same facts the decision was made from.
 pub fn capture_gate_for(identity: &ForegroundIdentity, excluded: &[String]) -> CaptureGate {
-    if !identity.is_known() {
-        return CaptureGate::UnknownForeground;
-    }
-    let ForegroundIdentity::Known { app, title } = identity else {
-        return CaptureGate::UnknownForeground;
+    let known = identity.is_known();
+    let sensitive = match identity {
+        ForegroundIdentity::Known { app, title } => crate::policy::classify_window(app, title),
+        ForegroundIdentity::Unknown { .. } => None,
     };
-    if crate::policy::classify_window(app, title).is_some() {
-        return CaptureGate::SensitiveWindow;
+
+    // ONE implementation decides: the policy layer.
+    match crate::policy::decide(crate::policy::Op::Capture, known, sensitive, None) {
+        crate::policy::Decision::Allow => {}
+        crate::policy::Decision::Deny { .. } => {
+            return if sensitive.is_some() {
+                CaptureGate::SensitiveWindow
+            } else {
+                // The window could not be identified, so nothing can be ruled
+                // out. (A deny for any other reason is also treated as a
+                // refusal: the gate fails closed.)
+                CaptureGate::UnknownForeground
+            };
+        }
+        crate::policy::Decision::Confirm { .. } => return CaptureGate::UnknownForeground,
     }
+
+    // The user's own list, on top of the built-in rules.
     for label in identity.labels() {
         if let Some(hit) = exclusion_hit(&label, excluded) {
             return CaptureGate::Excluded(hit.clone());

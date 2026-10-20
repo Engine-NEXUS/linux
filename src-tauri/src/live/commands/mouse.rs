@@ -549,8 +549,12 @@ mod unix_stub {
     /// Linux: the semantic tier (AT-SPI, then CDP) resolves a name exactly,
     /// with geometry, in about a hundred milliseconds — and it is the only
     /// tier that works on a native Wayland session, where UI Automation does
-    /// not exist. The policy gate runs inside it, so a window that cannot be
-    /// identified yields no element rather than a wrong one.
+    /// not exist.
+    ///
+    /// The lookup is **scoped to the observed foreground application**, so it
+    /// cannot return a control out of a background window (VS Code's "Save"
+    /// while Brave is in front), and when the foreground cannot be identified
+    /// it returns nothing at all rather than a wrong element.
     pub fn resolve_element(name: &str) -> Option<crate::screen::UiElement> {
         #[cfg(target_os = "linux")]
         {

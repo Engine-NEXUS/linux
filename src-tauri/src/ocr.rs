@@ -315,7 +315,14 @@ mod linux_ocr {
         if jpeg.is_empty() {
             return Err("empty image".into());
         }
-        crate::lazy_ocr::ensure_ocr_running();
+        // Starting the sidecar is a SYNCHRONOUS poll loop, and the first
+        // start has to load the ONNX models — up to a minute on a machine
+        // that has to fetch them. Running it on an async worker thread
+        // would stall every other task on that thread for that long, so it
+        // goes to a blocking thread instead.
+        tokio::task::spawn_blocking(crate::lazy_ocr::ensure_ocr_running)
+            .await
+            .map_err(|e| format!("ocr sidecar start failed: {e}"))?;
         crate::lazy_ocr::mark_ocr_request();
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(40))

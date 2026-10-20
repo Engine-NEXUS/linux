@@ -64,6 +64,9 @@ pub enum Op {
     /// Capture the screen. Discloses *everything* in the window, so it is
     /// graded with the read/write tier rather than with the geometry tier:
     /// a screenshot of a vault is a screenshot of the vault.
+    ///
+    /// This is the operation the pre-capture privacy gate uses
+    /// (`pointer::capture_gate_for`), so the built-in rules live here only.
     Capture,
 }
 

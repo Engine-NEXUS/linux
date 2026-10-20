@@ -376,13 +376,18 @@ fn probe_blocking() -> RawContext {
     } else {
         None
     };
+    // The flag says whether the probes actually IDENTIFIED the foreground —
+    // not merely that they ran. `foreground_process_name()` returning `None`
+    // leaves the app and title empty, and claiming "known" there would make
+    // a later hardening pass trust an identity that was never established.
+    let foreground_known = !app.trim().is_empty() || !title.trim().is_empty();
     RawContext {
         app,
         title,
         url,
         document_rect,
         window_rect: crate::browser_url::foreground_window_rect(),
-        foreground_known: true,
+        foreground_known,
     }
 }
 

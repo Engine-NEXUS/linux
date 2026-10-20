@@ -368,6 +368,57 @@ pub fn capture_gridded_jpeg_base64() -> Option<(String, i32, i32)> {
     capture_gridded_jpeg_base64_w(VISION_MAX_W)
 }
 
+/// The same capture, without blocking the async worker it is called from.
+///
+/// The capture is a blocking call by nature (a portal round trip on Linux, a
+/// BitBlt on Windows), and these helpers are called from inside async
+/// functions. Running them inline would park a tokio worker thread for the
+/// whole round trip — and on Linux the portal can take up to 25 s.
+pub async fn capture_gridded_jpeg_base64_async() -> Option<(String, i32, i32)> {
+    match tokio::task::spawn_blocking(capture_gridded_jpeg_base64).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("vision: the capture task failed — {e}");
+            None
+        }
+    }
+}
+
+/// The same capture, without blocking the async worker it is called from.
+pub async fn capture_primary_jpeg_base64_async() -> Option<(String, i32, i32)> {
+    match tokio::task::spawn_blocking(capture_primary_jpeg_base64).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("vision: the capture task failed — {e}");
+            None
+        }
+    }
+}
+
+/// The same capture at an explicit width, without blocking the async worker.
+pub async fn capture_gridded_jpeg_base64_w_async(max_w: u32) -> Option<(String, i32, i32)> {
+    match tokio::task::spawn_blocking(move || capture_gridded_jpeg_base64_w(max_w)).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("vision: the capture task failed — {e}");
+            None
+        }
+    }
+}
+
+/// The gridded capture, falling back to the plain one.
+///
+/// The fallback is **lazy on purpose**: the plain capture is a SECOND
+/// screenshot through the portal — and on Linux a second privacy-gated
+/// round trip — so evaluating it eagerly would take a second screenshot on
+/// every call, even when the gridded one succeeded.
+async fn capture_gridded_or_plain(max_w: u32) -> Option<(String, i32, i32)> {
+    match capture_gridded_jpeg_base64_w_async(max_w).await {
+        Some(v) => Some(v),
+        None => capture_primary_jpeg_base64_async().await,
+    }
+}
+
 /// Ask Groq vision for element coordinates. Tries each vision model in
 /// order; first parseable in-bounds answer wins. None = fall through.
 /// Uses the gridded capture so the model reads off visible anchors.
@@ -380,8 +431,7 @@ pub async fn locate_via_vision(
     if description.trim().is_empty() || api_key.is_empty() {
         return None;
     }
-    let (b64, w, h) = capture_gridded_jpeg_base64()
-        .or_else(capture_primary_jpeg_base64)?;
+    let (b64, w, h) = capture_gridded_or_plain(VISION_MAX_W).await?;
     let prompt = build_locate_prompt(description);
     let data_uri = format!("data:image/jpeg;base64,{b64}");
     for model in GROQ_VISION_MODELS {
@@ -433,7 +483,16 @@ pub async fn resolve_named_target(
     api_key: &str,
     client: &reqwest::Client,
 ) -> Option<crate::screen::UiElement> {
-    if let Some(el) = crate::live::commands::mouse::resolve_element(name) {
+    // The element lookup is a BLOCKING call (an accessibility-bus round trip
+    // on Linux, a UIA walk on Windows) inside an async function.
+    let want = name.to_string();
+    let resolved = tokio::task::spawn_blocking(move || {
+        crate::live::commands::mouse::resolve_element(&want)
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(el) = resolved {
         return Some(el);
     }
     if api_key.is_empty() {
@@ -820,8 +879,7 @@ pub async fn locate_with_fallback(
     let race = read_vision_race(usage_dir);
     // Capture once — all providers share the gridded screenshot.
     // Race mode uses the smaller fast capture (faster encode/upload).
-    let (b64, w, h) = capture_gridded_jpeg_base64_w(capture_width_for(&race))
-        .or_else(capture_primary_jpeg_base64)?;
+    let (b64, w, h) = capture_gridded_or_plain(capture_width_for(&race)).await?;
 
     // ── Race mode: both keys, both under quota, auto order ──────
     if read_vision_race(usage_dir) == "speed"
@@ -1704,7 +1762,9 @@ pub async fn analyze_screen_spatial<R: Runtime>(
         .path()
         .app_data_dir()
         .map_err(|e: tauri::Error| e.to_string())?;
-    let Some((b64, _, _)) = capture_gridded_jpeg_base64() else {
+    // The capture blocks (a portal round trip on Linux, a BitBlt on Windows) —
+    // keep it off the async worker thread.
+    let Some((b64, _, _)) = capture_gridded_jpeg_base64_async().await else {
         return Err("Screen capture failed".to_string());
     };
     // Feature 98 P6: identical screen within 60s replays the cached answer
