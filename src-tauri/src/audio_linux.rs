@@ -1,18 +1,32 @@
 //! Linux audio-platform helpers: PipeWire/ALSA capture-device selection.
 //!
 //! A Linux audio server publishes far more "input" devices than there are
-//! microphones:
+//! microphones, and they are not equally useful:
 //!
 //!   - every output sink also exposes a `Monitor of …` loopback source, which
 //!     carries **speaker output** — probing it first costs 5 s per device and
 //!     can false-trigger the wake word on our own TTS playback;
 //!   - ALSA's `default` often resolves to a PipeWire dummy sink that emits
 //!     electrical static instead of speech;
+//!   - ALSA's **plugin** devices (`lavrate` = the "Linear Converter" plugin,
+//!     `samplerate`, `speexrate`, `upmix`, `vdownmix`, `jack`, …) are rate
+//!     converters and mixers, not microphones: they open happily and deliver
+//!     **silence**, so accepting one leaves the wake word listening to
+//!     nothing at all;
 //!   - WirePlumber's EasyEffects sink shows up as a capture device too.
 //!
-//! The Linux build therefore probes **real microphones first** and the
-//! loopback/dummy sources last (they are still probed, so a machine whose
-//! only capture device is a loopback still gets a stream).
+//! On the target machine (Pop!_OS 24.04, COSMIC, PipeWire) the device list
+//! was, in ALSA order: `lavrate`, `jack`, `pipewire`, `pulse`, `default`,
+//! `hw:CARD=sofhdadsp,DEV=6`, `hw:CARD=sofhdadsp,DEV=7`. Probing that order
+//! meant the real capture path (PipeWire's default source) was tried late and
+//! the `lavrate` plugin was accepted instead — the wake word then never heard
+//! anything.
+//!
+//! The Linux build therefore probes in a fixed order ([`probe_priority`]):
+//! the audio server's own capture path first (`pipewire`, `pulse`,
+//! `default`), then the real hardware (`hw:`, `plughw:`, `sysdefault:`), then
+//! everything else, and only last the ALSA plugin devices and the
+//! loopback/monitor sources.
 //!
 //! Everything in this module is pure so it can be unit-tested without a
 //! sound card.
@@ -24,6 +38,74 @@ const LOOPBACK_MARKERS: &[&str] = &["monitor", "loopback"];
 /// Name fragments of the virtual sinks WirePlumber/PipeWire publish as capture
 /// devices ("EasyEffects Sink", "Dummy Output", "Spotify", "Null").
 const VIRTUAL_SINK_MARKERS: &[&str] = &["easyeffects", "spotify", "dummy", "null"];
+
+/// ALSA plugin / virtual capture devices.
+///
+/// These are rate converters and mixers, not microphones. `lavrate` is ALSA's
+/// "Linear Converter" plugin: it opens without error and delivers silence,
+/// so it must never be preferred over a real capture path.
+const ALSA_PLUGIN_MARKERS: &[&str] = &[
+    "lavrate",
+    "samplerate",
+    "speexrate",
+    "speex",
+    "upmix",
+    "vdownmix",
+    "jack",
+    "oss",
+    "null",
+    "dmix",
+    "dsnoop",
+];
+
+// ─── Probe tiers (lower is probed first) ─────────────────────────────────────
+
+/// The PipeWire capture device — the audio server's own default source.
+const TIER_PIPEWIRE: u8 = 0;
+/// The PulseAudio capture device (the compatibility layer).
+const TIER_PULSE: u8 = 1;
+/// ALSA's `default` capture device (resolves to the server's default source).
+const TIER_DEFAULT: u8 = 2;
+/// A real hardware capture device (`hw:`, `plughw:`, `sysdefault:`).
+const TIER_HARDWARE: u8 = 3;
+/// Anything else that is not a plugin and not a loopback.
+const TIER_OTHER: u8 = 4;
+/// An ALSA plugin / virtual device — opens, but delivers silence.
+const TIER_PLUGIN: u8 = 5;
+/// An output loopback ("Monitor of …") — carries speaker output.
+const TIER_LOOPBACK: u8 = 6;
+
+/// The normal probe window: how long a device gets to deliver its first
+/// audio callback before it is called silent.
+pub const PROBE_WAIT_MS: u64 = 500;
+
+/// The probe window for the audio server's own capture path.
+///
+/// PipeWire's ALSA bridge starts slowly: the stream is created immediately
+/// but the first callback can take more than a second. Probing it with the
+/// normal 500 ms window reports "no audio callback fired" for a perfectly
+/// good microphone and moves on to the next device.
+pub const SLOW_PROBE_WAIT_MS: u64 = 2000;
+
+/// What the wake-word init line prints as the device on Linux.
+///
+/// The acoustic profile that ships with the app was calibrated on a Windows
+/// machine, so its device name ("Microphone Array (Intel® Smart …)") is not
+/// this machine's microphone. The device NEXUS really listens to is only
+/// known once the capture stream opens — the capture step logs it — so the
+/// init line points there instead of printing a name that is not this
+/// machine's.
+pub const KWS_DEVICE_PENDING: &str =
+    "pending (the device actually opened is logged by the capture step)";
+
+/// The "the microphone is silent" hint in the log — Linux wording.
+///
+/// The Windows message is about the Intel SST driver, which does not exist
+/// here: on Linux a silent microphone is almost always the wrong input
+/// device, a muted input or a PipeWire that is not running.
+pub const SILENT_MIC_HINT: &str =
+    "On Linux: check the input device and its volume in Settings > Sound (or run `wpctl status`), \
+     and make sure PipeWire is running.";
 
 /// True when `name` identifies an output-loopback / virtual-sink capture
 /// device rather than a real microphone.
@@ -38,14 +120,71 @@ pub fn is_loopback_device(name: &str) -> bool {
         .any(|m| lower.contains(m))
 }
 
-/// Probe-order key: real microphones first (0), loopbacks / virtual sinks
-/// last (1). Used to sort the capture-device probe order; the sort is
-/// stable, so the default device keeps its place among equals.
+/// Probe-order key: lower is probed first.
+///
+/// The tiers are, in order:
+/// 0. `pipewire` — the audio server's own capture path;
+/// 1. `pulse` — the PulseAudio compatibility layer;
+/// 2. `default` — ALSA's default device (the server's default source);
+/// 3. `hw:` / `plughw:` / `sysdefault:` — real hardware;
+/// 4. everything else that is neither a plugin nor a loopback;
+/// 5. ALSA plugin / virtual devices (they open, but deliver silence);
+/// 6. output loopbacks ("Monitor of …" — they carry speaker output).
+///
+/// The sort is stable, so devices in the same tier keep the order the
+/// caller passed in.
 pub fn probe_priority(name: &str) -> u8 {
-    if is_loopback_device(name) {
-        1
+    let lower = name.trim().to_lowercase();
+    if lower.is_empty() {
+        return TIER_OTHER;
+    }
+    // A loopback is never a microphone, whatever else it looks like.
+    if is_loopback_device(&lower) {
+        return TIER_LOOPBACK;
+    }
+    if lower.starts_with("pipewire") {
+        return TIER_PIPEWIRE;
+    }
+    if lower.starts_with("pulse") {
+        return TIER_PULSE;
+    }
+    // Exact match only: "sysdefault:…" is a hardware device, not ALSA's
+    // "default" device.
+    if lower == "default" {
+        return TIER_DEFAULT;
+    }
+    if lower.starts_with("hw:") || lower.starts_with("plughw:") || lower.starts_with("sysdefault:")
+    {
+        return TIER_HARDWARE;
+    }
+    if ALSA_PLUGIN_MARKERS.iter().any(|m| lower.contains(m)) {
+        return TIER_PLUGIN;
+    }
+    TIER_OTHER
+}
+
+/// The capture devices in the order they should be probed.
+///
+/// Pure: the same names always come back in the same order, and the order is
+/// stable (equal tiers keep the caller's order).
+pub fn probe_order<'a>(names: &[&'a str]) -> Vec<&'a str> {
+    let mut ordered: Vec<&'a str> = names.to_vec();
+    ordered.sort_by_key(|n| probe_priority(n));
+    ordered
+}
+
+/// How long to wait for the first audio callback when probing a device.
+///
+/// The audio server's own capture path (`pipewire`, `pulse`, `default`)
+/// needs [`SLOW_PROBE_WAIT_MS`]: PipeWire's ALSA bridge delivers its first
+/// callback late, and the normal window would report a good microphone as
+/// silent. Every other device keeps the normal window.
+pub fn probe_wait_ms(name: &str) -> u64 {
+    let lower = name.trim().to_lowercase();
+    if lower.starts_with("pipewire") || lower.starts_with("pulse") || lower == "default" {
+        SLOW_PROBE_WAIT_MS
     } else {
-        0
+        PROBE_WAIT_MS
     }
 }
 
@@ -77,21 +216,25 @@ pub fn capture_permission_state() -> &'static str {
         return permission_verdict(false, false);
     }
 
-    // A real microphone first; loopbacks are only accepted when nothing else
-    // exists (a machine whose only "input" is a monitor would otherwise be
-    // reported as broken).
-    let mut real: Vec<&cpal::Device> = Vec::new();
-    let mut loopback: Vec<&cpal::Device> = Vec::new();
-    for d in &devices {
-        let name = d.name().unwrap_or_default();
-        if probe_priority(&name) == 0 {
-            real.push(d);
-        } else {
-            loopback.push(d);
+    // Probe in the same order the wake-word capture uses: the real capture
+    // paths first, the ALSA plugin devices and the loopbacks last (a
+    // loopback is only accepted when nothing else exists — a machine whose
+    // only "input" is a monitor would otherwise be reported as broken).
+    let mut remaining: Vec<(String, &cpal::Device)> = devices
+        .iter()
+        .map(|d| (d.name().unwrap_or_default(), d))
+        .collect();
+    let names: Vec<String> = remaining.iter().map(|(n, _)| n.clone()).collect();
+    let name_refs: Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+    let mut ordered: Vec<&cpal::Device> = Vec::new();
+    for wanted in probe_order(&name_refs) {
+        let idx = remaining.iter().position(|(n, _)| n.as_str() == wanted);
+        if let Some(idx) = idx {
+            ordered.push(remaining.remove(idx).1);
         }
     }
 
-    for d in real.iter().chain(loopback.iter()) {
+    for d in ordered {
         let name = d.name().unwrap_or_else(|_| "unknown".into());
         if device_opens(d) {
             tracing::info!("audio_linux: capture device '{name}' opened — microphone granted");
@@ -226,29 +369,105 @@ mod tests {
                 !is_loopback_device(name),
                 "'{name}' is a real capture device and must not be deprioritised"
             );
-            assert_eq!(probe_priority(name), 0);
         }
     }
 
     #[test]
-    fn probe_order_puts_real_mics_first() {
+    fn the_server_capture_path_is_probed_first() {
+        // PipeWire's own capture device is the real microphone on a modern
+        // Linux desktop: it must be probed before everything else.
+        assert_eq!(probe_priority("pipewire"), TIER_PIPEWIRE);
+        assert_eq!(probe_priority("pulse"), TIER_PULSE);
+        assert_eq!(probe_priority("default"), TIER_DEFAULT);
+        // Real hardware comes after the server's own path.
+        assert_eq!(probe_priority("hw:CARD=sofhdadsp,DEV=6"), TIER_HARDWARE);
+        assert_eq!(probe_priority("plughw:CARD=PCH,DEV=0"), TIER_HARDWARE);
+        assert_eq!(probe_priority("sysdefault:CARD=PCH,DEV=0"), TIER_HARDWARE);
+        // "sysdefault:…" is a hardware device, not ALSA's "default" device.
+        assert_ne!(probe_priority("sysdefault:CARD=PCH,DEV=0"), TIER_DEFAULT);
+    }
+
+    #[test]
+    fn alsa_plugins_and_loopbacks_are_probed_last() {
+        for name in [
+            "lavrate",
+            "samplerate",
+            "speexrate",
+            "speex",
+            "upmix",
+            "vdownmix",
+            "jack",
+            "oss",
+            "null",
+            "dmix",
+            "dsnoop",
+        ] {
+            let p = probe_priority(name);
+            assert!(
+                p >= TIER_PLUGIN,
+                "'{name}' is an ALSA plugin/virtual device and must be probed last (got {p})"
+            );
+            assert!(
+                p > probe_priority("hw:CARD=sofhdadsp,DEV=6"),
+                "'{name}' must come after real hardware (got {p})"
+            );
+        }
+        // A loopback carries speaker output — never a microphone.
+        assert!(probe_priority("Monitor of Built-in Audio Analog Stereo") >= TIER_LOOPBACK);
+    }
+
+    #[test]
+    fn the_device_list_of_the_target_machine_sorts_into_the_right_order() {
+        // The list the app logged on Pop!_OS / COSMIC, in ALSA order.
         let names = [
-            "Monitor of Built-in Audio Analog Stereo",
-            "Built-in Audio Analog Stereo",
-            "easyeffects_sink",
+            "lavrate",
+            "jack",
+            "pipewire",
+            "pulse",
+            "default",
+            "hw:CARD=sofhdadsp,DEV=6",
+            "hw:CARD=sofhdadsp,DEV=7",
         ];
-        let mut ordered: Vec<&str> = names.iter().copied().collect();
-        ordered.sort_by_key(|n| probe_priority(n));
         assert_eq!(
-            ordered,
-            vec!["Built-in Audio Analog Stereo", "Monitor of Built-in Audio Analog Stereo", "easyeffects_sink"]
+            probe_order(&names),
+            vec![
+                "pipewire",
+                "pulse",
+                "default",
+                "hw:CARD=sofhdadsp,DEV=6",
+                "hw:CARD=sofhdadsp,DEV=7",
+                "lavrate",
+                "jack",
+            ]
         );
+    }
+
+    #[test]
+    fn the_probe_order_is_stable() {
+        // Two devices of the same tier keep the order they were listed in.
+        let names = ["hw:CARD=B,DEV=0", "hw:CARD=A,DEV=0", "pipewire"];
+        assert_eq!(
+            probe_order(&names),
+            vec!["pipewire", "hw:CARD=B,DEV=0", "hw:CARD=A,DEV=0"]
+        );
+    }
+
+    #[test]
+    fn the_server_capture_path_gets_the_long_probe_window() {
+        // PipeWire's ALSA bridge delivers its first callback late.
+        assert_eq!(probe_wait_ms("pipewire"), SLOW_PROBE_WAIT_MS);
+        assert_eq!(probe_wait_ms("pulse"), SLOW_PROBE_WAIT_MS);
+        assert_eq!(probe_wait_ms("default"), SLOW_PROBE_WAIT_MS);
+        // Everything else keeps the normal window.
+        assert_eq!(probe_wait_ms("hw:CARD=sofhdadsp,DEV=6"), PROBE_WAIT_MS);
+        assert_eq!(probe_wait_ms("lavrate"), PROBE_WAIT_MS);
+        assert_eq!(probe_wait_ms(""), PROBE_WAIT_MS);
     }
 
     #[test]
     fn empty_name_is_not_a_loopback() {
         assert!(!is_loopback_device(""));
-        assert_eq!(probe_priority(""), 0);
+        assert_eq!(probe_priority(""), TIER_OTHER);
     }
 
     #[test]

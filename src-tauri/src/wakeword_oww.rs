@@ -862,13 +862,23 @@ pub(crate) mod engine {
 
             let profile = crate::acoustic_profile::AcousticProfile::load_or_default(Some(&oww_dir));
             let threshold = profile.kws_threshold;
+            // The acoustic profile carries the name of the microphone it was
+            // calibrated for. The profile that ships with the app was
+            // calibrated on a Windows machine, so on Linux that name is not
+            // this machine's microphone — the device NEXUS really listens to
+            // is only known once the capture stream opens, and the capture
+            // step logs it.
+            #[cfg(target_os = "linux")]
+            let device_label = crate::audio_linux::KWS_DEVICE_PENDING;
+            #[cfg(not(target_os = "linux"))]
+            let device_label = profile.device_name.as_str();
             tracing::info!(
                 "openWakeWord KWS engine initialized \
                  (wake word: NEXUS, 80ms sliding window, threshold: {}, \
                  device: '{}', highpass: {:.1}Hz, silence gate: {:.5}, pre-gain: {:.2}x, \
                  detection: max-based, post-TTS mute: 2000ms, grace: {}ms after restart)",
                 threshold,
-                profile.device_name,
+                device_label,
                 profile.highpass_cutoff_hz,
                 profile.silence_rms_threshold,
                 profile.pre_gain,
@@ -1595,11 +1605,16 @@ pub(crate) mod engine {
 
             // Warn if mic has been silent for more than 60 seconds
             if n - last_nonsilent > 2000 && n > 2000 {
+                // The hint is platform specific: on Windows a silent mic is
+                // usually the Intel SST driver, on Linux it is the input
+                // device (wrong source, muted, PipeWire not running).
+                #[cfg(target_os = "linux")]
+                const SILENT_MIC_HINT: &str = crate::audio_linux::SILENT_MIC_HINT;
+                #[cfg(not(target_os = "linux"))]
+                const SILENT_MIC_HINT: &str = "Intel SST driver may need a restart. Try: 1) Unmute mic in Windows settings, 2) Disable 'Audio Enhancements' in mic properties, 3) Restart the app.";
                 tracing::warn!(
-                    "audio: mic has been silent for ~{:.0}s (callbacks {}-{}, max RMS ever seen: {:.6}). \
-                     Intel SST driver may need a restart. Try: 1) Unmute mic in Windows settings, \
-                     2) Disable 'Audio Enhancements' in mic properties, 3) Restart the app.",
-                    silence_secs, last_nonsilent, n, max_rms
+                    "audio: mic has been silent for ~{:.0}s (callbacks {}-{}, max RMS ever seen: {:.6}). {}",
+                    silence_secs, last_nonsilent, n, max_rms, SILENT_MIC_HINT
                 );
             }
         }
@@ -4561,8 +4576,10 @@ fn start_audio_capture(
     //
     // Linux is EXCLUDED on purpose: the ALSA `default` frequently resolves to a
     // PipeWire dummy/monitor sink that emits electrical static (RMS ~0.003) instead
-    // of speech. Linux therefore probes every device like Windows does, with the
-    // loopback sources probed LAST (see `crate::audio_linux::probe_priority`).
+    // of speech. Linux therefore probes every device like Windows does, in the
+    // Linux probe order: the audio server's own capture path first, the ALSA
+    // plugin devices and the loopback sources last (see
+    // `crate::audio_linux::probe_priority`).
     #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
     {
         if let Some(default_device) = host.default_input_device() {
@@ -4607,9 +4624,13 @@ fn start_audio_capture(
     // The Intel SST "Digital Microphones" driver sometimes returns silence
     // in WASAPI shared mode, so we need to try ALL devices.
     //
-    // Linux: PipeWire "Monitor of ..." loopbacks report as real inputs but only
-    // carry speaker output — probing them first costs 5s each and they can
-    // false-trigger the KWS on TTS playback. Try real mics first.
+    // Linux: the ALSA device list is not a microphone list. PipeWire's
+    // "Monitor of ..." loopbacks report as real inputs but only carry
+    // speaker output, and ALSA's plugin devices (`lavrate`, `jack`, …) open
+    // happily and deliver silence. The Linux probe order puts the audio
+    // server's own capture path (pipewire / pulse / default) first, the real
+    // hardware next, and the plugins and loopbacks last — see
+    // `crate::audio_linux::probe_priority`.
     let default_device = host.default_input_device();
     let mut try_order: Vec<cpal::Device> = Vec::new();
     if let Some(ref d) = default_device {
@@ -4626,8 +4647,9 @@ fn start_audio_capture(
             try_order.push(d.clone());
         }
     }
-    // Stable sort: real microphones keep the default-device-first order, the
-    // loopback/dummy sources move to the end.
+    // Stable sort: devices in the same tier keep the default-device-first
+    // order, the ALSA plugin devices and the loopback/dummy sources move to
+    // the end.
     #[cfg(target_os = "linux")]
     try_order.sort_by_key(|d| {
         let n = d.name().unwrap_or_default().to_lowercase();
@@ -4639,7 +4661,9 @@ fn start_audio_capture(
     }
 
     // Try each device until we find one that produces non-zero audio.
-    // We start the stream, wait 5 seconds, and check the RMS.
+    // We start the stream, wait for the first callback (the window depends
+    // on the device — PipeWire's ALSA bridge is slow to start), and check
+    // the RMS.
     // If the device produces silence (Intel SST bug), try the next device.
     let mut last_err = String::new();
     let mut best_device: Option<(cpal::Device, f32)> = None; // (device, rms)
@@ -4651,7 +4675,15 @@ fn start_audio_capture(
             attempt, dev_name, attempt + 1, try_order.len()
         );
 
-        match try_device(device, engine.clone()) {
+        // Linux: PipeWire's ALSA bridge delivers its first callback late, so
+        // the audio server's own capture path gets a longer window — with
+        // the short one a perfectly good microphone is reported as silent.
+        #[cfg(target_os = "linux")]
+        let probe_wait_ms = crate::audio_linux::probe_wait_ms(&dev_name);
+        #[cfg(not(target_os = "linux"))]
+        let probe_wait_ms = 500u64;
+
+        match try_device(device, engine.clone(), probe_wait_ms) {
             Ok(()) => {
                 tracing::info!("audio: device '{}' accepted", dev_name);
                 return Ok(());
@@ -4682,6 +4714,17 @@ fn start_audio_capture(
     // recovery, user unmutes, headset reconnects, etc.).
     if let Some((device, rms)) = best_device {
         let dev_name = device.name().unwrap_or_else(|_| "unknown".into());
+        // The cause is platform specific: on Windows it is usually the Intel
+        // SST driver, on Linux a muted input or an audio server that is not
+        // running.
+        #[cfg(target_os = "linux")]
+        tracing::warn!(
+            "audio: ALL devices produced silence! Falling back to '{}' (RMS={:.6}). \
+             The input may be muted, the wrong source may be selected, or PipeWire may not be running. \
+             Wake word will not work until the mic produces audio.",
+            dev_name, rms
+        );
+        #[cfg(not(target_os = "linux"))]
         tracing::warn!(
             "audio: ALL devices produced silence! Falling back to '{}' (RMS={:.6}). \
              The mic may be muted or the Intel SST driver may be broken. \
@@ -4795,24 +4838,42 @@ fn try_device_silent(
 
     let stream = build_result.map_err(|e| format!("build stream: {e}"))?;
     stream.play().map_err(|e| format!("play stream: {e}"))?;
-    tracing::info!(
-        "audio: stream started on '{}', OWW KWS listening for 'nexus'...",
-        device.name().unwrap_or_else(|_| "unknown".into())
-    );
+    log_capture_device(&device.name().unwrap_or_else(|_| "unknown".into()));
     // Store the stream in the global so pause_stream/resume_stream can
     // access it for the mic baton pass. Keep it alive forever.
     *CPAL_STREAM.write() = Some(SendStream(stream));
     Ok(())
 }
 
+/// Log that the wake-word engine is now listening on a capture device.
+///
+/// The name is the device that was really opened. On Linux that matters:
+/// the acoustic profile's device name is the microphone the profile was
+/// calibrated for (a Windows one), while the capture path that is actually
+/// in use is the audio server's source.
+#[cfg(not(feature = "mock-wake"))]
+fn log_capture_device(device_name: &str) {
+    #[cfg(target_os = "linux")]
+    tracing::info!(
+        "audio: stream started on '{}', OWW KWS listening for 'nexus' (this is the capture device actually in use)...",
+        device_name
+    );
+    #[cfg(not(target_os = "linux"))]
+    tracing::info!(
+        "audio: stream started on '{}', OWW KWS listening for 'nexus'...",
+        device_name
+    );
+}
+
 /// Try to start audio capture on a single device.
-/// Starts the stream, waits 5 seconds, and checks the RMS of the captured
-/// audio. If the device produces silence (Intel SST bug), returns an error
-/// so the caller can try the next device.
+/// Starts the stream, waits `probe_wait_ms` for the first callback, and
+/// checks the RMS of the captured audio. If the device produces silence
+/// (Intel SST bug), returns an error so the caller can try the next device.
 #[cfg(not(feature = "mock-wake"))]
 fn try_device(
     device: &cpal::Device,
     engine: std::sync::Arc<parking_lot::Mutex<engine::WakeEngine>>,
+    probe_wait_ms: u64,
 ) -> Result<(), String> {
     use cpal::traits::{DeviceTrait, StreamTrait};
     use cpal::Sample;
@@ -4997,15 +5058,16 @@ fn try_device(
     let stream = build_result.map_err(|e| format!("build stream: {e}"))?;
     stream.play().map_err(|e| format!("play stream: {e}"))?;
 
-    // Wait 500ms and compute RMS over the window.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Wait for the first callback and compute RMS over the window.
+    std::thread::sleep(std::time::Duration::from_millis(probe_wait_ms));
 
     let samples = total_samples.load(Ordering::Relaxed);
     let sq = sum_sq.load(Ordering::Relaxed) as f64 / 1e9;
 
     if samples == 0 {
         tracing::warn!(
-            "audio: device produced 0 samples in 500ms — no audio callback fired, trying next device"
+            "audio: device produced 0 samples in {}ms — no audio callback fired, trying next device",
+            probe_wait_ms
         );
         drop(stream);
         return Err("no audio callbacks received".to_string());
@@ -5018,6 +5080,15 @@ fn try_device(
     // In a quiet room with Intel SST, ambient noise is ~0.00002-0.00008 RMS.
     // The Intel SST lockup produces exactly 0.000000 RMS.
     if sq == 0.0 || rms < 1e-6 {
+        // On Linux there is no Intel SST driver: a dead capture device is a
+        // muted input, the wrong source, or an audio server that is not
+        // running.
+        #[cfg(target_os = "linux")]
+        tracing::warn!(
+            "audio: device RMS {:.6} is zero — the input is silent (muted, wrong source, or PipeWire is not running), trying next device",
+            rms
+        );
+        #[cfg(not(target_os = "linux"))]
         tracing::warn!(
             "audio: device RMS {:.6} is zero — Intel SST driver lockout, trying next device",
             rms
@@ -5026,10 +5097,7 @@ fn try_device(
         return Err(format!("device produces silence (RMS={:.6})", rms));
     }
 
-    tracing::info!(
-        "audio: stream started on '{}', OWW KWS listening for 'nexus'...",
-        device.name().unwrap_or_else(|_| "unknown".into())
-    );
+    log_capture_device(&device.name().unwrap_or_else(|_| "unknown".into()));
     // Store the stream in the global so pause_stream/resume_stream can
     // access it for the mic baton pass. Keep it alive forever.
     *CPAL_STREAM.write() = Some(SendStream(stream));
