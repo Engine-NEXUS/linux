@@ -185,6 +185,15 @@ pub fn get_or_create_window<R: Runtime>(
         .focused(config.focus)
         .visible(false); // Start hidden — caller will show after positioning
 
+    // Linux: the stage must never take the keyboard. tao turns accept-focus
+    // back ON after the first draw for any focusable window created
+    // unfocused, which undid `overlay_linux`'s `set_accept_focus(false)`:
+    // COSMIC then focused the full-screen stage and it swallowed keystrokes.
+    #[cfg(target_os = "linux")]
+    if config.label == "stage" {
+        builder = builder.focusable(false);
+    }
+
     if let Some(mw) = config.min_width {
         if let Some(mh) = config.min_height {
             builder = builder.min_inner_size(mw, mh);
