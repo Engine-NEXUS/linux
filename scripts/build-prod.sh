@@ -11,7 +11,15 @@ cd "$ROOT_DIR"
 
 echo "==> Building frontend"
 npm --prefix frontend install
+if [ -f scripts/sync-hand-assets.mjs ]; then
+  node scripts/sync-hand-assets.mjs || true
+fi
 npm --prefix frontend run build
+
+echo "==> Syncing sidecars to resources"
+for f in atspi_server.py cdp_server.py nlu_server.py ocr_server.py stt_server.py; do
+  [ -f "server/$f" ] && cp -f "server/$f" "src-tauri/resources/server/$f" || true
+done
 
 echo "==> Building .deb (tauri build)"
 TAURI_BIN="$ROOT_DIR/frontend/node_modules/.bin/tauri"

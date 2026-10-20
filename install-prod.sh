@@ -23,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo .)"
 if [ -x "$SCRIPT_DIR/scripts/register-hotkey.sh" ]; then
   "$SCRIPT_DIR/scripts/register-hotkey.sh" "$(command -v nexus)" || true
 else
-  echo "Hotkey: Settings > Keyboard > Custom Shortcut: nexus --wake on Super+Space"
+  echo "Hotkey: Settings > Keyboard > Custom Shortcut: nexus --wake on Ctrl+Super+Space"
 fi
 
 echo "Done. Run: nexus --setup"

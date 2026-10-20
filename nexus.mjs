@@ -24,7 +24,7 @@ import { execSync, spawnSync } from "node:child_process";
 // We control all arguments (no user input) — the warning is a false positive
 // for our use case of launching .cmd shims like npm.cmd on Windows.
 process.removeAllListeners("warning");
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, copyFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, copyFileSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, arch } from "node:os";
@@ -244,11 +244,11 @@ function installLinux() {
 
   // System libraries for Tauri on Linux (webkit2gtk-4.1)
   const sysDeps = {
-    "apt-get": ["libwebkit2gtk-4.1-dev", "libgtk-3-dev", "libayatana-appindicator3-dev", "librsvg2-dev", "libasound2-dev", "libssl-dev", "pkg-config"],
-    "dnf":     ["webkit2gtk4.1-devel", "gtk3-devel", "libappindicator-gtk3-devel", "librsvg2-devel", "alsa-lib-devel", "openssl-devel", "pkgconf-pkg-config"],
-    "yum":     ["webkit2gtk4.1-devel", "gtk3-devel", "libappindicator-gtk3-devel", "librsvg2-devel", "alsa-lib-devel", "openssl-devel", "pkgconfig"],
-    "pacman":  ["webkit2gtk-4.1", "gtk3", "libappindicator-gtk3", "librsvg", "alsa-lib", "openssl", "pkgconf"],
-    "zypper":  ["webkit2gtk4-devel", "gtk3-devel", "libappindicator3-devel", "librsvg2-devel", "alsa-devel", "libopenssl-devel", "pkg-config"],
+    "apt-get": ["libwebkit2gtk-4.1-dev", "libgtk-3-dev", "libayatana-appindicator3-dev", "librsvg2-dev", "libasound2-dev", "libssl-dev", "pkg-config", "portaudio19-dev"],
+    "dnf":     ["webkit2gtk4.1-devel", "gtk3-devel", "libappindicator-gtk3-devel", "librsvg2-devel", "alsa-lib-devel", "openssl-devel", "pkgconf-pkg-config", "portaudio-devel"],
+    "yum":     ["webkit2gtk4.1-devel", "gtk3-devel", "libappindicator-gtk3-devel", "librsvg2-devel", "alsa-lib-devel", "openssl-devel", "pkgconfig", "portaudio-devel"],
+    "pacman":  ["webkit2gtk-4.1", "gtk3", "libappindicator-gtk3", "librsvg", "alsa-lib", "openssl", "pkgconf", "portaudio"],
+    "zypper":  ["webkit2gtk4-devel", "gtk3-devel", "libappindicator3-devel", "librsvg2-devel", "alsa-devel", "libopenssl-devel", "pkg-config", "libportaudio2"],
   };
 
   info(`Installing system libraries via ${pm}...`);
@@ -379,12 +379,26 @@ function cmdSetup() {
     run("npm", ["--prefix", "server/worker", "install"], { allowFail: true });
   }
 
-  // 5. Install NLU Python dependencies
-  info("Installing NLU server Python dependencies...");
-  const nluReq = join(ROOT, "server", "nlu", "requirements.txt");
-  if (existsSync(nluReq)) {
-    run(pythonCmd(), ["-m", "pip", "install", "-r", nluReq],
-      { allowFail: true, hint: "If pip fails, create a venv: python -m venv .venv && activate it" });
+  // 5. Install Python dependencies
+  if (IS_LINUX) {
+    info("Installing Python sidecar dependencies into user venv...");
+    const venvDir = join(process.env.HOME || "", ".local", "share", "nexus", "venv");
+    if (!existsSync(venvDir)) {
+      mkdirSync(dirname(venvDir), { recursive: true });
+      run("python3", ["-m", "venv", "--system-site-packages", venvDir], { allowFail: true });
+    }
+    const pip = join(venvDir, "bin", "pip");
+    const reqLinux = join(ROOT, "server", "requirements-linux.txt");
+    if (existsSync(pip) && existsSync(reqLinux)) {
+      run(pip, ["install", "-r", reqLinux], { allowFail: true });
+    }
+  } else {
+    info("Installing NLU server Python dependencies...");
+    const nluReq = join(ROOT, "server", "nlu", "requirements.txt");
+    if (existsSync(nluReq)) {
+      run(pythonCmd(), ["-m", "pip", "install", "-r", nluReq],
+        { allowFail: true, hint: "If pip fails, create a venv: python -m venv .venv && activate it" });
+    }
   }
 
   // 6. Verify NLU model is present (either in server/nlu/model/ or resources/)
@@ -517,7 +531,7 @@ function killRunningNexus() {
     }
   } else {
     try {
-      execSync("pkill -f nexus", { stdio: "pipe", encoding: "utf-8" });
+      execSync("pkill -x nexus", { stdio: "pipe", encoding: "utf-8" });
       warn("Killed running nexus process");
     } catch {
       // No nexus process running — good
@@ -569,13 +583,17 @@ function syncNluModel() {
   }
 }
 
-/// Sync the server entrypoints (nlu_server.py, stt_server.py) from server/
-/// into src-tauri/resources/server/. The installer and production lazy_* loaders
-/// run the resources/ copies — without this sync they silently shipped stale
-/// pre-Moonshine/pre-OTA code (audit C3). Called before every build alongside
-/// syncNluModel().
+/// Sync all Python sidecars from server/ into src-tauri/resources/server/.
+/// The installer and production lazy_* loaders run the resources/ copies.
+/// Both copies must remain 100% identical.
 function syncServerScripts() {
-  const files = ["nlu_server.py", "stt_server.py"];
+  const files = [
+    "atspi_server.py",
+    "cdp_server.py",
+    "nlu_server.py",
+    "ocr_server.py",
+    "stt_server.py",
+  ];
   let synced = 0;
   for (const f of files) {
     const src = join(ROOT, "server", f);
@@ -595,11 +613,8 @@ function cmdBuild() {
   killRunningNexus();
 
   // Sync the NLU model from server/nlu/model/ to src-tauri/resources/server/nlu/model/
-  // This ensures the installer always bundles the latest trained model.
-  // The NLU server reads from resources/ in production (no server/ dir in installed builds).
   syncNluModel();
-  // Also sync the server entrypoints so production never ships stale
-  // nlu_server.py / stt_server.py copies (audit: OTA + Moonshine never reached prod).
+  // Also sync the server entrypoints so production never ships stale sidecars
   syncServerScripts();
 
   info("Building frontend (Vite)...");
@@ -609,11 +624,25 @@ function cmdBuild() {
   run("npm", ["--prefix", "frontend", "run", "build"]);
 
   info("Building Rust release binary (custom-protocol + admin-brain)...");
-  const cargoEnv = {};
-  if (IS_WIN && process.env.LIBCLANG_PATH) cargoEnv.LIBCLANG_PATH = process.env.LIBCLANG_PATH;
+  const cargoEnv = { ...process.env };
+  if (IS_WIN && process.env.LIBCLANG_PATH) {
+    cargoEnv.LIBCLANG_PATH = process.env.LIBCLANG_PATH;
+  }
+  if (IS_LINUX && !process.env.LIBCLANG_PATH) {
+    // Auto-detect LLVM on Linux (e.g. Pop!_OS / Ubuntu) for bindgen
+    try {
+      const glob = readdirSync("/usr/lib").filter(f => f.startsWith("llvm-"));
+      if (glob.length > 0) {
+        glob.sort().reverse();
+        const p = join("/usr/lib", glob[0], "lib");
+        if (existsSync(join(p, "libclang.so"))) {
+          cargoEnv.LIBCLANG_PATH = p;
+          info(`Auto-detected LIBCLANG_PATH: ${p}`);
+        }
+      }
+    } catch {}
+  }
   // admin-brain: enables the Qwen brain (admin-only, runtime-gated by admin.json).
-  // The brain code is compiled in but does nothing unless admin.json has is_admin=true.
-  // Normal users never have admin.json, so the brain is dormant in their builds.
   run("cargo", ["build", "--release", "--features", "custom-protocol,admin-brain"],
     { cwd: join(ROOT, "src-tauri"), env: cargoEnv,
       hint: "Make sure LIBCLANG_PATH is set (Windows) or LLVM is installed" });
@@ -629,11 +658,14 @@ function cmdBuild() {
 
 function cmdDev() {
   info("Starting Tauri dev mode (hot reload via Vite)...");
-  // tauri dev runs the Vite dev server + the Rust app with devUrl
-  // We need the tauri CLI — check for cargo-tauri or npx tauri
-  const tauriCli = has("cargo-tauri") ? ["cargo", "tauri", "dev"]
-    : ["npx", "--prefix", join(ROOT, "frontend"), "tauri", "dev"];
-  run(tauriCli[0], tauriCli.slice(1), { cwd: join(ROOT, "src-tauri") });
+  const localTauri = join(ROOT, "frontend", "node_modules", ".bin", "tauri");
+  if (has("cargo-tauri")) {
+    run("cargo", ["tauri", "dev"], { cwd: join(ROOT, "src-tauri") });
+  } else if (existsSync(localTauri)) {
+    run(localTauri, ["dev"], { cwd: join(ROOT, "src-tauri") });
+  } else {
+    run("npx", ["--prefix", join(ROOT, "frontend"), "tauri", "dev"], { cwd: join(ROOT, "src-tauri") });
+  }
 }
 
 function cmdRun() {
@@ -645,16 +677,11 @@ function cmdRun() {
   }
 
   if (IS_WIN) {
-    // Windows: use run.ps1 for the unified color-coded console experience.
-    // It kills old instances, clears logs, launches nexus.exe, and tails
-    // all logs (Rust wake-word, audio, frontend CDP) in one stream.
     const runScript = join(ROOT, "scripts", "run.ps1");
     if (existsSync(runScript)) {
       info("Launching NEXUS via unified console (run.ps1)...");
-      // Pass through any extra args (e.g. -Build, -Debug)
       const extraArgs = process.argv.slice(3).filter(a => !a.startsWith("-"));
       const psArgs = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", runScript];
-      // Check for --debug or -Debug flag
       if (process.argv.includes("--debug") || process.argv.includes("-Debug")) {
         psArgs.push("-Debug");
       }
@@ -667,13 +694,22 @@ function cmdRun() {
       run("pwsh", psArgs, { shell: false });
       return;
     }
-    // Fall back to direct launch if run.ps1 doesn't exist
     info(`Launching NEXUS: ${binPath}`);
     run(binPath, [], { stdio: "ignore" });
   } else {
-    // Unix: launch directly (no run.ps1 equivalent)
-    info(`Launching NEXUS: ${binPath}`);
-    run(binPath, [], { stdio: "ignore" });
+    // Unix: launch directly with GDK_BACKEND=x11 and Python venv on Linux
+    const runEnv = { ...process.env };
+    if (IS_LINUX) {
+      if (!runEnv.GDK_BACKEND) runEnv.GDK_BACKEND = "x11";
+      const venvPython = join(process.env.HOME || "", ".local", "share", "nexus", "venv", "bin", "python3");
+      if (existsSync(venvPython) && !runEnv.NEXUS_PYTHON) {
+        runEnv.NEXUS_PYTHON = venvPython;
+        runEnv.PATH = `${dirname(venvPython)}:${runEnv.PATH || ""}`;
+      }
+    }
+    const extraArgs = process.argv.slice(2).filter(a => a !== "run" && a !== "start");
+    info(`Launching NEXUS: ${binPath} ${extraArgs.join(" ")}`.trim());
+    run(binPath, extraArgs, { stdio: "inherit", env: runEnv });
   }
 }
 
@@ -717,6 +753,88 @@ function cmdCheck() {
 
   // Wake word model
   check("Wake word ONNX model", () => existsSync(join(ROOT, "src-tauri", "resources", "oww", "nexus.onnx")));
+
+  if (IS_LINUX) {
+    console.log(`\n${C.bold}${C.cyan}Linux Platform Diagnostics${C.reset}\n`);
+
+    // 1. Python venv check
+    const venvDir = process.env.NEXUS_VENV || join(process.env.HOME || "", ".local", "share", "nexus", "venv");
+    const venvPython = process.env.NEXUS_PYTHON || join(venvDir, "bin", "python3");
+    const hasVenv = existsSync(venvPython);
+    check(`Python sidecar venv (${venvPython})`, () => hasVenv);
+
+    // 2. Sidecar imports verification
+    const py = hasVenv ? venvPython : (hasPython() ? pythonCmd() : null);
+    if (py) {
+      const sidecarImports = [
+        { name: "atspi_server (gi/Atspi, fastapi, uvicorn)", code: "import gi; gi.require_version('Atspi', '2.0'); from gi.repository import Atspi; import fastapi, uvicorn; print('ok')" },
+        { name: "cdp_server (websockets, fastapi, uvicorn)", code: "import websockets, fastapi, uvicorn; print('ok')" },
+        { name: "ocr_server (rapidocr, cv2, numpy, onnxruntime)", code: "import rapidocr, cv2, numpy, onnxruntime, fastapi, uvicorn; print('ok')" },
+        { name: "stt_server (moonshine_voice, fastapi, uvicorn)", code: "import moonshine_voice, fastapi, uvicorn; print('ok')" },
+        { name: "nlu_server (transformers, onnxruntime, numpy)", code: "import transformers, onnxruntime, numpy, fastapi, uvicorn; print('ok')" },
+      ];
+
+      for (const sc of sidecarImports) {
+        check(`Sidecar dependencies: ${sc.name}`, () => {
+          const res = spawnSync(py, ["-c", sc.code], { encoding: "utf-8", timeout: 15000 });
+          return res.status === 0 && res.stdout.includes("ok");
+        });
+      }
+    } else {
+      err("Cannot test sidecar dependencies: no Python interpreter found");
+      fail++;
+    }
+
+    // 3. Audio control: wpctl (PipeWire)
+    check("PipeWire audio control (wpctl)", () => has("wpctl"));
+
+    // 4. AT-SPI bus is up
+    check("AT-SPI accessibility bus active", () => {
+      if (has("busctl")) {
+        try {
+          const res = spawnSync("busctl", ["--user", "status", "org.a11y.Bus"], { encoding: "utf-8", timeout: 5000 });
+          if (res.status === 0) return true;
+        } catch {}
+      }
+      if (py) {
+        try {
+          const res = spawnSync(py, ["-c", "import gi; gi.require_version('Atspi', '2.0'); from gi.repository import Atspi; Atspi.init(); print('ok' if Atspi.get_desktop_count() >= 0 else 'fail')"], { encoding: "utf-8", timeout: 5000 });
+          if (res.status === 0 && res.stdout.includes("ok")) return true;
+        } catch {}
+      }
+      return Boolean(process.env.AT_SPI_BUS_ADDRESS);
+    });
+
+    // 5. Session type (X11/Wayland) and desktop
+    const st = process.env.XDG_SESSION_TYPE || "-";
+    const wl = process.env.WAYLAND_DISPLAY || "-";
+    const dp = process.env.DISPLAY || "-";
+    const desktop = process.env.XDG_CURRENT_DESKTOP || process.env.DESKTOP_SESSION || "unknown";
+    const kind = st !== "-" ? st : (wl !== "-" ? "wayland" : dp !== "-" ? "x11" : "headless");
+    check(`Display session: ${desktop} (${kind})`, () => kind === "wayland" || kind === "x11");
+
+    // 6. Global wake hotkey registered
+    check("Global wake hotkey registered", () => {
+      const desktopUpper = desktop.toUpperCase();
+      const cosmicCustom = join(process.env.HOME || "", ".config", "cosmic", "com.system76.CosmicSettings.Shortcuts", "v1", "custom");
+      if (desktopUpper.includes("COSMIC") || existsSync(cosmicCustom)) {
+        if (existsSync(cosmicCustom)) {
+          try {
+            const content = readFileSync(cosmicCustom, "utf-8");
+            return /nexus\s+--wake/i.test(content) || /description:\s*Some\(\s*"Nexus"\s*\)/i.test(content);
+          } catch {}
+        }
+        return false;
+      }
+      if (has("gsettings")) {
+        try {
+          const out = execSync("gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings", { encoding: "utf-8" });
+          return out.includes("nexus-wake");
+        } catch {}
+      }
+      return false;
+    });
+  }
 
   // MCP bridges (P3.3): live probe of the local bridges + hosted servers
   // via the existing read-only checker. Bridge DOWN lines carry the fix
@@ -1249,6 +1367,10 @@ switch (command) {
     err("Usage: nexus mcp check");
     process.exit(1);
   case "data":    cmdData(); break;
+  case "--wake":
+  case "--setup":
+  case "--background":
+    cmdRun(); break;
   case "help":
   case "--help":
   case "-h":
