@@ -142,6 +142,112 @@ fn read_settings_from(dir: Option<std::path::PathBuf>) -> PointerSettings {
     }
 }
 
+// ─── Screen settings page (`pointer_settings_get` / `pointer_settings_save`) ──
+
+/// Most entries the exclusion list keeps, and the longest entry.
+const MAX_EXCLUDED_APPS: usize = 64;
+const MAX_EXCLUDED_APP_CHARS: usize = 128;
+
+/// The settings as the Screen page sees them: `pointer.json`'s own keys.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PointerSettingsDto {
+    pub enabled: bool,
+    pub dwell_seconds: u64,
+    pub excluded_apps: Vec<String>,
+    pub suppress_fullscreen: bool,
+}
+
+impl From<&PointerSettings> for PointerSettingsDto {
+    fn from(s: &PointerSettings) -> Self {
+        Self {
+            enabled: s.enabled,
+            dwell_seconds: s.dwell_ms / 1000,
+            excluded_apps: s.excluded_apps.clone(),
+            suppress_fullscreen: s.suppress_fullscreen,
+        }
+    }
+}
+
+/// Pure: trimmed, lowercased, de-duplicated (first wins), capped entries.
+fn normalize_excluded(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for raw in list {
+        let entry: String = raw
+            .trim()
+            .to_lowercase()
+            .chars()
+            .take(MAX_EXCLUDED_APP_CHARS)
+            .collect();
+        if entry.is_empty() || out.contains(&entry) {
+            continue;
+        }
+        out.push(entry);
+        if out.len() == MAX_EXCLUDED_APPS {
+            break;
+        }
+    }
+    out
+}
+
+/// Pure: the new `pointer.json`. The page's four keys are replaced; any other
+/// key a user hand-edited into the file is kept.
+fn merged_pointer_json(existing: Option<&str>, s: &PointerSettingsDto) -> serde_json::Value {
+    let mut obj = existing
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|v| match v {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        })
+        .unwrap_or_default();
+    obj.insert("enabled".into(), s.enabled.into());
+    obj.insert("dwellSeconds".into(), s.dwell_seconds.clamp(3, 15).into());
+    obj.insert(
+        "excludedApps".into(),
+        serde_json::Value::from(normalize_excluded(&s.excluded_apps)),
+    );
+    obj.insert("suppressFullscreen".into(), s.suppress_fullscreen.into());
+    serde_json::Value::Object(obj)
+}
+
+/// Write the page's settings into `dir/pointer.json` and return what a read
+/// now sees (clamped), so the page shows exactly what is in force.
+fn save_settings_in(
+    dir: &std::path::Path,
+    s: &PointerSettingsDto,
+) -> Result<PointerSettingsDto, String> {
+    let path = dir.join(POINTER_SETTINGS_FILE);
+    let existing = std::fs::read_to_string(&path).ok();
+    let json = merged_pointer_json(existing.as_deref(), s);
+    let bytes = serde_json::to_vec_pretty(&json).map_err(|e| e.to_string())?;
+    if !crate::memory::atomic_write(&path, &bytes) {
+        return Err(format!("could not write {}", path.display()));
+    }
+    Ok(PointerSettingsDto::from(&read_settings_from(Some(
+        dir.to_path_buf(),
+    ))))
+}
+
+/// IPC: the Screen page's current settings.
+#[tauri::command]
+pub fn pointer_settings_get<R: Runtime>(app: AppHandle<R>) -> PointerSettingsDto {
+    PointerSettingsDto::from(&read_settings(&app))
+}
+
+/// IPC: save the Screen page. Writes `pointer.json`, never `settings.json`
+/// (which `save_settings` rewrites wholesale from its own struct).
+#[tauri::command]
+pub fn pointer_settings_save<R: Runtime>(
+    app: AppHandle<R>,
+    settings: PointerSettingsDto,
+) -> Result<PointerSettingsDto, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    save_settings_in(&dir, &settings)
+}
+
 /// Foreground context for the visibility decision.
 pub struct PointerContext {
     pub response_is_locate: bool,
@@ -632,6 +738,125 @@ mod tests {
             foreground_title: ForegroundTitle::Known("VS Code".to_string()),
             fullscreen_active: false,
         }
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nexus-pointer-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn screen_page_settings_round_trip_through_pointer_json() {
+        let dir = scratch_dir("roundtrip");
+        let saved = save_settings_in(
+            &dir,
+            &PointerSettingsDto {
+                enabled: false,
+                dwell_seconds: 9,
+                excluded_apps: vec!["  Bank ".into(), "1Password".into()],
+                suppress_fullscreen: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            saved,
+            PointerSettingsDto {
+                enabled: false,
+                dwell_seconds: 9,
+                excluded_apps: vec!["bank".into(), "1password".into()],
+                suppress_fullscreen: false,
+            }
+        );
+        // The capture gate and the marker read the same file.
+        let read = read_settings_from(Some(dir.clone()));
+        assert!(!read.enabled);
+        assert_eq!(read.dwell_ms, 9000);
+        assert_eq!(read.excluded_apps, vec!["bank", "1password"]);
+        assert!(!read.suppress_fullscreen);
+        // excludedApps is stored as an array, as the hand-editable format says.
+        let text = std::fs::read_to_string(dir.join(POINTER_SETTINGS_FILE)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(v["excludedApps"].is_array());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_clamps_dwell_and_keeps_hand_edited_keys() {
+        let dir = scratch_dir("merge");
+        std::fs::write(
+            dir.join(POINTER_SETTINGS_FILE),
+            r#"{ "excludedApps": ["old"], "myNote": "keep me" }"#,
+        )
+        .unwrap();
+        let saved = save_settings_in(
+            &dir,
+            &PointerSettingsDto {
+                enabled: true,
+                dwell_seconds: 99,
+                excluded_apps: vec![],
+                suppress_fullscreen: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.dwell_seconds, 15);
+        assert!(saved.excluded_apps.is_empty(), "the page's list replaces the old one");
+        let text = std::fs::read_to_string(dir.join(POINTER_SETTINGS_FILE)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["myNote"], "keep me");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merged_json_replaces_a_corrupt_or_non_object_file() {
+        let dto = PointerSettingsDto {
+            enabled: true,
+            dwell_seconds: 1,
+            excluded_apps: vec!["a".into()],
+            suppress_fullscreen: true,
+        };
+        for existing in [None, Some("not json"), Some("[1,2]")] {
+            let v = merged_pointer_json(existing, &dto);
+            assert_eq!(v["dwellSeconds"], 3);
+            assert_eq!(v["excludedApps"], serde_json::json!(["a"]));
+        }
+    }
+
+    #[test]
+    fn excluded_apps_are_trimmed_deduplicated_and_capped() {
+        let long = "x".repeat(MAX_EXCLUDED_APP_CHARS + 50);
+        let mut input = vec![
+            " Bank ".to_string(),
+            "bank".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+            long,
+        ];
+        input.extend((0..100).map(|i| format!("app{i}")));
+        let out = normalize_excluded(&input);
+        assert_eq!(out[0], "bank");
+        assert_eq!(out[1].chars().count(), MAX_EXCLUDED_APP_CHARS);
+        assert_eq!(out.len(), MAX_EXCLUDED_APPS);
+        assert_eq!(out.iter().filter(|s| s.as_str() == "bank").count(), 1);
+    }
+
+    #[test]
+    fn dto_serializes_with_the_page_field_names() {
+        let v = serde_json::to_value(PointerSettingsDto::from(&PointerSettings::default())).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "enabled": true,
+                "dwellSeconds": 6,
+                "excludedApps": [],
+                "suppressFullscreen": true
+            })
+        );
     }
 
     #[test]

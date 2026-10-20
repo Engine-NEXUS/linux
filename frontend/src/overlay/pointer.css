@@ -1,0 +1,88 @@
+/* Screen pointer marker (PointerOverlay.tsx). Classes only: the stage
+   window's CSP drops React `style` props, so the position is the one CSSOM
+   write the component makes through a ref. */
+
+.screen-pointer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 60;
+  opacity: 1;
+  transition: opacity 0.4s ease;
+}
+
+.screen-pointer--fading {
+  opacity: 0;
+}
+
+/* A 0x0 point at the target; children are placed around it. */
+.screen-pointer__anchor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+}
+
+.screen-pointer__ring {
+  position: absolute;
+  left: -26px;
+  top: -26px;
+  width: 52px;
+  height: 52px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 3px solid #22d3ee;
+  box-shadow: 0 0 18px #22d3ee, inset 0 0 8px rgba(34, 211, 238, 0.55);
+  animation: nexus-pointer-pulse 1.6s ease-in-out infinite;
+}
+
+.screen-pointer__dot {
+  position: absolute;
+  left: -4px;
+  top: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22d3ee;
+  box-shadow: 0 0 10px #22d3ee;
+}
+
+.screen-pointer__label {
+  position: absolute;
+  left: 36px;
+  top: -32px;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: #e8fbff;
+  background: rgba(8, 20, 28, 0.82);
+  border: 1px solid #22d3ee;
+  border-radius: 10px;
+  padding: 4px 12px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+@keyframes nexus-pointer-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.18);
+    opacity: 0.75;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen-pointer {
+    transition: none;
+  }
+  .screen-pointer__ring {
+    animation: none;
+  }
+}
