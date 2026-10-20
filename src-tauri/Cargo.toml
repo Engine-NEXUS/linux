@@ -204,6 +204,11 @@ keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-r
 # origins, so getUserMedia is never denied). Version follows wry's
 # webkit2gtk pin.
 webkit2gtk = { version = "2", features = ["v2_40"] }
+libloading = "0.8"
+gtk = "0.18"
+gdk = "0.18"
+cairo-rs = "0.18"
+glib = "0.18"
 
 # macOS-specific: Apple Keychain support for auth vault
 [target.'cfg(target_os = "macos")'.dependencies]

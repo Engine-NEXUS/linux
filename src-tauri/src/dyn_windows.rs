@@ -210,6 +210,13 @@ pub fn get_or_create_window<R: Runtime>(
     #[cfg(target_os = "linux")]
     crate::mic_permissions::allow_media_for_window(&win);
 
+    // Linux: configure stage as layer-shell overlay (Wayland) or non-focusable
+    // notification window (X11) before it is mapped.
+    #[cfg(target_os = "linux")]
+    if config.label == "stage" {
+        crate::overlay_linux::init_stage(&win);
+    }
+
     // Apply platform-specific effects
     #[cfg(target_os = "windows")]
     {
@@ -319,6 +326,11 @@ pub fn open_external_window<R: Runtime>(
         let _ = win.set_size(tauri::LogicalSize::new(w, h));
         let _ = win.set_position(tauri::LogicalPosition::new(x, y));
         let _ = win.show();
+        #[cfg(target_os = "linux")]
+        if label != "stage" {
+            let _ = win.set_focus();
+        }
+        #[cfg(not(target_os = "linux"))]
         let _ = win.set_focus();
         return Ok(());
     }
@@ -331,6 +343,11 @@ pub fn open_external_window<R: Runtime>(
         .focused(true)
         .build()
         .map_err(|e| format!("Failed to create {label} window: {e}"))?;
+    #[cfg(target_os = "linux")]
+    if label != "stage" {
+        let _ = win.set_focus();
+    }
+    #[cfg(not(target_os = "linux"))]
     let _ = win.set_focus();
     Ok(())
 }

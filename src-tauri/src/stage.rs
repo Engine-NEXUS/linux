@@ -97,6 +97,14 @@ pub fn set_hitbox_source(source: &str, rects: Vec<StageRect>) {
     } else {
         map.insert(source.to_string(), rects);
     }
+    drop(map);
+    #[cfg(target_os = "linux")]
+    crate::overlay_linux::apply_input_region();
+}
+
+/// Collect all current hitbox rects across all named sources.
+pub fn all_hitboxes() -> Vec<StageRect> {
+    HITBOXES.lock().values().flatten().copied().collect()
 }
 
 static LAST_BEAT: once_cell::sync::Lazy<parking_lot::Mutex<Option<std::time::Instant>>> =
@@ -159,15 +167,10 @@ fn set_click_through<R: Runtime>(win: &tauri::WebviewWindow<R>) -> Result<(), St
         .map_err(|e| format!("stage click-through: {e}"))
 }
 
-/// Linux: `set_ignore_cursor_events(true)` ABORTS inside tao while the GTK
-/// window is unrealized (`window.window()` is None until the first show).
-/// A hidden window eats no clicks anyway, so the flag is only applied once
-/// the window is actually visible.
+/// Linux: click-through is handled via GDK input shape region (`overlay_linux::apply_input_region`).
 #[cfg(target_os = "linux")]
-fn set_click_through<R: Runtime>(win: &tauri::WebviewWindow<R>) -> Result<(), String> {
-    if win.is_visible().unwrap_or(false) {
-        let _ = win.set_ignore_cursor_events(true);
-    }
+fn set_click_through<R: Runtime>(_win: &tauri::WebviewWindow<R>) -> Result<(), String> {
+    crate::overlay_linux::apply_input_region();
     Ok(())
 }
 
@@ -228,6 +231,8 @@ pub async fn stage_hide<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
     crate::ghost::stand_down(crate::ghost::ghost_wry::g_wry_ref(&app));
     crate::dyn_windows::destroy_window(&app, LABEL)?;
     note_window_destroyed();
+    #[cfg(target_os = "linux")]
+    crate::overlay_linux::note_stage_destroyed();
     tracing::info!("stage: hidden");
     Ok(())
 }
@@ -273,6 +278,8 @@ pub async fn stage_hide_kill<R: Runtime>(app: AppHandle<R>) -> Result<(), String
     crate::ghost::stand_down(crate::ghost::ghost_wry::g_wry_ref(&app));
     crate::dyn_windows::destroy_window(&app, LABEL)?;
     note_window_destroyed();
+    #[cfg(target_os = "linux")]
+    crate::overlay_linux::note_stage_destroyed();
     tracing::warn!("stage: kill-switch engaged (disabled for session)");
     Ok(())
 }
@@ -400,6 +407,14 @@ pub(crate) fn cursor_pos() -> Option<(i32, i32)> {
 /// - Active hitboxes, cursor far (>120px): sleeps 100ms (C8/C10 residency).
 /// - Cursor in proximity (<=120px) or inside: sleeps 16ms (60Hz responsiveness).
 pub fn spawn_hitbox_loop<R: Runtime>(app: AppHandle<R>) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        // On Linux, Wayland input regions and XShape handle click-through natively
+        // via `overlay_linux::apply_input_region` without cursor polling.
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
     std::thread::Builder::new()
         .name("stage-hitbox".into())
         .spawn(move || {
@@ -538,6 +553,8 @@ pub fn spawn_stage_watchdog<R: Runtime>(app: AppHandle<R>) {
             crate::ghost::note_blackout();
             let _ = crate::dyn_windows::destroy_window(&app, LABEL);
             note_window_destroyed();
+            #[cfg(target_os = "linux")]
+            crate::overlay_linux::note_stage_destroyed();
 
             if fails > MAX_AUTO_FIXES {
                 // ── GIVE UP: stay hidden, say so once, keep watching ──
