@@ -251,10 +251,26 @@ pub async fn activate(
         404 => return Err(format!("no clickable element named {name:?}")),
         409 => {
             // The endpoint could not prove it belongs to the application in
-            // front. This is a refusal, not a transport failure.
-            return Err(format!(
-                "the debug endpoint does not belong to the application in front ({name:?})"
-            ));
+            // front. This is a refusal, not a transport failure. The server
+            // says WHY in the body (no candidate proved the focus, the
+            // endpoint belongs to another program, ...) and that reason is
+            // what the caller needs, so it is surfaced instead of a generic
+            // message.
+            let why = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.get("reason")
+                        .and_then(|r| r.as_str())
+                        .map(str::to_string)
+                })
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    "no reachable debug endpoint proves it is the application in front"
+                        .to_string()
+                });
+            return Err(format!("{why} ({name:?})"));
         }
         503 => return Err("no CDP endpoint reachable".into()),
         s => return Err(format!("cdp HTTP {s}")),

@@ -245,21 +245,22 @@ _FOCUS_STATE_JS = (
     "JSON.stringify({focus: document.hasFocus(), vis: document.visibilityState})"
 )
 
-# How long a single focus probe may take.
+# The focus sweep: ALL of a port's candidate targets are probed
+# CONCURRENTLY, under ONE deadline for the whole sweep.
 #
-# A background tab the browser has FROZEN (Chrome/Brave Memory Saver freezes
-# background tabs after a few minutes) does not run renderer tasks, so
-# `Runtime.evaluate` never answers and the CDP client would wait its full
-# 30 s per target. The probe is therefore given a hard deadline.
+# The deadline is a sweep deadline, not a per-probe one: the probes run in
+# parallel, so a browser with N tabs costs one sweep rather than N sequential
+# probes. A background tab the browser has FROZEN (Chrome/Brave Memory Saver
+# freezes background tabs, and they stop answering `Runtime.evaluate`) can
+# therefore never hold the request hostage.
+FOCUS_SWEEP_DEADLINE = float(os.environ.get("CDP_FOCUS_SWEEP", "6"))
+
+# The whole request, across every reachable port.
 #
-# The deadline is generous on purpose: `w.executeJavaScript` only resolves
-# when the renderer's main thread services the task, and a busy VS Code /
-# Discord renderer (extension activation, a large file, a GC pause, a cold
-# start) routinely takes longer than a second or two. The request budget is
-# 20 s (the Rust client) and the cheap title filter already reduces the
-# probe count to roughly one, so 5 s leaves room for a slow-but-alive
-# renderer while still bounding a frozen one.
-FOCUS_PROBE_TIMEOUT = float(os.environ.get("CDP_FOCUS_TIMEOUT", "5"))
+# The Rust client gives the request 20 s (`src-tauri/src/cdp.rs`), and the
+# request has to finish inside 15 s: the sweep is repeated per port, so the
+# ports share one budget.
+ACTIVATE_BUDGET = float(os.environ.get("CDP_ACTIVATE_BUDGET", "12"))
 
 # "I could not tell": the probe did not answer, or the transport failed.
 _FOCUS_UNKNOWN = {
@@ -269,10 +270,8 @@ _FOCUS_UNKNOWN = {
     "timed_out": False,
 }
 
-# "The probe did not answer IN TIME" — kept apart from "the renderer answered
-# and does not have focus", because the two deserve different verdicts: a
-# single surviving candidate that merely timed out is very likely the
-# foreground, while an answered "no focus" is a real answer.
+# "The probe did not answer IN TIME" — a probe that never finished has proved
+# nothing, exactly like a vanished target.
 _FOCUS_TIMED_OUT = {
     "focus": False,
     "visible": False,
@@ -303,7 +302,7 @@ async def _page_focus_state_inner(t: dict) -> dict:
     }
 
 
-async def _page_focus_state(t: dict) -> dict:
+async def _page_focus_state(t: dict, deadline: float = FOCUS_SWEEP_DEADLINE) -> dict:
     """`hasFocus()` / `visibilityState` for one page target.
 
     A BACKGROUND tab of the same browser answers hasFocus() = false and
@@ -316,11 +315,11 @@ async def _page_focus_state(t: dict) -> dict:
     """
     try:
         return await asyncio.wait_for(
-            _page_focus_state_inner(t), timeout=FOCUS_PROBE_TIMEOUT
+            _page_focus_state_inner(t), timeout=deadline
         )
     except asyncio.TimeoutError:
         # A frozen background tab, or a busy renderer that did not answer in
-        # time. Kept apart from an answered "no focus".
+        # time. It has proved nothing.
         return dict(_FOCUS_TIMED_OUT)
     except CdpError:
         # The target is gone, or the transport failed.
@@ -333,50 +332,90 @@ async def _page_focus_state(t: dict) -> dict:
         return dict(_FOCUS_UNKNOWN)
 
 
-def narrow_by_title(candidates: list[dict], expected_title: str) -> list[dict]:
-    """The candidates whose title matches the expected foreground window.
+async def _probe_all(targets: list[dict], deadline: float) -> list[dict]:
+    """Probe every candidate CONCURRENTLY, under ONE deadline for the sweep.
 
-    A cheap, RENDERER-FREE filter: it is applied BEFORE any focus probe, so
-    a browser with N tabs costs one probe instead of N — and a background
-    tab the user is not looking at is never probed at all.
-
-    The predicate is the SAME one the identity gate uses
-    (`title_matches`): a candidate whose own title is EMPTY cannot
-    contradict the expected one, so it is KEPT and the focus probe decides.
-    Dropping it here would refuse a tab with no `<title>` (a raw JSON view,
-    the built-in PDF viewer) that the gate itself would have accepted.
-
-    An empty expected title keeps every candidate (the caller then relies on
-    the focus probe alone).
+    The probes run in parallel, so the sweep costs one deadline and not one
+    deadline per candidate. Whatever answered in time is kept; a probe that
+    did not finish is unknown.
     """
-    want = (expected_title or "").strip().lower()
-    if not want:
+    if not targets:
+        return []
+
+    async def one(t: dict) -> dict:
+        return await _page_focus_state(t, deadline)
+
+    tasks = [asyncio.ensure_future(one(t)) for t in targets]
+    try:
+        gathered = list(
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=deadline
+            )
+        )
+        # A cancelled child comes back as an exception, not a state: it is
+        # "I could not tell", like any other non-answer.
+        return [
+            s if isinstance(s, dict) else dict(_FOCUS_UNKNOWN)
+            for s in gathered
+        ]
+    except asyncio.TimeoutError:
+        pass
+
+    # The sweep ran out of time: whatever answered is kept, the rest never
+    # finished and has proved nothing.
+    states: list[dict] = []
+    for t, task in zip(targets, tasks):
+        if task.done() and not task.cancelled():
+            exc = task.exception()
+            if exc is None:
+                states.append(task.result())
+            else:
+                states.append(dict(_FOCUS_UNKNOWN))
+        else:
+            task.cancel()
+            states.append(dict(_FOCUS_TIMED_OUT))
+    return states
+
+
+def narrow_by_title(candidates: list[dict], expected_title: str) -> list[dict]:
+    """The candidate set: the targets whose title matches the expected
+    foreground window.
+
+    The predicate is the SAME one the identity gate uses (`title_matches`),
+    so the narrowing can never be stricter than the gate it pre-filters: a
+    candidate whose own title is EMPTY cannot contradict the expected one, so
+    it is kept and the focus probe decides.
+
+    Pure, so the rule is unit-tested with fakes.
+    """
+    if not (expected_title or "").strip():
         return list(candidates)
-    out: list[dict] = []
-    for t in candidates:
-        title = str(t.get("title") or "").strip().lower()
-        if not title:
-            # No title of its own: it cannot contradict the expected one, so
-            # the focus probe — not this filter — decides.
-            out.append(t)
-            continue
-        if want == title or want in title or title in want:
-            out.append(t)
-    return out
+    return [
+        t
+        for t in candidates
+        if title_matches(expected_title, str(t.get("title") or ""))
+    ]
 
 
 async def chromium_foreground_target(
-    port: int, want: str | None, expected_title: str = ""
-) -> dict | None:
-    """The page target the user is actually looking at.
+    port: int,
+    want: str | None,
+    expected_title: str = "",
+    deadline: float = FOCUS_SWEEP_DEADLINE,
+) -> tuple[dict | None, str]:
+    """The page target the user is actually looking at, and why not.
 
     The accessibility tree is per TARGET, so the identity check and the
     action have to use the SAME one: the first non-blank page target is
     usually a BACKGROUND tab, and clicking in it is exactly the bug the
     identity check exists to prevent.
 
-    Returns None when the foreground cannot be established — no candidate has
-    focus, or more than one does. That is a refusal, not a guess.
+    The rule (see `choose_focused_target`): the candidate set is the targets
+    whose title matches the expected foreground title, ALL of them are probed
+    concurrently under one deadline, and a target is chosen ONLY when exactly
+    one of them proved it has the focus.
+
+    Returns (None, reason) when the foreground cannot be established.
     """
     pages = [
         t
@@ -384,22 +423,23 @@ async def chromium_foreground_target(
         if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
     ]
     if not pages:
-        return None
+        return None, "the browser exposes no page target"
     if want:
-        for t in pages:
-            if want in (t.get("url") or "") or want == (t.get("title") or ""):
-                return t
-        return None
-    # Narrow FIRST by the expected foreground title — a cheap, renderer-free
-    # filter — so a browser with N tabs costs one probe, not N, and a frozen
-    # background tab is never probed at all.
+        pages = [
+            t
+            for t in pages
+            if want in (t.get("url") or "") or want == (t.get("title") or "")
+        ]
+        if not pages:
+            return None, "the requested target is not open"
     candidates = narrow_by_title(pages, expected_title)
     if not candidates:
-        return None
-    states: list[dict] = []
-    for t in candidates:
-        states.append(await _page_focus_state(t))
-    return choose_focused_target(candidates, states, expected_title)
+        return None, "no target matched the application in front"
+    states = await _probe_all(candidates, deadline)
+    chosen = choose_focused_target(candidates, states)
+    if chosen is None:
+        return None, foreground_reason(candidates, states)
+    return chosen, ""
 
 
 async def direct_ax(port: int, target: str | None) -> list[dict]:
@@ -653,7 +693,7 @@ class Electron:
         r = self.pick_renderer_info(rs, target)
         return r["id"] if r is not None else None
 
-    async def renderer_focus(self, wcid: int) -> dict:
+    async def renderer_focus(self, wcid: int, deadline: float = FOCUS_SWEEP_DEADLINE) -> dict:
         """`hasFocus()` / `visibilityState` for one renderer.
 
         A renderer of a background window answers hasFocus() = false; the
@@ -666,11 +706,11 @@ class Electron:
         body = _MAIN_FOCUS.replace("__WCID__", str(wcid))
         try:
             v = await asyncio.wait_for(
-                self.main_eval(body), timeout=FOCUS_PROBE_TIMEOUT
+                self.main_eval(body), timeout=deadline
             )
         except asyncio.TimeoutError:
-            # A busy renderer that did not answer in time — kept apart from an
-            # answered "no focus".
+            # A busy renderer that did not answer in time. It has proved
+            # nothing.
             return dict(_FOCUS_TIMED_OUT)
         except CdpError:
             # The renderer is gone, or the transport failed.
@@ -688,36 +728,82 @@ class Electron:
         }
 
     async def foreground_renderer(
-        self, want: str | None, expected_title: str = ""
-    ) -> dict | None:
-        """The renderer the user is actually looking at.
+        self,
+        want: str | None,
+        expected_title: str = "",
+        deadline: float = FOCUS_SWEEP_DEADLINE,
+    ) -> tuple[dict | None, str]:
+        """The renderer the user is actually looking at, and why not.
 
         The accessibility tree is per RENDERER, so the identity check and
         the action have to use the same one: the first renderer of type
         "window" is the first VS Code window, not the front one.
 
-        Returns None when the foreground cannot be established — no
-        candidate has focus, or more than one does. That is a refusal, not
-        a guess.
+        The rule is the same as for Chromium (see `choose_focused_target`):
+        the candidate set is the renderers whose title matches the expected
+        foreground title, ALL of them are probed concurrently under one
+        deadline, and a renderer is chosen ONLY when exactly one of them
+        proved it has the focus.
+
+        Returns (None, reason) when the foreground cannot be established.
         """
         rs = await self.renderers()
         windows = [r for r in rs if r.get("type") == "window"] or rs
         if not windows:
-            return None
+            return None, "the application exposes no window"
         if want:
-            for r in windows:
-                if want in (r.get("url") or "") or want == (r.get("title") or ""):
-                    return r
-            return None
-        # Narrow FIRST by the expected foreground title — a cheap,
-        # renderer-free filter — so only the plausible window is probed.
+            windows = [
+                r
+                for r in windows
+                if want in (r.get("url") or "") or want == (r.get("title") or "")
+            ]
+            if not windows:
+                return None, "the requested window is not open"
         candidates = narrow_by_title(windows, expected_title)
         if not candidates:
-            return None
+            return None, "no window matched the application in front"
+        states = await self._probe_renderers(candidates, deadline)
+        chosen = choose_focused_target(candidates, states)
+        if chosen is None:
+            return None, foreground_reason(candidates, states)
+        return chosen, ""
+
+    async def _probe_renderers(self, candidates: list[dict], deadline: float) -> list[dict]:
+        """Probe every candidate renderer CONCURRENTLY, under one deadline."""
+        if not candidates:
+            return []
+
+        async def one(r: dict) -> dict:
+            return await self.renderer_focus(r["id"], deadline)
+
+        tasks = [asyncio.ensure_future(one(r)) for r in candidates]
+        try:
+            gathered = list(
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), timeout=deadline
+                )
+            )
+            # A cancelled child comes back as an exception, not a state: it is
+            # "I could not tell", like any other non-answer.
+            return [
+                s if isinstance(s, dict) else dict(_FOCUS_UNKNOWN)
+                for s in gathered
+            ]
+        except asyncio.TimeoutError:
+            pass
+
         states: list[dict] = []
-        for r in candidates:
-            states.append(await self.renderer_focus(r["id"]))
-        return choose_focused_target(candidates, states, expected_title)
+        for r, task in zip(candidates, tasks):
+            if task.done() and not task.cancelled():
+                exc = task.exception()
+                if exc is None:
+                    states.append(task.result())
+                else:
+                    states.append(dict(_FOCUS_UNKNOWN))
+            else:
+                task.cancel()
+                states.append(dict(_FOCUS_TIMED_OUT))
+        return states
 
     async def ax(self, wcid: int) -> list[dict]:
         """Fetch the accessibility tree, warming it if the first read is partial.
@@ -858,28 +944,24 @@ def title_matches(foreground_title: str, target_title: str) -> bool:
     return f == t or t in f or f in t
 
 
-def choose_focused_target(
-    candidates: list[dict], states: list[dict], expected_title: str = ""
-) -> dict | None:
-    """The target the user is looking at, from the candidates' focus states.
+def choose_focused_target(candidates: list[dict], states: list[dict]) -> dict | None:
+    """The target the user is looking at: the one that PROVED it has focus.
 
-    `candidates` and `states` are parallel lists: the targets and their
-    `{focus, visible, known, timed_out}` states.
+    The rule is deliberately narrow, because every extra heuristic opened a
+    new background-window case:
 
-    Pure, so the rule is unit-tested with fakes:
-      * exactly one target has focus → that one;
-      * more than one has focus → ambiguous, so nothing;
-      * none has focus but exactly one is visible → that one;
-      * otherwise, the UNKNOWN cases. A probe that TIMED OUT is not the same
-        as an answered "no focus": when exactly one candidate survived the
-        title filter, and its own title is non-empty and matches the
-        expected foreground title, then a timed-out probe means the renderer
-        was simply too busy to answer — that candidate IS the foreground.
-        In every other unknown case, nothing is returned: the foreground is
-        not established, and the caller must refuse.
+      * exactly one candidate answered `known` AND `focus` → that one;
+      * zero focused, more than one focused, or everything unknown → None,
+        and the caller refuses with 409.
 
-    Returning None is a REFUSAL, not a reason to fall back to an arbitrary
-    tab: the first non-blank page target is usually a background one.
+    Two things that are NOT evidence of being in front:
+
+      * "visible" — a background window's active tab is visible, it is just
+        not focused. Selecting on visibility is what put a click in a
+        background window;
+      * a probe that timed out — it proved nothing at all.
+
+    Pure, so the rule is unit-tested with fakes.
     """
     focused = [
         t
@@ -888,28 +970,38 @@ def choose_focused_target(
     ]
     if len(focused) == 1:
         return focused[0]
-    if len(focused) > 1:
-        return None  # ambiguous
-    visible = [
-        t
-        for t, st in zip(candidates, states)
-        if st.get("known") and st.get("visible")
-    ]
-    if len(visible) == 1:
-        return visible[0]
-    # Unknown. A single survivor whose probe merely timed out is the
-    # foreground: nothing else is in the running, and its own title says so.
-    if len(candidates) == 1:
-        only = candidates[0]
-        st = states[0] if states else {}
-        title = str(only.get("title") or "").strip()
-        if (
-            st.get("timed_out")
-            and title
-            and title_matches(expected_title, title)
-        ):
-            return only
     return None
+
+
+def foreground_reason(candidates: list[dict], states: list[dict]) -> str:
+    """Why no foreground target could be chosen — for the refusal message."""
+    if not candidates:
+        return "no target matched the application in front"
+    focused = [
+        t for t, st in zip(candidates, states) if st.get("known") and st.get("focus")
+    ]
+    if len(focused) > 1:
+        return f"{len(focused)} targets claim the focus"
+    if not any(st.get("known") for st in states):
+        if all(st.get("timed_out") for st in states):
+            return "no target answered the focus probe in time"
+        return "no target answered the focus probe"
+    return "no target reports the focus"
+
+
+def app_matches(expected_app: str, identity: dict) -> bool:
+    """Whether a debug endpoint PROVES it belongs to the application in front.
+
+    The endpoint has to name itself, and the name has to match. An endpoint
+    that cannot name itself proves nothing and matches nothing.
+
+    This is the cheap half of the gate: it does not need a renderer, so it
+    runs BEFORE the focus sweep and an endpoint belonging to another program
+    is never probed.
+    """
+    if not expected_app:
+        return True
+    return app_names_match(expected_app, str(identity.get("app") or ""))
 
 
 def endpoint_matches(
@@ -925,7 +1017,7 @@ def endpoint_matches(
     """
     if target is None:
         return False
-    if expected_app and not app_names_match(expected_app, str(identity.get("app") or "")):
+    if not app_matches(expected_app, identity):
         return False
     if expected_title and not title_matches(expected_title, str(target.get("title") or "")):
         return False
@@ -993,23 +1085,31 @@ async def endpoint_identity(port: int, kind: str, target: str | None) -> dict:
 
 
 async def foreground_target(
-    port: int, kind: str, want: str | None, expected_title: str = ""
-) -> dict | None:
-    """The target the user is actually looking at, on this endpoint.
+    port: int,
+    kind: str,
+    want: str | None,
+    expected_title: str = "",
+    deadline: float = FOCUS_SWEEP_DEADLINE,
+) -> tuple[dict | None, str]:
+    """The target the user is actually looking at, on this endpoint, and why not.
 
-    None means "unknown" — zero or more than one candidate qualifies. The
-    caller must treat that as a refusal.
+    (None, reason) means "not established" — zero or more than one candidate
+    qualifies, or no candidate answered. The caller must treat that as a
+    refusal.
+
+    `deadline` is the budget for the WHOLE sweep on this port: every
+    candidate is probed concurrently under it.
     """
     if kind == "electron":
         try:
             async with Electron(port) as e:
-                return await e.foreground_renderer(want, expected_title)
+                return await e.foreground_renderer(want, expected_title, deadline)
         except CdpError:
-            return None
+            return None, "the inspector endpoint could not be reached"
         except Exception as e:  # noqa: BLE001 — a connect failure is "unknown"
             log.warning("electron foreground lookup failed on port %s: %s", port, e)
-            return None
-    return await chromium_foreground_target(port, want, expected_title)
+            return None, "the inspector endpoint could not be reached"
+    return await chromium_foreground_target(port, want, expected_title, deadline)
 
 
 # ── Matching ─────────────────────────────────────────────────────────────────
@@ -1181,6 +1281,23 @@ async def activate(request: Request) -> JSONResponse:
     with 409 when no reachable endpoint can prove it, and it reports the
     identity it acted on so the caller can check it too.
 
+    THE RULE (no heuristics, because every heuristic opened a new
+    background-window case):
+
+      1. the endpoint must name itself and the name must match the expected
+         application (`app_matches`) — checked FIRST, because it is cheap and
+         an endpoint of another program is never probed;
+      2. the candidate set is the targets whose title matches the expected
+         foreground title (`narrow_by_title`, the same `title_matches` rule
+         the identity gate uses, so an EMPTY title cannot contradict the
+         expected one and is kept);
+      3. ALL candidates are probed CONCURRENTLY, under ONE deadline for the
+         whole sweep per port, and the ports share one total budget
+         (`ACTIVATE_BUDGET`) so the request stays inside 15 s;
+      4. a target is chosen ONLY when EXACTLY ONE candidate answered
+         `known` and `focus` — zero focused, more than one focused, or
+         everything unknown all REFUSE with 409 and a reason.
+
     Without those fields the behaviour is the old one (the first reachable
     port) — but every current caller sends them.
     """
@@ -1206,24 +1323,55 @@ async def activate(request: Request) -> JSONResponse:
     # same target is used for the identity check and for the action. The
     # accessibility tree is per target, so checking the title of one target
     # and clicking another is not a check at all.
+    #
+    # The ports share ONE budget (`ACTIVATE_BUDGET`): the focus sweep is
+    # repeated per port, and the whole request has to finish inside 15 s
+    # (the Rust client gives up at 20 s). Each port's sweep gets what is
+    # left of the budget, capped at one sweep deadline.
+    budget_deadline = time.monotonic() + ACTIVATE_BUDGET
     chosen: int | None = None
     fg_target: dict | None = None
     identity: dict = {}
+    reason = "no reachable debug endpoint belongs to the application in front"
     for p in ports:
+        remaining = budget_deadline - time.monotonic()
+        if remaining <= 0:
+            reason = (
+                "the request ran out of time before an endpoint could be checked"
+            )
+            break
+        sweep = min(FOCUS_SWEEP_DEADLINE, remaining)
         kind = "chromium" if p in r["direct_ports"] else "electron"
         try:
             ident = await endpoint_identity(p, kind, target)
-            # The foreground target on this endpoint, resolved FIRST.
-            fg = await foreground_target(p, kind, target, expected_title)
         except Exception as e:  # noqa: BLE001 — one bad endpoint is not fatal
             # A port that cannot be reached or driven is skipped, not fatal:
             # the next port may be the one in front, and if none is, the
             # refusal below is the answer.
             log.warning("skipping endpoint on port %s: %s", p, e)
             continue
-        # The application AND the target must prove they are the ones in
-        # front. `endpoint_matches` is the whole rule.
+        # The APPLICATION check comes first: it is cheap, and an endpoint
+        # that belongs to another program must never be probed.
+        if not app_matches(expected_app, ident):
+            reason = (
+                f"the debug endpoint on port {p} belongs to "
+                f"{ident.get('app') or 'another application'}, not {expected_app}"
+            )
+            continue
+        try:
+            fg, why = await foreground_target(p, kind, target, expected_title, sweep)
+        except Exception as e:  # noqa: BLE001 — one bad endpoint is not fatal
+            log.warning("skipping endpoint on port %s: %s", p, e)
+            continue
+        if fg is None:
+            # No target proved it is in front: a refusal, never a guess.
+            reason = why or "the foreground target could not be established"
+            continue
+        # The TARGET must prove it is the one in front. It came from the
+        # title-matched candidate set and it proved the focus; the title is
+        # checked once more against the expected window.
         if not endpoint_matches(expected_app, expected_title, ident, fg):
+            reason = "the focused target is not the window in front"
             continue
         chosen = p
         fg_target = fg
@@ -1239,6 +1387,7 @@ async def activate(request: Request) -> JSONResponse:
             409,
             expected_app=expected_app,
             expected_title=expected_title,
+            reason=reason,
         )
     p = chosen
 

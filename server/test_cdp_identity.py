@@ -5,6 +5,20 @@ app holds the lowest reachable port. These tests cover the rule that stops a
 click meant for the window in front from landing in a background app that
 happens to hold a debug port.
 
+THE RULE (no heuristics, because every extra heuristic opened a new
+background-window case):
+
+  1. the endpoint must name itself and the name must match the expected
+     application — checked first, because it is cheap;
+  2. the candidate set is the targets whose title matches the expected
+     foreground title (an EMPTY title cannot contradict the expected one, so
+     it is kept and the focus probe decides);
+  3. ALL candidates are probed CONCURRENTLY, under ONE deadline for the whole
+     sweep, and the ports share one total budget;
+  4. a target is chosen ONLY when EXACTLY ONE candidate answered `known` and
+     `focus` — zero focused, more than one focused, or everything unknown
+     all refuse.
+
 They are pure decision tests with fakes — no browser, no websocket, no
 accessibility bus — so they run anywhere the sidecar's dependencies are
 installed.
@@ -14,8 +28,11 @@ Run:  python3 -m pytest server/test_cdp_identity.py -v
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
+import time
 
 import pytest
 
@@ -53,6 +70,15 @@ def test_an_unnamed_application_never_matches():
     assert not cdp_server.app_names_match("", "brave")
     assert not cdp_server.app_names_match("brave", "")
     assert not cdp_server.app_names_match("", "")
+
+
+def test_an_unnamed_endpoint_matches_nothing():
+    # The endpoint has to NAME itself: an endpoint that cannot prove which
+    # application it belongs to proves nothing.
+    ident = {"kind": "chromium", "app": "", "title": "", "url": "", "product": ""}
+    assert not cdp_server.app_matches("brave", ident)
+    # No application was expected: nothing to contradict.
+    assert cdp_server.app_matches("", ident)
 
 
 # ── The title rule ──────────────────────────────────────────────────────────
@@ -136,8 +162,6 @@ def test_the_focus_script_calls_execute_javascript_on_the_webcontents():
 def test_a_target_that_never_answers_is_unknown_and_does_not_stall(monkeypatch):
     # A background tab the browser has FROZEN does not run renderer tasks, so
     # the probe never answers. It must be bounded and reported as unknown.
-    import asyncio
-
     class _NeverAnswers:
         def __init__(self, ws_url):
             self.ws_url = ws_url
@@ -150,10 +174,9 @@ def test_a_target_that_never_answers_is_unknown_and_does_not_stall(monkeypatch):
             return None
 
     monkeypatch.setattr(cdp_server, "Cdp", _NeverAnswers)
-    monkeypatch.setattr(cdp_server, "FOCUS_PROBE_TIMEOUT", 0.05)
 
     state = asyncio.run(
-        cdp_server._page_focus_state({"webSocketDebuggerUrl": "ws://x"})
+        cdp_server._page_focus_state({"webSocketDebuggerUrl": "ws://x"}, 0.05)
     )
     assert state["known"] is False
     assert state["focus"] is False
@@ -162,8 +185,6 @@ def test_a_target_that_never_answers_is_unknown_and_does_not_stall(monkeypatch):
 def test_a_refused_connection_is_unknown_not_a_server_error(monkeypatch):
     # `websockets.connect` raises OSError, which is not a CdpError: it used to
     # escape the probe and turn the intended 409 into an HTTP 500.
-    import asyncio
-
     class _Refuses:
         def __init__(self, ws_url):
             self.ws_url = ws_url
@@ -177,9 +198,12 @@ def test_a_refused_connection_is_unknown_not_a_server_error(monkeypatch):
     monkeypatch.setattr(cdp_server, "Cdp", _Refuses)
 
     state = asyncio.run(
-        cdp_server._page_focus_state({"webSocketDebuggerUrl": "ws://x"})
+        cdp_server._page_focus_state({"webSocketDebuggerUrl": "ws://x"}, 0.05)
     )
     assert state["known"] is False
+
+
+# ── The candidate set ───────────────────────────────────────────────────────
 
 
 def test_candidates_are_narrowed_by_the_expected_title_before_any_probe():
@@ -201,7 +225,296 @@ def test_an_empty_expected_title_keeps_every_candidate():
     assert len(cdp_server.narrow_by_title(tabs, "   ")) == 2
 
 
-# ── The whole decision, with a fake endpoint ────────────────────────────────
+def test_the_narrowing_uses_the_same_predicate_as_the_identity_gate():
+    # The narrowing must never be STRICTER than the gate it pre-filters: it
+    # uses the very same `title_matches`, so a candidate whose own title is
+    # empty cannot contradict the expected one and is kept.
+    tabs = [{"title": ""}, {"title": "GitHub"}]
+    narrowed = cdp_server.narrow_by_title(tabs, "GitHub — Brave")
+    assert len(narrowed) == 2
+    assert all(
+        cdp_server.title_matches("GitHub — Brave", str(t.get("title") or ""))
+        for t in narrowed
+    )
+
+
+# ── The selection rule ──────────────────────────────────────────────────────
+#
+# The accessibility tree is per TARGET, so the identity check and the action
+# have to use the SAME one. These tests use fake targets and fake focus
+# states — no browser, no websocket.
+
+
+def _state(focus: bool, visible: bool, known: bool = True) -> dict:
+    return {"focus": focus, "visible": visible, "known": known, "timed_out": False}
+
+
+def _timed_out() -> dict:
+    return {"focus": False, "visible": False, "known": False, "timed_out": True}
+
+
+def test_one_focused_tab_among_several_is_chosen():
+    # Three tabs of the same browser; only the SECOND one has focus. Picking
+    # the first (the old first-non-blank rule) would act in a background tab.
+    tabs = [
+        {"title": "Background tab", "url": "https://example.com/one"},
+        {"title": "GitHub", "url": "https://github.com/"},
+        {"title": "Another tab", "url": "https://example.com/two"},
+    ]
+    states = [_state(False, True), _state(True, True), _state(False, True)]
+    chosen = cdp_server.choose_focused_target(tabs, states)
+    assert chosen is not None
+    assert chosen["title"] == "GitHub"
+
+
+def test_a_visible_but_unfocused_target_is_refused():
+    # "Visible" is NOT evidence of being in front: a background window's
+    # active tab is visible, it is just not focused. Selecting on visibility
+    # is what put a click in a background window.
+    tabs = [{"title": "GitHub"}]
+    assert cdp_server.choose_focused_target(tabs, [_state(False, True)]) is None
+
+
+def test_two_visible_targets_without_focus_refuse():
+    tabs = [{"title": "A"}, {"title": "B"}]
+    states = [_state(False, True), _state(False, True)]
+    assert cdp_server.choose_focused_target(tabs, states) is None
+
+
+def test_two_focused_targets_refuse():
+    # Ambiguity is a refusal, not a coin toss.
+    tabs = [{"title": "A"}, {"title": "B"}]
+    states = [_state(True, True), _state(True, True)]
+    assert cdp_server.choose_focused_target(tabs, states) is None
+
+
+def test_an_unknown_focus_state_does_not_qualify():
+    tabs = [{"title": "GitHub"}]
+    assert cdp_server.choose_focused_target(tabs, [_state(False, False, known=False)]) is None
+
+
+def test_an_empty_titled_focused_tab_is_chosen():
+    # A tab whose page has no <title> (a raw JSON view, the built-in PDF
+    # viewer) must not be filtered out: the identity gate treats an empty
+    # target title as a match, so the narrowing must too — and the focus
+    # probe then decides.
+    tabs = [{"title": "", "url": "https://example.com/data.json"}]
+    kept = cdp_server.narrow_by_title(tabs, "Example — Brave")
+    assert len(kept) == 1
+    chosen = cdp_server.choose_focused_target(kept, [_state(True, True)])
+    assert chosen is not None
+    assert chosen["url"] == "https://example.com/data.json"
+
+
+# ── A probe that did not answer in time proves nothing ─────────────────────
+
+
+def test_a_title_matched_candidate_that_timed_out_is_refused():
+    # The renderer was too busy to answer in time. That is NOT proof that it
+    # is the foreground: nothing was proven, so nothing is chosen.
+    tabs = [{"title": "GitHub", "url": "https://github.com/"}]
+    kept = cdp_server.narrow_by_title(tabs, "GitHub — Brave")
+    assert len(kept) == 1
+    assert cdp_server.choose_focused_target(kept, [_timed_out()]) is None
+
+
+def test_a_single_empty_titled_candidate_that_timed_out_is_refused():
+    # Nothing proved which target is in front: an empty title cannot
+    # contradict the expected one, and the probe never answered, so the
+    # foreground is simply unknown.
+    tabs = [{"title": "", "url": "https://example.com/data.json"}]
+    kept = cdp_server.narrow_by_title(tabs, "Example — Brave")
+    assert len(kept) == 1
+    assert cdp_server.choose_focused_target(kept, [_timed_out()]) is None
+
+
+def test_two_candidates_where_one_timed_out_are_refused():
+    # Two survivors and no focus report: the timeout singles nothing out.
+    tabs = [
+        {"title": "GitHub", "url": "https://github.com/"},
+        {"title": "GitHub - Notifications", "url": "https://github.com/n"},
+    ]
+    kept = cdp_server.narrow_by_title(tabs, "GitHub")
+    assert len(kept) == 2
+    assert (
+        cdp_server.choose_focused_target(kept, [_timed_out(), _state(False, False)])
+        is None
+    )
+
+
+# ── The refusal reason ──────────────────────────────────────────────────────
+
+
+def test_the_reason_says_why_no_target_was_chosen():
+    tabs = [{"title": "A"}, {"title": "B"}]
+    # Nothing focused.
+    assert "no target reports the focus" in cdp_server.foreground_reason(
+        tabs, [_state(False, True), _state(False, True)]
+    )
+    # Two focused: ambiguity.
+    assert "claim the focus" in cdp_server.foreground_reason(
+        tabs, [_state(True, True), _state(True, True)]
+    )
+    # Everything unknown because nothing answered in time.
+    assert "in time" in cdp_server.foreground_reason(tabs, [_timed_out(), _timed_out()])
+    # No candidate at all.
+    assert "no target matched" in cdp_server.foreground_reason([], [])
+
+
+# ── The concurrent sweep ────────────────────────────────────────────────────
+
+
+def test_the_sweep_probes_every_candidate_concurrently_under_one_deadline(monkeypatch):
+    # Four frozen background tabs. Four SEQUENTIAL probes would cost four
+    # deadlines; the sweep costs ONE, because the probes run in parallel.
+    class _NeverAnswers:
+        def __init__(self, ws_url):
+            self.ws_url = ws_url
+
+        async def __aenter__(self):
+            await asyncio.sleep(3600)  # a frozen renderer
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+    monkeypatch.setattr(cdp_server, "Cdp", _NeverAnswers)
+
+    targets = [{"webSocketDebuggerUrl": f"ws://x/{i}"} for i in range(4)]
+    deadline = 0.5
+    t0 = time.monotonic()
+    states = asyncio.run(cdp_server._probe_all(targets, deadline))
+    elapsed = time.monotonic() - t0
+
+    assert len(states) == 4
+    assert all(st["known"] is False for st in states)
+    assert all(st["focus"] is False for st in states)
+    # One deadline, not one per candidate.
+    assert elapsed < deadline * 2
+    # And nothing was chosen: no candidate proved it was in front.
+    assert cdp_server.choose_focused_target(targets, states) is None
+
+
+def test_a_frozen_candidate_does_not_discard_the_answers_of_the_others(monkeypatch):
+    # One tab answers, one is frozen. The frozen one proves nothing, but it
+    # must not throw away the answer of the tab that DID reply.
+    async def _fake_inner(t: dict) -> dict:
+        if t.get("frozen"):
+            await asyncio.sleep(3600)
+        return {"focus": True, "visible": True, "known": True, "timed_out": False}
+
+    monkeypatch.setattr(cdp_server, "_page_focus_state_inner", _fake_inner)
+
+    targets = [
+        {"webSocketDebuggerUrl": "ws://x/1", "frozen": True},
+        {"webSocketDebuggerUrl": "ws://x/2", "frozen": False},
+    ]
+    states = asyncio.run(cdp_server._probe_all(targets, 0.3))
+
+    assert states[0]["known"] is False  # the frozen one proved nothing
+    assert states[1]["known"] is True  # the answer survived
+    chosen = cdp_server.choose_focused_target(targets, states)
+    assert chosen is not None
+    assert chosen["webSocketDebuggerUrl"] == "ws://x/2"
+
+
+# ── The whole rule, with a fake endpoint ────────────────────────────────────
+
+
+class _FakeCdp:
+    """A CDP session that answers the focus probe from a table."""
+
+    FOCUS: dict = {}
+
+    def __init__(self, ws_url: str):
+        self.ws_url = ws_url
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    async def call(self, method: str, params: dict | None = None) -> dict:
+        if method == "Runtime.evaluate":
+            d = _FakeCdp.FOCUS.get(self.ws_url, {"focus": False, "vis": "hidden"})
+            return {"result": {"value": json.dumps(d)}}
+        raise AssertionError(f"unexpected CDP method {method}")
+
+
+def test_the_whole_rule_picks_the_focused_tab_of_the_expected_window(monkeypatch):
+    pages = [
+        {
+            "type": "page",
+            "title": "GitHub - Notifications",
+            "url": "https://github.com/n",
+            "webSocketDebuggerUrl": "ws://x/1",
+        },
+        {
+            "type": "page",
+            "title": "GitHub",
+            "url": "https://github.com/",
+            "webSocketDebuggerUrl": "ws://x/2",
+        },
+        {
+            "type": "page",
+            "title": "GitHub - Issues",
+            "url": "https://github.com/i",
+            "webSocketDebuggerUrl": "ws://x/3",
+        },
+    ]
+    monkeypatch.setattr(cdp_server, "http_list", lambda port: pages)
+    monkeypatch.setattr(cdp_server, "Cdp", _FakeCdp)
+    _FakeCdp.FOCUS = {
+        "ws://x/1": {"focus": False, "vis": "hidden"},
+        "ws://x/2": {"focus": True, "vis": "visible"},
+        "ws://x/3": {"focus": False, "vis": "hidden"},
+    }
+    try:
+        target, reason = asyncio.run(
+            cdp_server.chromium_foreground_target(9222, None, "GitHub", 2.0)
+        )
+    finally:
+        _FakeCdp.FOCUS = {}
+
+    assert target is not None
+    assert target["url"] == "https://github.com/"
+    assert reason == ""
+
+
+def test_the_whole_rule_refuses_when_no_tab_has_the_focus(monkeypatch):
+    pages = [
+        {
+            "type": "page",
+            "title": "GitHub",
+            "url": "https://github.com/",
+            "webSocketDebuggerUrl": "ws://x/1",
+        },
+        {
+            "type": "page",
+            "title": "GitHub - Issues",
+            "url": "https://github.com/i",
+            "webSocketDebuggerUrl": "ws://x/2",
+        },
+    ]
+    monkeypatch.setattr(cdp_server, "http_list", lambda port: pages)
+    monkeypatch.setattr(cdp_server, "Cdp", _FakeCdp)
+    _FakeCdp.FOCUS = {
+        "ws://x/1": {"focus": False, "vis": "visible"},
+        "ws://x/2": {"focus": False, "vis": "visible"},
+    }
+    try:
+        target, reason = asyncio.run(
+            cdp_server.chromium_foreground_target(9222, None, "GitHub", 2.0)
+        )
+    finally:
+        _FakeCdp.FOCUS = {}
+
+    assert target is None
+    assert reason
+
+
+# ── The whole endpoint decision, with fakes ────────────────────────────────
 
 
 def _identity(kind: str, app: str, title: str) -> dict:
@@ -218,128 +531,6 @@ def test_a_background_endpoint_does_not_prove_anything():
     # Brave in front; a background VS Code holding a debug port.
     idn = _identity("electron", "Visual Studio Code", "main.rs - nexus")
     assert not cdp_server.app_names_match("brave", idn["app"])
-
-
-# ── The foreground target ───────────────────────────────────────────────────
-#
-# The accessibility tree is per TARGET, so the identity check and the action
-# have to use the SAME one. These tests use fake targets and fake focus
-# states — no browser, no websocket.
-
-
-def _state(focus: bool, visible: bool, known: bool = True) -> dict:
-    return {"focus": focus, "visible": visible, "known": known, "timed_out": False}
-
-
-def _timed_out() -> dict:
-    return {"focus": False, "visible": False, "known": False, "timed_out": True}
-
-
-def test_the_tab_that_has_focus_is_the_one_chosen():
-    # Two tabs of the same browser; the SECOND one has focus. Picking the
-    # first (the old first-non-blank rule) would act in a background tab.
-    tabs = [
-        {"title": "Background tab", "url": "https://example.com/one"},
-        {"title": "GitHub", "url": "https://github.com/"},
-    ]
-    states = [_state(False, True), _state(True, True)]
-    chosen = cdp_server.choose_focused_target(tabs, states)
-    assert chosen is not None
-    assert chosen["title"] == "GitHub"
-
-
-def test_no_focused_tab_refuses():
-    # Nothing has focus: the foreground is unknown, so nothing is chosen.
-    tabs = [{"title": "GitHub", "url": "https://github.com/"}]
-    assert cdp_server.choose_focused_target(tabs, [_state(False, False)]) is None
-
-
-def test_two_focused_tabs_refuse():
-    # Ambiguity is a refusal, not a coin toss.
-    tabs = [{"title": "A"}, {"title": "B"}]
-    states = [_state(True, True), _state(True, True)]
-    assert cdp_server.choose_focused_target(tabs, states) is None
-
-
-def test_a_single_visible_target_is_the_fallback():
-    # Nothing has focus, but exactly one is visible.
-    tabs = [{"title": "GitHub"}]
-    assert cdp_server.choose_focused_target(tabs, [_state(False, True)]) is not None
-
-
-def test_two_visible_targets_without_focus_refuse():
-    tabs = [{"title": "A"}, {"title": "B"}]
-    states = [_state(False, True), _state(False, True)]
-    assert cdp_server.choose_focused_target(tabs, states) is None
-
-
-def test_an_unknown_focus_state_does_not_qualify():
-    tabs = [{"title": "GitHub"}]
-    assert cdp_server.choose_focused_target(tabs, [_state(False, False, known=False)]) is None
-
-
-# ── An empty title is not a contradiction ──────────────────────────────────
-
-
-def test_an_empty_titled_focused_tab_is_chosen():
-    # A tab whose page has no <title> (a raw JSON view, the built-in PDF
-    # viewer) must not be filtered out: the identity gate treats an empty
-    # target title as a match, so the narrowing must too — and the focus
-    # probe then decides.
-    tabs = [{"title": "", "url": "https://example.com/data.json"}]
-    kept = cdp_server.narrow_by_title(tabs, "Example — Brave")
-    assert len(kept) == 1
-    chosen = cdp_server.choose_focused_target(
-        kept, [_state(True, True)], "Example — Brave"
-    )
-    assert chosen is not None
-    assert chosen["url"] == "https://example.com/data.json"
-
-
-# ── Timed out is not the same as "not focused" ─────────────────────────────
-
-
-def test_a_single_title_matched_candidate_that_timed_out_is_chosen():
-    # The renderer was too busy to answer in time, not "not focused". With one
-    # survivor whose own title matches the foreground, it IS the foreground.
-    tabs = [{"title": "GitHub", "url": "https://github.com/"}]
-    kept = cdp_server.narrow_by_title(tabs, "GitHub — Brave")
-    assert len(kept) == 1
-    chosen = cdp_server.choose_focused_target(kept, [_timed_out()], "GitHub — Brave")
-    assert chosen is not None
-    assert chosen["title"] == "GitHub"
-
-
-def test_a_single_empty_titled_candidate_that_timed_out_is_refused():
-    # Nothing proved which target is in front: an empty title cannot
-    # contradict the expected one, and the probe never answered, so the
-    # foreground is simply unknown.
-    tabs = [{"title": "", "url": "https://example.com/data.json"}]
-    kept = cdp_server.narrow_by_title(tabs, "Example — Brave")
-    assert len(kept) == 1
-    assert (
-        cdp_server.choose_focused_target(kept, [_timed_out()], "Example — Brave")
-        is None
-    )
-
-
-def test_two_candidates_where_one_timed_out_are_refused():
-    # Two survivors and no focus report: the timeout singles nothing out.
-    tabs = [
-        {"title": "GitHub", "url": "https://github.com/"},
-        {"title": "GitHub - Notifications", "url": "https://github.com/n"},
-    ]
-    kept = cdp_server.narrow_by_title(tabs, "GitHub")
-    assert len(kept) == 2
-    assert (
-        cdp_server.choose_focused_target(
-            kept, [_timed_out(), _state(False, False)], "GitHub"
-        )
-        is None
-    )
-
-
-# ── The whole endpoint decision, with fakes ────────────────────────────────
 
 
 def test_an_app_name_mismatch_refuses_the_endpoint():
@@ -364,3 +555,15 @@ def test_a_matching_endpoint_is_allowed():
     ident = _identity("chromium", "brave", "")
     target = {"title": "GitHub", "url": "https://github.com/"}
     assert cdp_server.endpoint_matches("brave", "GitHub - Brave", ident, target)
+
+
+# ── The budgets ─────────────────────────────────────────────────────────────
+
+
+def test_the_request_budget_stays_inside_the_client_timeout():
+    # The Rust client gives the request 20 s; the whole request (all ports)
+    # has to finish inside 15 s, so the ports share one budget that is
+    # smaller than that.
+    assert cdp_server.ACTIVATE_BUDGET < 15
+    # And one port's sweep never gets more than its own deadline.
+    assert cdp_server.FOCUS_SWEEP_DEADLINE <= cdp_server.ACTIVATE_BUDGET
