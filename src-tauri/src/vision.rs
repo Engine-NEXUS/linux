@@ -220,22 +220,31 @@ pub fn capture_region_jpeg_base64(x: i32, y: i32, w: i32, h: i32, max_w: u32) ->
     if w <= 0 || h <= 0 {
         return None;
     }
-    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(x, y, w, h)?;
-    let img = image::RgbaImage::from_raw(w as u32, h as u32, bgra_to_rgba(bgra))?;
-    let scale = (max_w as f32 / w as f32).min(1.0);
-    let (tw, th) = (
-        ((w as f32 * scale) as u32).max(1),
-        ((h as f32 * scale) as u32).max(1),
-    );
-    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
-    let mut jpeg = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 70)
-        .encode_image(&image::DynamicImage::ImageRgba8(small))
-        .ok()?;
-    use base64::Engine;
-    Some(base64::engine::general_purpose::STANDARD.encode(&jpeg))
+    #[cfg(target_os = "windows")]
+    {
+        let bgra = crate::sidebar_backdrop::capture_region_bgra_public(x, y, w, h)?;
+        let img = image::RgbaImage::from_raw(w as u32, h as u32, bgra_to_rgba(bgra))?;
+        let scale = (max_w as f32 / w as f32).min(1.0);
+        let (tw, th) = (
+            ((w as f32 * scale) as u32).max(1),
+            ((h as f32 * scale) as u32).max(1),
+        );
+        let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 70)
+            .encode_image(&image::DynamicImage::ImageRgba8(small))
+            .ok()?;
+        use base64::Engine;
+        Some(base64::engine::general_purpose::STANDARD.encode(&jpeg))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (x, y, w, h, max_w);
+        None
+    }
 }
 
+#[allow(dead_code)]
 fn bgra_to_rgba(mut bgra: Vec<u8>) -> Vec<u8> {
     for px in bgra.chunks_exact_mut(4) {
         px.swap(0, 2);
@@ -303,25 +312,33 @@ pub fn capture_gridded_jpeg_base64_w(max_w: u32) -> Option<(String, i32, i32)> {
     if mw <= 0 || mh <= 0 {
         return None;
     }
-    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(0, 0, mw, mh)?;
-    let img = image::RgbaImage::from_raw(mw as u32, mh as u32, bgra_to_rgba(bgra))?;
-    let scale = (max_w as f32 / mw as f32).min(1.0);
-    let (tw, th) = (
-        ((mw as f32 * scale) as u32).max(1),
-        ((mh as f32 * scale) as u32).max(1),
-    );
-    let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
-    let gridded = overlay_axis_grid(small);
-    let mut jpeg = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 60)
-        .encode_image(&image::DynamicImage::ImageRgba8(gridded))
-        .ok()?;
-    use base64::Engine;
-    Some((
-        base64::engine::general_purpose::STANDARD.encode(&jpeg),
-        mw,
-        mh,
-    ))
+    #[cfg(target_os = "windows")]
+    {
+        let bgra = crate::sidebar_backdrop::capture_region_bgra_public(0, 0, mw, mh)?;
+        let img = image::RgbaImage::from_raw(mw as u32, mh as u32, bgra_to_rgba(bgra))?;
+        let scale = (max_w as f32 / mw as f32).min(1.0);
+        let (tw, th) = (
+            ((mw as f32 * scale) as u32).max(1),
+            ((mh as f32 * scale) as u32).max(1),
+        );
+        let small = image::imageops::resize(&img, tw, th, image::imageops::FilterType::Triangle);
+        let gridded = overlay_axis_grid(small);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 60)
+            .encode_image(&image::DynamicImage::ImageRgba8(gridded))
+            .ok()?;
+        use base64::Engine;
+        Some((
+            base64::engine::general_purpose::STANDARD.encode(&jpeg),
+            mw,
+            mh,
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = max_w;
+        None
+    }
 }
 
 /// Standard-capture wrapper (1024px).

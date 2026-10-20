@@ -1247,6 +1247,7 @@ pub(crate) fn finish_sidebar<R: Runtime>(
 ) -> Result<(), String> {
     win.show().map_err(|e| format!("sidebar show: {e}"))?;
     let _ = win.set_focus();
+    #[cfg(target_os = "windows")]
     crate::dwm_corners::round_corners(win);
     #[cfg(target_os = "macos")]
     {

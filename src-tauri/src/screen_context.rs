@@ -428,18 +428,23 @@ pub async fn collect(mw: i32, mh: i32) -> ScreenContext {
     // Feature 98 P3: ground-truth text clues from local WinRT OCR (fast,
     // free, ~25ms) so the vision model can cross-reference on-screen text
     // (names, handles, chyrons) for public-figure recognition.
-    let ocr = tokio::time::timeout(
-        std::time::Duration::from_millis(1200),
-        tokio::task::spawn_blocking(crate::ocr::capture_screen_text),
-    )
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-    .and_then(|r| r);
-    let ocr_lines = match ocr {
-        Some((text, _)) => compact_ocr_lines(&text, 10),
-        None => Vec::new(),
+    #[cfg(target_os = "windows")]
+    let ocr_lines = {
+        let ocr = tokio::time::timeout(
+            std::time::Duration::from_millis(1200),
+            tokio::task::spawn_blocking(crate::ocr::capture_screen_text),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .and_then(|r| r);
+        match ocr {
+            Some((text, _)) => compact_ocr_lines(&text, 10),
+            None => Vec::new(),
+        }
     };
+    #[cfg(not(target_os = "windows"))]
+    let ocr_lines = Vec::new();
     let ctx = ScreenContext { ocr_lines, ..ctx };
     tracing::info!(
         "screen_context: app='{}' kind={:?} region={:?} full={} youtube={} sensitive={}",

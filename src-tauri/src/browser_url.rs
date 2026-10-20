@@ -232,6 +232,11 @@ pub(crate) fn foreground_window_title() -> Option<String> {
     get_foreground_window_title()
 }
 
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn foreground_window_title() -> Option<String> {
+    crate::live::commands::window::get_foreground_window_title()
+}
+
 /// Foreground process executable name, lower-case (e.g. `brave.exe`).
 #[cfg(target_os = "windows")]
 pub(crate) fn foreground_process_name() -> Option<String> {

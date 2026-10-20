@@ -543,10 +543,22 @@ mod unix_stub {
     pub fn current_pos() -> Option<(i32, i32)> {
         None
     }
+
+    pub fn resolve_element(_name: &str) -> Option<crate::screen::UiElement> {
+        None
+    }
+
+    pub async fn ghost_click<R: tauri::Runtime>(
+        _app: tauri::AppHandle<R>,
+        _app_title: &str,
+        _element: &str,
+    ) -> Result<String, String> {
+        Err("Mouse ghost is not supported on Linux yet.".to_string())
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub use unix_stub::current_pos;
+pub use unix_stub::{current_pos, ghost_click, resolve_element};
 
 #[cfg(test)]
 mod tests {

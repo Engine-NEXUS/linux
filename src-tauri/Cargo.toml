@@ -145,13 +145,6 @@ async-trait = "0.1"
 enigo = "0.5"
 arboard = "3.4"
 
-# Auth vault: OS credential store (Windows Credential Manager / macOS
-# Keychain / Linux Secret Service) for MCP OAuth tokens. Used by
-# auth_vault.rs — one login per service group, auto-refresh on 401.
-# `windows-native` is required: without a platform feature keyring 3.x falls
-# back to an in-memory mock store and nothing reaches Credential Manager.
-keyring = { version = "3", features = ["windows-native"] }
-
 # Telegram remote (owner-only bridge, long-polling, no public IP needed).
 teloxide = { version = "0.17", default-features = false, features = ["macros", "native-tls"] }
 webrtc-vad = "0.4.0"
@@ -198,10 +191,19 @@ uiautomation = "0.25"
 # permission so the prompt never re-appears). Version pinned to match wry's.
 webview2-com = "0.38"
 windows-core = "0.61"
+# Auth vault: OS credential store for MCP OAuth tokens (auth_vault.rs).
+# keyring 3.x needs a platform feature per target, or it silently falls
+# back to an in-memory mock store; Linux and macOS have their own tables.
+keyring = { version = "3", features = ["windows-native"] }
 
 # Linux-specific: D-Bus / MPRIS media control & native notifications via zbus
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
+keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-rust"] }
+
+# macOS-specific: Apple Keychain support for auth vault
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
 
 [features]
 default = ["wakeword-oww"]

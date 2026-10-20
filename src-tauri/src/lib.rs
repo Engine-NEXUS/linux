@@ -141,6 +141,8 @@ mod dwm_corners;
 mod sidebar_backdrop;
 pub(crate) mod live_glass;
 pub(crate) mod luminance_probe;
+#[cfg(target_os = "linux")]
+pub(crate) mod session;
 
 use tauri::{Emitter, Listener, Manager};
 #[cfg(not(target_os = "windows"))]

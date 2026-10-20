@@ -320,6 +320,92 @@ mod unix_impl {
         tracing::warn!("live: no window matched {:?}", partial_title);
         false
     }
+
+    /// Minimize the current foreground window on Linux.
+    /// Not supported on native Wayland; attempts xdotool on X11 if available.
+    pub fn minimize_foreground_window() -> bool {
+        if !crate::session::has_x11_input() {
+            tracing::warn!("live: cannot minimize window on Wayland — not supported by compositor");
+            return false;
+        }
+        let out = std::process::Command::new("xdotool")
+            .args(["getactivewindow", "windowminimize"])
+            .status();
+        matches!(out, Ok(s) if s.success())
+    }
+
+    /// Maximize the current foreground window on Linux.
+    /// Not supported on native Wayland; attempts wmctrl on X11 if available.
+    pub fn maximize_foreground_window() -> bool {
+        if !crate::session::has_x11_input() {
+            tracing::warn!("live: cannot maximize window on Wayland — not supported by compositor");
+            return false;
+        }
+        let out = std::process::Command::new("wmctrl")
+            .args(["-r", ":ACTIVE:", "-b", "add,maximized_vert,maximized_horz"])
+            .status();
+        matches!(out, Ok(s) if s.success())
+    }
+
+    /// True if OUR process runs elevated (admin/root).
+    pub fn our_process_elevated() -> bool {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        unsafe { geteuid() == 0 }
+    }
+
+    /// True if the process owning the window runs elevated (admin/root).
+    pub fn window_process_elevated<T>(_hwnd: T) -> bool {
+        false
+    }
+
+    /// Poll for an app window by partial title up to `timeout_ms`.
+    pub fn wait_and_focus_app(partial_title: &str, timeout_ms: u64) -> bool {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let interval = std::time::Duration::from_millis(150);
+
+        while start.elapsed() < timeout {
+            if focus_app_by_title(partial_title) {
+                return true;
+            }
+            std::thread::sleep(interval);
+        }
+        false
+    }
+
+    /// Get the title of the current foreground window on Linux.
+    /// On Wayland returns None; on X11 attempts `xdotool`.
+    pub fn get_foreground_window_title() -> Option<String> {
+        if !crate::session::has_x11_input() {
+            return None;
+        }
+        let out = std::process::Command::new("xdotool")
+            .args(["getactivewindow", "getwindowname"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let title = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if title.is_empty() {
+            None
+        } else {
+            Some(title)
+        }
+    }
+
+    /// Check if current foreground window belongs to app (case-insensitive).
+    pub fn is_foreground_app(partial: &str) -> bool {
+        let want = partial.to_lowercase();
+        if let Some(title) = get_foreground_window_title() {
+            if title.to_lowercase().contains(&want) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]

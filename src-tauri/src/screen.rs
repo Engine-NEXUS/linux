@@ -337,6 +337,13 @@ mod win_extra {
 #[cfg(target_os = "windows")]
 pub use win_extra::primary_monitor_size;
 
+#[cfg(target_os = "linux")]
+#[path = "screen_linux.rs"]
+mod screen_linux;
+
+#[cfg(target_os = "linux")]
+pub use screen_linux::{list_actionables, primary_monitor_size};
+
 /// Switch browser tab by index (1-based): Ctrl+1..8, Ctrl+9 = last.
 /// Hotkeys beat grounding for tabs — 100% reliable, instant.
 pub fn switch_browser_tab(index: u32) -> Result<String, String> {
