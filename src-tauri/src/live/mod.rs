@@ -32,7 +32,7 @@ pub mod commands;
 pub mod state;
 pub mod safety;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Result of a live-mode command execution.
 #[derive(Debug, Clone, Serialize)]
@@ -76,43 +76,6 @@ impl LiveResult {
         self.requires_confirmation = true;
         self
     }
-}
-
-/// Parsed live-mode intent — extends the existing ParsedIntent with
-/// actions that only make sense in live mode (type, press, send).
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "action")]
-#[allow(dead_code)]
-pub enum LiveIntent {
-    #[serde(rename = "type_text")]
-    TypeText { text: String },
-    #[serde(rename = "press_key")]
-    PressKey { key: String },
-    #[serde(rename = "press_hotkey")]
-    PressHotkey { keys: Vec<String> },
-    #[serde(rename = "send_message_live")]
-    SendMessageLive {
-        contact: Option<String>,
-        text: String,
-    },
-    #[serde(rename = "confirm_send")]
-    ConfirmSend,
-    #[serde(rename = "cancel_action")]
-    CancelAction,
-    #[serde(rename = "whatsapp_open")]
-    WhatsappOpen,
-    #[serde(rename = "whatsapp_search")]
-    WhatsappSearch { contact: String },
-    #[serde(rename = "browser_new_tab")]
-    BrowserNewTab,
-    #[serde(rename = "browser_navigate")]
-    BrowserNavigate { url: String },
-    #[serde(rename = "browser_search")]
-    BrowserSearch { query: String },
-    #[serde(rename = "focus_app")]
-    FocusApp { target: String },
-    #[serde(rename = "unknown")]
-    Unknown { raw: String },
 }
 
 // ─── Tauri commands ──────────────────────────────────────────────────────

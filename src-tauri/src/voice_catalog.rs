@@ -211,12 +211,6 @@ pub fn manifest_matches_file(manifest: &VoiceManifest, actual_voice_sha256: Opti
     actual_voice_sha256.map(|a| a.eq_ignore_ascii_case(&manifest.voice_sha256)).unwrap_or(false)
 }
 
-/// Read the slot manifest. None = empty slot (nothing downloaded yet).
-#[allow(dead_code)]
-pub fn read_manifest() -> Option<VoiceManifest> {
-    read_manifest_at(&managed_voices_dir()?)
-}
-
 /// True when the shared model AND the active voice pack both exist in `dir`.
 pub fn slot_files_present_at(dir: &std::path::Path) -> bool {
     dir.join(MODEL_FILE).is_file() && dir.join(VOICE_FILE).is_file()

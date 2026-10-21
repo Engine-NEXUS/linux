@@ -419,88 +419,6 @@ async fn capture_gridded_or_plain(max_w: u32) -> Option<(String, i32, i32)> {
     }
 }
 
-/// Ask Groq vision for element coordinates. Tries each vision model in
-/// order; first parseable in-bounds answer wins. None = fall through.
-/// Uses the gridded capture so the model reads off visible anchors.
-#[allow(dead_code)]
-pub async fn locate_via_vision(
-    description: &str,
-    api_key: &str,
-    client: &reqwest::Client,
-) -> Option<crate::screen::UiElement> {
-    if description.trim().is_empty() || api_key.is_empty() {
-        return None;
-    }
-    let (b64, w, h) = capture_gridded_or_plain(VISION_MAX_W).await?;
-    let prompt = build_locate_prompt(description);
-    let data_uri = format!("data:image/jpeg;base64,{b64}");
-    for model in GROQ_VISION_MODELS {
-        let body = serde_json::json!({
-            "model": model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": data_uri}},
-                ],
-            }],
-            "max_tokens": 64,
-            "temperature": 0.0,
-        });
-        let resp = client
-            .post("https://api.groq.com/openai/v1/chat/completions")
-            .bearer_auth(api_key)
-            .json(&body)
-            .send()
-            .await
-            .ok()?;
-        if !resp.status().is_success() {
-            continue;
-        }
-        let json: serde_json::Value = resp.json().await.ok()?;
-        let text = json["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("");
-        if let Some((x, y)) = parse_coords(text, w, h) {
-            tracing::info!("vision: '{}' → ({}, {}) via {}", description, x, y, model);
-            return Some(crate::screen::UiElement {
-                name: description.trim().to_string(),
-                kind: "vision".to_string(),
-                x,
-                y,
-                w: 0,
-                h: 0,
-            });
-        }
-    }
-    None
-}
-
-/// UIA first (exact, free), vision on miss. api_key empty → UIA only.
-#[allow(dead_code)]
-pub async fn resolve_named_target(
-    name: &str,
-    api_key: &str,
-    client: &reqwest::Client,
-) -> Option<crate::screen::UiElement> {
-    // The element lookup is a BLOCKING call (an accessibility-bus round trip
-    // on Linux, a UIA walk on Windows) inside an async function.
-    let want = name.to_string();
-    let resolved = tokio::task::spawn_blocking(move || {
-        crate::live::commands::mouse::resolve_element(&want)
-    })
-    .await
-    .ok()
-    .flatten();
-    if let Some(el) = resolved {
-        return Some(el);
-    }
-    if api_key.is_empty() {
-        return None;
-    }
-    locate_via_vision(name, api_key, client).await
-}
-
 // ─── Dual providers + daily quotas ──────────────────────────────
 
 /// Gemini vision model (live-verified 2026-10-07: HTTP 200 in 1.27s).
@@ -1202,20 +1120,6 @@ pub struct ScreenEmailContext {
     pub subject: String,
     pub current_deadline: Option<String>,
     pub summary: String,
-}
-
-/// Prompt instructing the VLM to extract email metadata and deadlines from the screen.
-#[allow(dead_code)]
-pub fn build_email_extraction_prompt() -> &'static str {
-    "You are an expert OCR and document understanding engine. Inspect the screenshot and find the email client or open email message.\n\
-    Extract the following fields into a single JSON object:\n\
-    - is_email_visible: boolean (true if an email message or inbox thread is visible)\n\
-    - sender_name: string (name of the email sender or organizer, empty if not found)\n\
-    - sender_email: string (email address of the sender, empty if not found)\n\
-    - subject: string (subject line of the email thread, empty if not found)\n\
-    - current_deadline: string or null (any deadline, due date, submission date, or scheduled time mentioned in the email body)\n\
-    - summary: string (one-sentence summary of the email content)\n\
-    Reply with ONLY the raw JSON object and no other text."
 }
 
 /// Parse VLM response text into a typed `ScreenEmailContext`.

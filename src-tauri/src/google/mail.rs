@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use super::types::{
-    DeadlineUpdate, DraftReceipt, GoogleError, MailMessage, MailThread, SendReceipt,
+    DeadlineUpdate, DraftReceipt, GoogleError, MailMessage, SendReceipt,
     ThreadUpdateEvent, ThreadWatchTarget, WatchStatus,
 };
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
@@ -102,32 +102,6 @@ impl MailService {
             to, subject, body
         );
         URL_SAFE.encode(rfc)
-    }
-
-    /// Parse Gmail thread list response into structured `MailThread` objects.
-    pub fn parse_threads_json(json: &Value) -> Result<Vec<MailThread>, GoogleError> {
-        let threads = json
-            .get("threads")
-            .and_then(|t| t.as_array())
-            .ok_or_else(|| GoogleError::SerializationError("Missing threads array in response".into()))?;
-
-        let mut list = Vec::new();
-        for t in threads {
-            let id = t.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let snippet = t.get("snippet").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let history_id = t.get("historyId").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-            list.push(MailThread {
-                id,
-                snippet,
-                history_id,
-                sender: String::new(),
-                subject: String::new(),
-                timestamp_ms: 0,
-                is_unread: false,
-            });
-        }
-        Ok(list)
     }
 
     /// Parse Gmail message payload JSON into structured `MailMessage`.

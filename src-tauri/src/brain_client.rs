@@ -41,13 +41,6 @@ struct PhrasingResponse {
     _latency_ms: f32,
 }
 
-/// Pronunciation map response.
-#[derive(Debug, Deserialize)]
-pub struct PronunciationMapResponse {
-    pub map: std::collections::HashMap<String, String>,
-    pub count: usize,
-}
-
 /// Classify a transcript via the brain server.
 ///
 /// Returns None if the server is not running or the request fails.
@@ -128,40 +121,6 @@ pub async fn brain_generate_phrasings(
 
     let result: PhrasingResponse = response.json().await.ok()?;
     Some(result.phrasings)
-}
-
-/// Get the current pronunciation map.
-pub async fn brain_get_pronunciation_map() -> Option<PronunciationMapResponse> {
-    let url = format!("http://127.0.0.1:{}/pronunciation_map", BRAIN_PORT);
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
-        .ok()?;
-
-    let response = client.get(&url).send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-
-    response.json().await.ok()
-}
-
-/// Check if the brain server is running.
-pub async fn is_brain_available() -> bool {
-    let url = format!("http://127.0.0.1:{}/health", BRAIN_PORT);
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(500))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    match client.get(&url).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
-    }
 }
 
 /// Convert brain server response to ParsedIntent.

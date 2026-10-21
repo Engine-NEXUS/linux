@@ -69,35 +69,6 @@ pub fn send_message() -> Result<(), String> {
     Ok(())
 }
 
-/// Full WhatsApp send flow: open → search contact → type → send.
-/// The `confirm_send` callback is called before the final Enter press.
-/// If it returns false, the message is NOT sent.
-#[allow(dead_code)]
-pub fn full_send_flow(
-    contact: &str,
-    message: &str,
-    confirm_send: impl FnOnce(&str, &str) -> bool,
-) -> Result<bool, String> {
-    // 1. Open WhatsApp
-    open_whatsapp()?;
-
-    // 2. Search for the contact
-    search_contact(contact)?;
-
-    // 3. Type the message
-    type_message(message)?;
-
-    // 4. Ask for confirmation before sending
-    if !confirm_send(contact, message) {
-        tracing::info!("live: whatsapp send cancelled by user");
-        return Ok(false); // not sent
-    }
-
-    // 5. Send
-    send_message()?;
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
     // These are integration tests that require WhatsApp to be installed.

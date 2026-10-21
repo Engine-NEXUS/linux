@@ -26,5 +26,5 @@ The Worker deploy (`deploy-worker.yml`) is unchanged: it deploys on a push to `m
 
 ## Still open (owners)
 
-- Feature 139 (return review, agent task journal, the watch UI): re-land the `mod` lines and the frontend in WINDOWS; the orphan and one-sided baselines shrink when it lands.
+- Feature 139 (return review, agent task journal, the watch UI): re-land the `mod` lines and the frontend in WINDOWS. Its two uncompiled files were later removed from this repository as dead weight (`linux-port-dead-weight-cleanup.md`); WINDOWS still has them.
 - The same two CI fixes (color, orphans) apply to WINDOWS' own CI.

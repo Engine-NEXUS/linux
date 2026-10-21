@@ -166,10 +166,6 @@ pub const CREDENTIAL_ROLES: &[&str] = &[
     "password text", "password", "otp input", "pin entry", "secure text",
 ];
 
-fn contains_ci(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(&needle)
-}
-
 fn any_match(haystack: &str, needles: &[&str]) -> Option<&'static str> {
     let lower = haystack.to_lowercase();
     for n in needles {

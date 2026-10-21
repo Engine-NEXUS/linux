@@ -229,19 +229,3 @@ pub fn ensure_brain_running() {
         }
     }
 }
-
-/// Check if the brain server is running.
-pub fn is_brain_running() -> bool {
-    BRAIN_RUNNING.load(Ordering::Relaxed) || is_brain_responsive()
-}
-
-/// Kill the brain server (called on app shutdown).
-pub fn kill_brain() {
-    let mut guard = BRAIN_CHILD.lock().unwrap();
-    if let Some(mut child) = guard.take() {
-        let _ = child.kill();
-        let _ = child.wait();
-        tracing::info!("[lazy_brain] brain server killed");
-    }
-    BRAIN_RUNNING.store(false, Ordering::Relaxed);
-}

@@ -4305,10 +4305,6 @@ fn end_tour_fetch<R: Runtime>(app: &AppHandle<R>, request_id: &str, shown: bool)
 /// (the legacy chain speaks next), and hand control back.
 fn tour_fallback<R: Runtime>(app: &AppHandle<R>, request_id: &str, spoken: bool) -> TourRun {
     end_tour_fetch(app, request_id, spoken);
-    let _ = app.emit(
-        "screen:tour_phase",
-        serde_json::json!({ "phase": "fallback", "request_id": request_id }),
-    );
     TourRun::Fallback { acked: spoken }
 }
 
@@ -4360,10 +4356,6 @@ async fn run_screen_tour<R: Runtime>(
             },
         );
         speak_line(app, ack_text, &rid);
-        let _ = app.emit(
-            "screen:tour_phase",
-            serde_json::json!({ "phase": "fetching", "request_id": rid }),
-        );
         emit(
             app,
             &OrchestratorEvent::Loading { visible: true, request_id: rid.clone() },
@@ -4380,10 +4372,6 @@ async fn run_screen_tour<R: Runtime>(
         // Banks / password managers / wallets: nothing is captured or sent.
         tracing::info!("screen_tour: sensitive window — refusing to analyse");
         end_tour_fetch(app, &rid, spoken);
-        let _ = app.emit(
-            "screen:tour_phase",
-            serde_json::json!({ "phase": "fallback", "request_id": rid }),
-        );
         if spoken {
             speak_line(app, "I won't analyse this window, sir.".to_string(), &rid);
         } else {
@@ -4465,10 +4453,6 @@ async fn run_screen_tour<R: Runtime>(
         Err(e) => {
             tracing::warn!("screen_tour: {e} — falling back to local OCR");
             end_tour_fetch(app, &rid, spoken);
-            let _ = app.emit(
-                "screen:tour_phase",
-                serde_json::json!({ "phase": "fallback", "request_id": rid }),
-            );
             if spoken {
                 speak_line(app, "I'm having trouble reaching the vision service, sir. Reading the visible text on your screen instead.".to_string(), &rid);
             }

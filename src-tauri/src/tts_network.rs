@@ -34,9 +34,6 @@ const LOCAL_GRACE_PERIOD: Duration = Duration::from_secs(600); // 10 minutes
 /// Minimum interval between network checks.
 const NETWORK_CHECK_INTERVAL: Duration = Duration::from_secs(30); // 30 seconds
 
-/// Network check timeout.
-const NETWORK_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
-
 /// Check if Edge TTS is reachable (network up).
 ///
 /// This is throttled to once per 30 seconds. If called within 30s of

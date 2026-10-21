@@ -14,18 +14,9 @@ atspi.rs: field states_after
 atspi.rs: field states_before
 atspi.rs: field states_changed
 atspi.rs: function fill
-auth_vault.rs: function migrate_api_keys_to_keychain
 brain_client.rs: field corrected_repo
-brain_client.rs: function brain_get_pronunciation_map
-brain_client.rs: function is_brain_available
-brain_client.rs: struct PronunciationMapResponse
-brain_monitor.rs: function approved_phrasings_count
-brain_monitor.rs: function gaps_count
-brain_monitor.rs: function pending_count
 brain_monitor.rs: function rejected_count
 browser_center.rs: constant ACTIONS
-browser_center.rs: function read_page_markdown
-browser_center.rs: function to_intent
 browser_url.rs: function url_encode
 calibration.rs: function wheel_step
 cdp.rs: field observed
@@ -66,7 +57,6 @@ ghost_learning.rs: function store_path
 ghost_learning.rs: struct LearnedControl
 ghostwriter.rs: field channel
 github_cmd.rs: method required_scopes
-google/auth.rs: associated function is_authenticated
 google/auth.rs: constant GOOGLE_SCOPES
 google/calendar.rs: associated function calculate_free_busy_buffer
 google/calendar.rs: associated function check_schedule_conflict
@@ -74,7 +64,6 @@ google/mail.rs: associated function create_thread_watch
 google/mail.rs: associated function encode_rfc2822
 google/mail.rs: associated function parse_draft_receipt_json
 google/mail.rs: associated function parse_send_receipt_json
-google/mail.rs: associated function parse_threads_json
 google/maps.rs: associated function build_maps_nav_url
 google/maps.rs: associated function detect_commute_delay
 google/maps.rs: associated function parse_directions_json
@@ -107,7 +96,6 @@ google/types.rs: struct ProactiveAlert
 google/types.rs: struct RouteSummary
 google/types.rs: struct SemanticPhotoQuery
 google/types.rs: struct SendReceipt
-google/types.rs: struct TimeRange
 hand/mod.rs: constant SNAP_RADIUS_PX
 hand/mod.rs: function guard_decision
 hand/mod.rs: function speed_multiplier
@@ -123,8 +111,6 @@ hand/snap.rs: method distance
 hand/snap.rs: struct Rect
 improve.rs: constant WEEKLY_TOP_N
 lazy_atspi.rs: function ever_ready
-lazy_brain.rs: function is_brain_running
-lazy_brain.rs: function kill_brain
 lazy_cdp.rs: function ever_ready
 live/commands/mouse.rs: associated item mark
 live/commands/mouse.rs: associated item new
@@ -151,12 +137,10 @@ live/commands/wa_open.rs: function pick_match
 live/commands/wa_open.rs: function spoken_name
 live/commands/wa_open.rs: struct ChatItem
 live/commands/wa_open.rs: trait WaEnv
-live/commands/whatsapp.rs: function full_send_flow
 live/commands/window.rs: function elevated_block_reason
 live/commands/window.rs: function is_foreground_app
 live/commands/window.rs: function wait_and_focus_app
 live/commands/window.rs: function window_process_elevated
-live/mod.rs: enum LiveIntent
 live/state.rs: method app_context
 live/state.rs: method has_pending_text
 live_glass.rs: function has_active_hitboxes
@@ -195,7 +179,6 @@ memory.rs: function update_mail_watch_status
 mic_permissions.rs: constant ALLOWED_ORIGIN_PREFIXES
 nlu_update.rs: field size
 nlu_update.rs: field updated_at
-nlu_update.rs: function downloaded_model_dir
 orchestrator.rs: enum TourRun
 orchestrator.rs: function apply_tour_actions
 orchestrator.rs: function build_worker_payload
@@ -210,7 +193,6 @@ orchestrator.rs: variant Speaking
 pii_filter.rs: function count_hits
 pipeline_bench.rs: function fmt_ms
 pipeline_bench.rs: function fmt_us
-policy.rs: function contains_ci
 policy.rs: method is_allowed
 policy.rs: method needs_confirmation
 policy.rs: variant ReadText
@@ -277,7 +259,6 @@ symbol_extractor.rs: struct Symbol
 system_center.rs: constant ACTIONS
 system_center.rs: function inspect_window_native
 system_center.rs: function inspect_window_semantic
-system_center.rs: function inspect_window_via_bridge
 tts.rs: associated item new
 tts.rs: associated item update
 tts.rs: constant NARRATION_GAP_MS
@@ -288,7 +269,6 @@ tts.rs: function pad_silence
 tts.rs: struct NarrationTracker
 tts_kokoro.rs: constant MAX_PHONEME_CHARS
 tts_kokoro.rs: function unknown_phonemes
-tts_network.rs: constant NETWORK_CHECK_TIMEOUT
 turn_detect.rs: function should_end_turn
 vision.rs: field fell_back
 vision.rs: field provider
@@ -296,18 +276,13 @@ vision.rs: field quota_hit
 vision.rs: field raced
 vision.rs: function best_computer_use_resolution
 vision.rs: function bgra_to_rgba
-vision.rs: function build_email_extraction_prompt
 vision.rs: function capture_region_jpeg_base64
 vision.rs: function denormalize_computer_use_coord
 vision.rs: function denormalize_spatial_box
-vision.rs: function locate_via_vision
 vision.rs: function parse_screen_email_json
 vision.rs: function pin_anchor_for
-vision.rs: function resolve_named_target
 vision.rs: struct ScreenEmailContext
 voice_catalog.rs: function find_by_kokoro_voice
-voice_catalog.rs: function read_manifest
-voice_profile.rs: method acceptance_threshold
 voice_profile.rs: method delete
 voice_profile.rs: method implicit_enroll
 voice_profile.rs: method num_embeddings

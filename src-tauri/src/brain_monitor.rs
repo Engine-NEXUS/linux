@@ -387,33 +387,6 @@ async fn trigger_retrain() {
     }
 }
 
-/// Get the current pending count (for UI display).
-pub fn pending_count() -> u32 {
-    PENDING_COUNT.load(Ordering::Relaxed)
-}
-
-/// Get the number of approved phrasings in the file.
-pub fn approved_phrasings_count() -> usize {
-    let path = approved_phrasings_path();
-    if !path.exists() {
-        return 0;
-    }
-    std::fs::read_to_string(&path)
-        .map(|s| s.lines().filter(|l| !l.is_empty()).count())
-        .unwrap_or(0)
-}
-
-/// Get the number of gaps in the file.
-pub fn gaps_count() -> usize {
-    let path = gaps_path();
-    if !path.exists() {
-        return 0;
-    }
-    std::fs::read_to_string(&path)
-        .map(|s| s.lines().filter(|l| !l.is_empty()).count())
-        .unwrap_or(0)
-}
-
 /// Get the number of rejected examples in the file.
 pub fn rejected_count() -> usize {
     let path = rejected_examples_path();
