@@ -50,7 +50,8 @@ if [ "$FAST_BUILD" = true ]; then
   echo -e "\033[0;32m==> Binary built: src-tauri/target/release/nexus\033[0m"
 else
   echo -e "\033[0;36m==> Building Tauri app (tauri build)\033[0m"
-  cd src-tauri
+  # From the repo root: tauri.conf.json's beforeBuildCommand (`npm run build`)
+  # resolves against the root package.json shim, which src-tauri/ lacks.
   CARGO_ARGS=("tauri" "build")
   if [ -n "$TARGET" ]; then
     CARGO_ARGS+=("--target" "$TARGET")
@@ -69,6 +70,5 @@ else
     cargo install tauri-cli --version "^2" --locked
     cargo "${CARGO_ARGS[@]}"
   fi
-  cd ..
   echo -e "\033[0;32m==> Artifacts in src-tauri/target/release/bundle/\033[0m"
 fi
