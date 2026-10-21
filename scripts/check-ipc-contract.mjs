@@ -13,6 +13,11 @@
 //   registered but never invoked from the frontend             -> must be in
 //     scripts/baselines/ipc-unused-commands.txt (may only shrink)
 //
+// RUST FILES
+//   a .rs file no `mod` declaration reaches from lib.rs/main.rs   -> must be in
+//     scripts/baselines/rust-orphan-files.txt (may only shrink); orphans are
+//     not compiled, so they are left out of every check below
+//
 // EVENTS (string literals `ns:name`, `ns_name`, `tts-started`...)
 //   emitted by Rust/TS but never listened for anywhere         -> baseline
 //   listened for but never emitted anywhere                    -> baseline
@@ -20,13 +25,14 @@
 //
 // Usage: node scripts/check-ipc-contract.mjs [--update] [--list]
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, dirname, relative } from "node:path";
+import { join, dirname, relative, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASE_DIR = join(ROOT, "scripts", "baselines");
 const UNUSED_FILE = join(BASE_DIR, "ipc-unused-commands.txt");
 const EVENTS_FILE = join(BASE_DIR, "events-unmatched.txt");
+const ORPHANS_FILE = join(BASE_DIR, "rust-orphan-files.txt");
 const args = new Set(process.argv.slice(2));
 
 function walk(dir, exts, skip = [], out = []) {
@@ -45,7 +51,43 @@ const isTest = (p) => /\.(test|spec)\.(ts|tsx)$/.test(p) || /__tests__/.test(p);
 const lineOf = (text, idx) => text.slice(0, idx).split("\n").length;
 
 // ── Rust side ────────────────────────────────────────────────────────
-const rustFiles = walk(join(ROOT, "src-tauri", "src"), [".rs"]);
+// Only files the crate compiles count. A file that no `mod` line reaches is
+// not part of the app: its commands cannot be registered and its events never
+// fire. Such a file usually means a lost `mod` line (feature 139's
+// return_review.rs lost its wiring in a squash), so it is reported, not scanned.
+function compiledRustFiles(srcDir) {
+  const seen = new Set();
+  const visit = (file) => {
+    if (seen.has(file) || !existsSync(file)) return;
+    seen.add(file);
+    const lines = read(file).split("\n");
+    const dir = dirname(file);
+    const stem = basename(file, ".rs");
+    const own = ["lib", "main", "mod"].includes(stem) ? dir : join(dir, stem);
+    lines.forEach((line, i) => {
+      const m = /^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([a-z_0-9]+)\s*;/.exec(line);
+      if (!m) return;
+      // #[path = "..."] sits among the attribute lines above, relative to dir.
+      for (let j = i - 1; j >= 0 && /^\s*#\[/.test(lines[j]); j--) {
+        const p = /#\[path\s*=\s*"([^"]+)"\]/.exec(lines[j]);
+        if (p) return visit(join(dir, p[1]));
+      }
+      visit(join(own, `${m[1]}.rs`));
+      visit(join(own, m[1], "mod.rs"));
+    });
+  };
+  visit(join(srcDir, "lib.rs"));
+  visit(join(srcDir, "main.rs"));
+  return seen;
+}
+const rustSrc = join(ROOT, "src-tauri", "src");
+const compiled = compiledRustFiles(rustSrc);
+const allRustFiles = walk(rustSrc, [".rs"]);
+const rustFiles = allRustFiles.filter((f) => compiled.has(f));
+const orphanFiles = allRustFiles
+  .filter((f) => !compiled.has(f))
+  .map((f) => relative(ROOT, f).replaceAll("\\", "/"))
+  .sort();
 const defined = new Map(); // name -> "file:line"
 for (const f of rustFiles) {
   const text = read(f);
@@ -179,13 +221,14 @@ if (args.has("--list")) {
   console.log(`defined=${defined.size} registered=${registered.size} invoked=${invoked.size}`);
   console.log(`\nregistered but never invoked (${unusedCommands.length}):\n  ${unusedCommands.join("\n  ")}`);
   console.log(`\nevents (${eventLines.length}):\n  ${eventLines.join("\n  ")}`);
+  console.log(`\nrust files no mod reaches (${orphanFiles.length}):\n  ${orphanFiles.join("\n  ")}`);
   console.log(hard.length ? `\nHARD FAILURES:\n  ${hard.join("\n  ")}` : "\nno hard failures");
   process.exit(0);
 }
 
-const header = (what) => [
+const header = (what, fix = "wire it (add a caller/listener) or delete it") => [
   `# ${what} (scripts/check-ipc-contract.mjs). One per line.`,
-  "# This list may only SHRINK: wire it (add a caller/listener) or delete it, then run --update.",
+  `# This list may only SHRINK: ${fix}, then run --update.`,
   "# Never add a line by hand to silence a new finding.",
 ];
 if (args.has("--update")) {
@@ -196,11 +239,12 @@ if (args.has("--update")) {
   mkdirSync(BASE_DIR, { recursive: true });
   writeFileSync(UNUSED_FILE, [...header("Registered Tauri commands that no frontend code invokes"), ...unusedCommands, ""].join("\n"));
   writeFileSync(EVENTS_FILE, [...header("Events with only one side"), ...eventLines, ""].join("\n"));
-  console.log(`baselines written: ${unusedCommands.length} unused commands, ${eventLines.length} one-sided events`);
+  writeFileSync(ORPHANS_FILE, [...header("Rust files no `mod` declaration reaches (not compiled)", "declare it with `mod` or delete it"), ...orphanFiles, ""].join("\n"));
+  console.log(`baselines written: ${unusedCommands.length} unused commands, ${eventLines.length} one-sided events, ${orphanFiles.length} orphan files`);
   process.exit(0);
 }
 
-function compare(label, current, file) {
+function compare(label, current, file, fix = "add the missing caller/listener, or delete the unused side") {
   if (!existsSync(file)) {
     console.error(`missing baseline ${relative(ROOT, file)}; run --update`);
     process.exit(2);
@@ -210,7 +254,7 @@ function compare(label, current, file) {
   const added = current.filter((c) => !base.has(c));
   const gone = [...base].filter((b) => !cur.has(b));
   if (added.length) {
-    hard.push(`${label}: ${added.length} NEW:\n    + ${added.join("\n    + ")}\n    (add the missing caller/listener, or delete the unused side)`);
+    hard.push(`${label}: ${added.length} NEW:\n    + ${added.join("\n    + ")}\n    (${fix})`);
   }
   if (gone.length) {
     hard.push(`${label}: ${gone.length} baseline entr${gone.length === 1 ? "y is" : "ies are"} resolved; shrink the baseline:\n    - ${gone.join("\n    - ")}\n    (run: node scripts/check-ipc-contract.mjs --update)`);
@@ -218,6 +262,7 @@ function compare(label, current, file) {
 }
 compare("registered-but-never-invoked commands", unusedCommands, UNUSED_FILE);
 compare("one-sided events", eventLines, EVENTS_FILE);
+compare("rust files no `mod` declaration reaches", orphanFiles, ORPHANS_FILE, "declare it with `mod`, or delete the file");
 
 if (hard.length) {
   console.error("ipc contract FAILED:");

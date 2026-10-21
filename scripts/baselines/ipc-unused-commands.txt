@@ -1,10 +1,11 @@
 # Registered Tauri commands that no frontend code invokes (scripts/check-ipc-contract.mjs). One per line.
 # This list may only SHRINK: wire it (add a caller/listener) or delete it, then run --update.
 # Never add a line by hand to silence a new finding.
+agent_watch_start
+agent_watch_status
 analyze_repo_fast
 calibration_dev_persist
 cancel_architect_analysis
-close_settings_window
 diary_summary
 enrich_phase1
 export_settings
