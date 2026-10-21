@@ -138,6 +138,10 @@ interface Settings {
   calibrationDevPersist?: boolean;
 }
 
+// Orb box in physical px; matches window_manager::DEFAULT_ORB_SIZE in Rust
+// (smaller on Linux, where 200 px looked oversized on a 1080p laptop).
+const DEFAULT_ORB_SIZE = isLinuxRuntime() ? 160 : 200;
+
 const DEFAULT_SETTINGS: Settings = {
   autostart: true,
   hotkey: globalHotkeyLabel(),
@@ -164,7 +168,7 @@ const DEFAULT_SETTINGS: Settings = {
   orbCapsuleStyle: "pebble",
   orbWakeupMode: 1,
   orbInteriorGenesis: 2,
-  orbSize: 200,
+  orbSize: DEFAULT_ORB_SIZE,
   orbThinkMode: 6,
   orbSpeakMode: 2,
   orbListenMode: 1,
@@ -429,7 +433,7 @@ function DisplayTab({ settings, update }: {
       invoke("set_orb_position", {
         horizontalPct: 0.5,
         verticalPct: vPct,
-        size: settings.orbSize || 200,
+        size: settings.orbSize || DEFAULT_ORB_SIZE,
       }).catch(() => {});
     }).catch(() => {});
   };
