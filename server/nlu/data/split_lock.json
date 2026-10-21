@@ -3,9 +3,9 @@
   "family_algorithm": "intent-plus-slot-masked-normalized-text-v1",
   "splits": {
     "train": {
-      "rows": 2904,
-      "sha256": "be4b441afc1c9d5c8a39d3c76c00cd9647547db92583f8411e8994f0824298fc",
-      "families": 1988,
+      "rows": 2720,
+      "sha256": "eae92bc7d85f5828df3526a43c365147856603c16a1bbd8d9e5b2b3edc12b6eb",
+      "families": 1914,
       "intents": 63
     },
     "validation": {

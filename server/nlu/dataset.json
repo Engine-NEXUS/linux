@@ -413,11 +413,6 @@
       "slots": {}
     },
     {
-      "text": "analyse Zync for me.",
-      "intent": "analyse_repo",
-      "slots": null
-    },
-    {
       "text": "get me the pr 42 in {repo}",
       "intent": "get_pr",
       "slots": {
@@ -1163,11 +1158,6 @@
       "text": "open one more tab",
       "intent": "browser_new_tab",
       "slots": {}
-    },
-    {
-      "text": "open a new tab",
-      "intent": "nlu_result",
-      "slots": null
     },
     {
       "text": "end the workflow run 789 in {repo}",
@@ -1925,11 +1915,6 @@
       "slots": {
         "query": "monitor"
       }
-    },
-    {
-      "text": "Say hi to mummy in WhatsApp.",
-      "intent": "nlu_result",
-      "slots": null
     },
     {
       "text": "wright i'll be there in 5 minutes",
@@ -4247,13 +4232,6 @@
       }
     },
     {
-      "text": "architect open a",
-      "intent": "OpenArchitect",
-      "slots": {
-        "action": "open_architect"
-      }
-    },
-    {
       "text": "grant julia push access on {repo}",
       "intent": "add_collaborator",
       "slots": {
@@ -5829,26 +5807,9 @@
       "slots": {}
     },
     {
-      "text": "analyse pr 68 servx-lab",
-      "intent": "analyse_pr",
-      "slots": {
-        "action": "analyse_pr",
-        "owner": null,
-        "pr_number": 68,
-        "repo": "servx-lab"
-      }
-    },
-    {
       "text": "open dependency mapper",
       "intent": "open_architect",
       "slots": {}
-    },
-    {
-      "text": "architect open the",
-      "intent": "OpenArchitect",
-      "slots": {
-        "action": "open_architect"
-      }
     },
     {
       "text": "let me know if this deadline moves",
@@ -8366,16 +8327,6 @@
       }
     },
     {
-      "text": "analyse pr 68 in servx-lab",
-      "intent": "analyse_pr",
-      "slots": {
-        "action": "analyse_pr",
-        "owner": null,
-        "pr_number": 68,
-        "repo": "servx-lab"
-      }
-    },
-    {
       "text": "tiped sweet dreams",
       "intent": "type_text",
       "slots": {
@@ -8888,13 +8839,6 @@
       "slots": {}
     },
     {
-      "text": "architect open",
-      "intent": "OpenArchitect",
-      "slots": {
-        "action": "open_architect"
-      }
-    },
-    {
       "text": "so play pause",
       "intent": "media_play_pause",
       "slots": {}
@@ -9202,13 +9146,6 @@
       "text": "open ark mapper",
       "intent": "open_architect",
       "slots": {}
-    },
-    {
-      "text": "open architect",
-      "intent": "OpenArchitect",
-      "slots": {
-        "action": "open_architect"
-      }
     },
     {
       "text": "and list action runs in owner/repo",
@@ -9887,11 +9824,6 @@
       "slots": {
         "app_name": "file explorer"
       }
-    },
-    {
-      "text": "analyse my screen.",
-      "intent": "analyse_repo",
-      "slots": null
     },
     {
       "text": "Take me to WhatsApp.",
@@ -11442,13 +11374,6 @@
       }
     },
     {
-      "text": "architect open in",
-      "intent": "OpenArchitect",
-      "slots": {
-        "action": "open_architect"
-      }
-    },
-    {
       "text": "combine the pull request 42 into {repo}",
       "intent": "merge_pr",
       "slots": {
@@ -12090,11 +12015,6 @@
       "slots": {
         "repo": "eesh264/congi"
       }
-    },
-    {
-      "text": "Show me the PR list.",
-      "intent": "Unknown { raw: \"Show me the PR list.\" }",
-      "slots": null
     },
     {
       "text": "and halt playback",
@@ -17592,11 +17512,6 @@
       }
     },
     {
-      "text": "Show me the PR list.",
-      "intent": "list_prs",
-      "slots": null
-    },
-    {
       "text": "reverse the merge of pr 42 in {repo}",
       "intent": "revert_pr",
       "slots": {
@@ -17756,11 +17671,6 @@
       "slots": {
         "contact": "priya"
       }
-    },
-    {
-      "text": "new tab.",
-      "intent": "nlu_result",
-      "slots": null
     },
     {
       "text": "switch to the previous tab",
@@ -17996,13 +17906,6 @@
       "slots": {
         "contact": "lakshya",
         "message": "good night"
-      }
-    },
-    {
-      "text": "open architect in",
-      "intent": "OpenArchitect",
-      "slots": {
-        "action": "open_architect"
       }
     },
     {
