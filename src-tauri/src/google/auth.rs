@@ -24,11 +24,6 @@ impl GoogleAuth {
         )
     }
 
-    /// Check if Google account is currently authenticated with a valid token.
-    pub fn is_authenticated() -> bool {
-        Self::get_access_token().is_ok()
-    }
-
     /// Token resolution with both sources injected.
     ///
     /// The vault and the environment are process-global, so the unit tests

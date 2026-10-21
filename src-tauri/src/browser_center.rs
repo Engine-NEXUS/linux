@@ -14,11 +14,9 @@
 //! 3. Unknown actions fail closed: `Invalid`, never `Ok`.
 
 use crate::center::{ConfirmKind, SubCenter, Validity};
-use crate::intent_parser::ParsedIntent;
 use serde_json::Value;
 
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Actions this center owns. Mirrors the Browser arms of `center_for`.
 #[allow(dead_code)]
@@ -68,67 +66,6 @@ pub fn resolve_crawler_script_path() -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// Read URL content as clean markdown via the browser-use crawler engine.
-#[allow(dead_code)]
-pub fn read_page_markdown(url: &str) -> Result<String, String> {
-    let script_path = resolve_crawler_script_path().ok_or_else(|| {
-        "Crawler bridge script not found at server/crawler/engine.py".to_string()
-    })?;
-
-    let output = Command::new("python")
-        .arg(&script_path)
-        .arg("read-page")
-        .arg(url)
-        .output()
-        .map_err(|e| format!("Failed to spawn crawler engine: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Crawler failed: {}", stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Value = serde_json::from_str(&stdout)
-        .map_err(|e| format!("Failed to parse crawler output: {}", e))?;
-
-    if parsed.get("status").and_then(|s| s.as_str()) == Some("error") {
-        let msg = parsed.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown crawler error");
-        return Err(msg.to_string());
-    }
-
-    Ok(parsed.get("markdown").and_then(|m| m.as_str()).unwrap_or("").to_string())
-}
-
-/// Canonical adapter: family (action, slots) → `ParsedIntent`. `None` =
-/// not a browser action (caller fails closed).
-#[allow(dead_code)]
-fn to_intent(action: &str, slots: &Value) -> Option<ParsedIntent> {
-    match action {
-        "browser_tab" => Some(ParsedIntent::BrowserTab {
-            index: slot_u32(slots, "index"),
-        }),
-        "browser_close_tab" => {
-            let n = slot_u32(slots, "index");
-            Some(ParsedIntent::BrowserCloseTab {
-                index: if n == 0 { None } else { Some(n) },
-            })
-        }
-        "browser_search" => Some(ParsedIntent::BrowserSearch {
-            query: slot_str(slots, "query"),
-        }),
-        "browser_search_focus" => Some(ParsedIntent::BrowserSearchFocus),
-        // Pass through live verbs & browser-use crawler intents
-        "browser_new_tab" | "browser_navigate" | "browser_read_page" | "browser_extract_elements" => {
-            Some(ParsedIntent::NluResult {
-                intent: action.to_string(),
-                slots: slots.clone(),
-                confidence: 1.0,
-            })
-        }
-        _ => None,
-    }
 }
 
 impl SubCenter for BrowserCenter {

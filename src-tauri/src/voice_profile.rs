@@ -135,12 +135,6 @@ impl VoiceProfile {
         !self.embeddings.is_empty()
     }
 
-    /// Acceptance threshold configured by enrollment.
-    #[allow(dead_code)]
-    pub fn acceptance_threshold(&self) -> f32 {
-        self.threshold
-    }
-
     /// Classify one turn embedding against this profile.
     pub fn classify_turn(&self, similarity: Option<f32>) -> TurnOwnership {
         let Some(similarity) = similarity else {

@@ -172,12 +172,6 @@ pub struct EventReceipt {
     pub start_iso: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TimeRange {
-    pub start_iso: String,
-    pub end_iso: String,
-}
-
 // ─── Maps Models ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]

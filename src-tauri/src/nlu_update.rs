@@ -82,12 +82,6 @@ fn installed_version(dir: &PathBuf) -> Option<String> {
     }
 }
 
-/// Whether the downloaded model dir is usable (ONNX present).
-#[allow(dead_code)]
-pub fn downloaded_model_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    usable_model_dir(model_dir(app)?)
-}
-
 /// Resolve the Worker base URL from the active session.
 /// Session is auto-opened from nexus-config.json at startup, so this
 /// works without a settings round-trip.

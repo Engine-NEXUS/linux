@@ -207,37 +207,6 @@ pub fn clear_api_key(service: &str) {
     }
 }
 
-/// One-time migration: move API keys from settings.json to OS keychain.
-/// Runs on startup. Idempotent — skips services already in keychain.
-#[allow(dead_code)]
-pub fn migrate_api_keys_to_keychain(app_data_dir: &std::path::Path) {
-    let path = app_data_dir.join("settings.json");
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return;
-    };
-    for service in ["groq", "gemini", "cerebras"] {
-        // Skip if already in keychain
-        if get_api_key(service).is_some() {
-            continue;
-        }
-        let camel = format!("{service}ApiKey");
-        let snake = format!("{service}_api_key");
-        if let Some(key) = json
-            .get(&camel)
-            .or_else(|| json.get(&snake))
-            .and_then(|v| v.as_str())
-        {
-            if !key.is_empty() {
-                set_api_key(service, key);
-                tracing::info!("vault: migrated {service} API key to keychain");
-            }
-        }
-    }
-}
-
 /// Status for the dashboard: "live" | "expired" | "missing".
 pub fn token_status(service: &str) -> &'static str {
     if let Some(cached) = MEMORY.read().get(service) {

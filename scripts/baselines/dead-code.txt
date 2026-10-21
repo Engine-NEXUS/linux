@@ -9,18 +9,9 @@ admin_config.rs: function min_confidence
 admin_config.rs: function retrain_threshold
 architect.rs: field process_name
 architect.rs: variant AiExplanation
-auth_vault.rs: function migrate_api_keys_to_keychain
 brain_client.rs: field corrected_repo
-brain_client.rs: function brain_get_pronunciation_map
-brain_client.rs: function is_brain_available
-brain_client.rs: struct PronunciationMapResponse
-brain_monitor.rs: function approved_phrasings_count
-brain_monitor.rs: function gaps_count
-brain_monitor.rs: function pending_count
 brain_monitor.rs: function rejected_count
 browser_center.rs: constant ACTIONS
-browser_center.rs: function read_page_markdown
-browser_center.rs: function to_intent
 calibration.rs: function wheel_step
 center.rs: constant ALL_SUB_CENTERS
 center.rs: enum ConfirmKind
@@ -41,7 +32,6 @@ ghost.rs: function point_at_target
 ghost.rs: function point_off
 ghostwriter.rs: field channel
 github_cmd.rs: method required_scopes
-google/auth.rs: associated function is_authenticated
 google/auth.rs: constant GOOGLE_SCOPES
 google/calendar.rs: associated function calculate_free_busy_buffer
 google/calendar.rs: associated function check_schedule_conflict
@@ -49,7 +39,6 @@ google/mail.rs: associated function create_thread_watch
 google/mail.rs: associated function encode_rfc2822
 google/mail.rs: associated function parse_draft_receipt_json
 google/mail.rs: associated function parse_send_receipt_json
-google/mail.rs: associated function parse_threads_json
 google/maps.rs: associated function build_maps_nav_url
 google/maps.rs: associated function detect_commute_delay
 google/maps.rs: associated function parse_directions_json
@@ -82,15 +71,10 @@ google/types.rs: struct ProactiveAlert
 google/types.rs: struct RouteSummary
 google/types.rs: struct SemanticPhotoQuery
 google/types.rs: struct SendReceipt
-google/types.rs: struct TimeRange
 improve.rs: constant WEEKLY_TOP_N
-lazy_brain.rs: function is_brain_running
-lazy_brain.rs: function kill_brain
 live/commands/mouse.rs: function double_click_at
 live/commands/mouse.rs: function drag_to
 live/commands/mouse.rs: function scroll
-live/commands/whatsapp.rs: function full_send_flow
-live/mod.rs: enum LiveIntent
 live/state.rs: method app_context
 live/state.rs: method has_pending_text
 luminance_probe.rs: associated item mode
@@ -106,7 +90,6 @@ memory.rs: function update_mail_watch_status
 mpris.rs: function send_mpris_command
 nlu_update.rs: field size
 nlu_update.rs: field updated_at
-nlu_update.rs: function downloaded_model_dir
 ocr.rs: function capture_screen_text_only
 ocr.rs: function is_available
 orchestrator.rs: function build_worker_payload
@@ -130,24 +113,17 @@ symbol_extractor.rs: function symbols_query
 symbol_extractor.rs: struct Symbol
 system_center.rs: constant ACTIONS
 system_center.rs: function inspect_window_native
-system_center.rs: function inspect_window_via_bridge
 tts_kokoro.rs: constant MAX_PHONEME_CHARS
 tts_kokoro.rs: function unknown_phonemes
-tts_network.rs: constant NETWORK_CHECK_TIMEOUT
 turn_detect.rs: function should_end_turn
 vision.rs: field fell_back
 vision.rs: field raced
 vision.rs: function best_computer_use_resolution
-vision.rs: function build_email_extraction_prompt
 vision.rs: function denormalize_computer_use_coord
-vision.rs: function locate_via_vision
 vision.rs: function parse_screen_email_json
-vision.rs: function resolve_named_target
 vision.rs: struct ScreenEmailContext
 voice_catalog.rs: function find_by_cloud_id
 voice_catalog.rs: function find_by_kokoro_voice
-voice_catalog.rs: function read_manifest
-voice_profile.rs: method acceptance_threshold
 voice_profile.rs: method delete
 voice_profile.rs: method implicit_enroll
 voice_profile.rs: method num_embeddings

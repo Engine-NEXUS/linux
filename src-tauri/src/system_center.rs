@@ -7,7 +7,6 @@
 use crate::center::{ConfirmKind, SubCenter, Validity};
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Actions owned by SystemCenter.
 #[allow(dead_code)]
@@ -120,36 +119,6 @@ pub fn resolve_ufo_script_path() -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// Inspect window interactive controls via Python UFO engine bridge.
-#[allow(dead_code)]
-pub fn inspect_window_via_bridge(title: Option<&str>) -> Result<Value, String> {
-    let script_path = resolve_ufo_script_path().ok_or_else(|| {
-        "UFO UI Automation bridge script not found at server/ufo/uia_engine.py".to_string()
-    })?;
-
-    let mut cmd = Command::new("python");
-    cmd.arg(&script_path).arg("inspect");
-
-    if let Some(t) = title {
-        if !t.is_empty() {
-            cmd.arg("--title").arg(t);
-        }
-    }
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to spawn UFO bridge: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("UFO bridge exited with error: {}", stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str::<Value>(&stdout)
-        .map_err(|e| format!("Failed to parse UFO JSON output: {} | raw: {}", e, stdout))
 }
 
 /// Native Windows UI Automation control inspection using `uiautomation` crate.

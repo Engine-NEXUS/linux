@@ -1,5 +1,3 @@
 # Rust files no `mod` declaration reaches (not compiled) (scripts/check-ipc-contract.mjs). One per line.
 # This list may only SHRINK: declare it with `mod` or delete it, then run --update.
 # Never add a line by hand to silence a new finding.
-src-tauri/src/memcore/agent_tasks.rs
-src-tauri/src/return_review.rs
