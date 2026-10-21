@@ -14,7 +14,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # @saystack/core (the aura) requires Node >= 22.
+          node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -27,7 +28,7 @@ jobs:
       - name: Install Linux deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev libdbus-1-dev pkg-config
 
       - name: Build production .deb
         run: ./scripts/build-prod.sh
