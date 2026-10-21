@@ -72,13 +72,15 @@ pub struct RectPayload {
 }
 
 /// Default orb box, physical px. Linux is smaller: on a 1080p laptop at 100 %
-/// scale the Windows 200 px orb looked oversized under the top panel.
-pub(crate) const DEFAULT_ORB_SIZE: u32 = if cfg!(target_os = "linux") { 160 } else { 200 };
+/// scale the Windows 200 px orb looked oversized under the top panel, and so
+/// did 160 px; 80 px is the size picked live on that laptop.
+pub(crate) const DEFAULT_ORB_SIZE: u32 = if cfg!(target_os = "linux") { 80 } else { 200 };
 /// One size range for startup, `set_orb_position` and calibration's orb rail,
 /// so a size set live or by calibration survives a restart (startup used to
-/// clamp to 180, which snapped smaller saved sizes back up).
-const ORB_SIZE_MIN: u32 = 100;
-const ORB_SIZE_MAX: u32 = 400;
+/// clamp to 180, which snapped smaller saved sizes back up). The floor is the
+/// Linux default. Mirrored by `sizeClamp` in frontend/src/calibration/geometry.ts.
+pub(crate) const ORB_SIZE_MIN: u32 = 80;
+pub(crate) const ORB_SIZE_MAX: u32 = 400;
 
 /// Read orb position + size from settings.json.
 /// Falls back to defaults (top centre, [`DEFAULT_ORB_SIZE`]) if the file is
@@ -409,7 +411,7 @@ mod tests {
         assert_eq!(size(serde_json::json!({ "orbSize": 9000 })), ORB_SIZE_MAX);
         assert_eq!(size(serde_json::json!({})), DEFAULT_ORB_SIZE);
         #[cfg(target_os = "linux")]
-        assert_eq!(DEFAULT_ORB_SIZE, 160);
+        assert_eq!(DEFAULT_ORB_SIZE, 80);
     }
 
     // 1920x1080 @ 1x, 200px window.

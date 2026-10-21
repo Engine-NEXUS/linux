@@ -42,7 +42,7 @@ Two paths, chosen at start-up (`gdk_backend_linux::choose`, pure and tested):
 
 - Orb style `"aura"` in `OrbFrame.tsx`: the existing WebGL particle orb with no capsule, plus `AuraCanvas` (portalled to `<body>`, because the orb frame slides with a transform and the canvas is `position: fixed`).
 - Renderer: `@saystack/core@0.2.1` (MIT, no dependencies, Node >= 22). Host: `stageAuraHost.ts` (always "dark", scissored canvas around the orb). `isAdditive` must stay `false` — `true` makes the aura's alpha exactly 0.
-- State table (`orbPresentation.ts`): idle → `paused` (dim rim), listening → `active`, thinking → `working` (orbit comet, ignores audio), speaking → `active` with `mirror`. Sizes scaled for this orb's sphere (~62% of the frame: ~100 px at the Linux default 160, ~125 px at 200) (the redesign tuned 44–72 px). Hue never encodes state (`palette: "prism"` is ambience).
+- State table (`orbPresentation.ts`): idle → `paused` (dim rim), listening → `active`, thinking → `working` (orbit comet, ignores audio), speaking → `active` with `mirror`. Sizes scaled for this orb's sphere (about two thirds of the frame: its rim measured 106 px in a 160 px frame, so ~53 px at the Linux default 80 and ~130 px at 200) (the redesign tuned 44–72 px). Hue never encodes state (`palette: "prism"` is ambience).
 - Energy (`audio/levels.ts`): the orb's own sources, so orb and aura never disagree — TTS envelope (else the playback proxy) while speaking, the louder of the Rust mic level and the browser VAD while listening, nothing otherwise. Every band carries that one level.
 - Cost: the aura is `hidden` whenever the orb is not shown, so its render loop parks.
 - Reduced motion (Pop!_OS COSMIC ships with animations off): the aura stays, the renderer runs it at 12% motion with no glide.
@@ -51,7 +51,7 @@ Two paths, chosen at start-up (`gdk_backend_linux::choose`, pure and tested):
 
 | Redesign | This branch |
 |---|---|
-| CSS `NexusOrb`, sizes 46/72/62/68 | the WebGL particle orb is kept; a 160 px frame on Linux (200 on Windows), `window_manager::DEFAULT_ORB_SIZE` |
+| CSS `NexusOrb`, sizes 46/72/62/68 | the WebGL particle orb is kept; an 80 px frame on Linux (200 on Windows), `window_manager::DEFAULT_ORB_SIZE`; one 80–400 range for startup, `set_orb_position` and calibration |
 | bottom-docked, gap 196 | top or bottom, the user's Display setting; below the panels |
 | Rust `audio_levels.rs` bridge | not needed: the aura reads the levels the orb already gets |
 | subtitle bar under the orb | spoken replies captioned on the stage with word-by-word read-along; the editable "last heard" row lives in the sidebar |
