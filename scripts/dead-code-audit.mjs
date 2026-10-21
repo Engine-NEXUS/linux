@@ -8,7 +8,8 @@
 // (2) `#[allow(dead_code)]` hides items entirely. This script builds the lib
 // with `--force-warn dead_code` (overrides allow attributes), normalises the
 // warnings to `file: kind name` (no line numbers, so refactors do not churn
-// the baseline) and compares them with scripts/baselines/dead-code.txt:
+// the baseline) and compares them with the platform's baseline in
+// scripts/baselines/ (dead-code-linux.txt on Linux, dead-code.txt elsewhere):
 //
 //   * a NEW dead item          -> fail (wire it, delete it, or justify it)
 //   * a baseline item now live -> fail with "shrink the baseline" so the
@@ -27,7 +28,10 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const BASELINE = join(ROOT, "scripts", "baselines", "dead-code.txt");
+// Each OS compiles different #[cfg] code, so each one finds different dead
+// items: Linux CI keeps its own baseline, Windows keeps dead-code.txt.
+const BASELINE_NAME = process.platform === "linux" ? "dead-code-linux.txt" : "dead-code.txt";
+const BASELINE = join(ROOT, "scripts", "baselines", BASELINE_NAME);
 const FEATURES = "custom-protocol,admin-brain";
 
 const args = new Set(process.argv.slice(2));
@@ -109,7 +113,7 @@ if (args.has("--update")) {
     "# Never add a line by hand to silence a new finding.",
   ];
   writeFileSync(BASELINE, [...header, ...findings, ""].join("\n"));
-  console.log(`baseline written: ${findings.length} findings -> scripts/baselines/dead-code.txt`);
+  console.log(`baseline written: ${findings.length} findings -> scripts/baselines/${BASELINE_NAME}`);
   process.exit(0);
 }
 

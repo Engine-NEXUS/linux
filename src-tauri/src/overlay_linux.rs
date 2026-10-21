@@ -190,7 +190,8 @@ pub fn build_cairo_region(hitboxes: &[StageRect], scale_factor: f64) -> Region {
     region
 }
 
-/// Pure helper for unit testing: compute the list of disjoint `RectangleInt` in the region.
+/// Test helper: the disjoint `RectangleInt`s of the region the live path builds.
+#[cfg(test)]
 pub fn compute_input_rects(hitboxes: &[StageRect], scale_factor: f64) -> Vec<RectangleInt> {
     let region = build_cairo_region(hitboxes, scale_factor);
     let count = region.num_rectangles();

@@ -1,0 +1,319 @@
+# Dead-code baseline (scripts/dead-code-audit.mjs). One finding per line.
+# This list may only SHRINK: wire the item or delete it, then run --update.
+# Never add a line by hand to silence a new finding.
+admin_config.rs: field auto_train
+admin_config.rs: field brain_model
+admin_config.rs: field min_confidence
+admin_config.rs: field retrain_threshold
+admin_config.rs: function min_confidence
+admin_config.rs: function retrain_threshold
+architect.rs: field process_name
+architect.rs: variant AiExplanation
+atspi.rs: field action
+atspi.rs: field states_after
+atspi.rs: field states_before
+atspi.rs: field states_changed
+atspi.rs: function fill
+auth_vault.rs: function migrate_api_keys_to_keychain
+brain_client.rs: field corrected_repo
+brain_client.rs: function brain_get_pronunciation_map
+brain_client.rs: function is_brain_available
+brain_client.rs: struct PronunciationMapResponse
+brain_monitor.rs: function approved_phrasings_count
+brain_monitor.rs: function gaps_count
+brain_monitor.rs: function pending_count
+brain_monitor.rs: function rejected_count
+browser_center.rs: constant ACTIONS
+browser_center.rs: function read_page_markdown
+browser_center.rs: function to_intent
+browser_url.rs: function url_encode
+calibration.rs: function wheel_step
+cdp.rs: field observed
+cdp.rs: function fill
+cdp.rs: function health
+cdp.rs: method any
+cdp.rs: method is_idle
+cdp.rs: struct CdpHealth
+center.rs: constant ALL_SUB_CENTERS
+center.rs: enum ConfirmKind
+center.rs: field decoder_bias
+center.rs: field language
+center.rs: function loading_should_show
+center.rs: method confirm_kind
+center.rs: method name
+center.rs: struct Receipt
+center.rs: variant Loading
+command_center.rs: constant CHECKPOINT_STALE_SECS
+command_center.rs: field transcript
+command_center.rs: function has_pending_compound
+command_center.rs: function read_checkpoint
+command_center.rs: function sweep_stale_checkpoints
+commands.rs: function set_pending_spatial
+contacts_book.rs: enum Lookup
+contacts_book.rs: function lookup
+contacts_book.rs: function norm_tokens
+dyn_windows.rs: field hidden_title
+ghost.rs: function is_active
+ghost.rs: function note_expected
+ghost.rs: function note_idle
+ghost.rs: function observe_cursor
+ghost.rs: function point_at_target
+ghost.rs: function point_off
+ghost_center.rs: variant CursorCenter
+ghost_learning.rs: function load
+ghost_learning.rs: function save
+ghost_learning.rs: function store_path
+ghost_learning.rs: struct LearnedControl
+ghostwriter.rs: field channel
+github_cmd.rs: method required_scopes
+google/auth.rs: associated function is_authenticated
+google/auth.rs: constant GOOGLE_SCOPES
+google/calendar.rs: associated function calculate_free_busy_buffer
+google/calendar.rs: associated function check_schedule_conflict
+google/mail.rs: associated function create_thread_watch
+google/mail.rs: associated function encode_rfc2822
+google/mail.rs: associated function parse_draft_receipt_json
+google/mail.rs: associated function parse_send_receipt_json
+google/mail.rs: associated function parse_threads_json
+google/maps.rs: associated function build_maps_nav_url
+google/maps.rs: associated function detect_commute_delay
+google/maps.rs: associated function parse_directions_json
+google/maps.rs: associated function parse_places_json
+google/mod.rs: associated function new
+google/mod.rs: struct GoogleCenter
+google/photos.rs: associated function build_search_payload
+google/photos.rs: associated function get_sized_base_url
+google/photos.rs: associated function parse_albums_json
+google/photos.rs: associated function parse_media_items_json
+google/photos.rs: associated function parse_semantic_query
+google/photos.rs: struct PhotosService
+google/sentinel.rs: associated item contains
+google/sentinel.rs: associated item insert
+google/sentinel.rs: associated item is_empty
+google/sentinel.rs: associated item len
+google/sentinel.rs: associated item new
+google/sentinel.rs: associated item should_speak_immediately
+google/sentinel.rs: associated item synthesize_commute_alert
+google/sentinel.rs: associated item synthesize_mail_deadline_alert
+google/sentinel.rs: associated item urgency_rank
+google/sentinel.rs: struct ProactiveSentinel
+google/sentinel.rs: struct SeenMessageRingBuffer
+google/types.rs: struct AlbumItem
+google/types.rs: struct CommuteDelay
+google/types.rs: struct DraftReceipt
+google/types.rs: struct MailThread
+google/types.rs: struct PhotoItem
+google/types.rs: struct ProactiveAlert
+google/types.rs: struct RouteSummary
+google/types.rs: struct SemanticPhotoQuery
+google/types.rs: struct SendReceipt
+google/types.rs: struct TimeRange
+hand/mod.rs: constant SNAP_RADIUS_PX
+hand/mod.rs: function guard_decision
+hand/mod.rs: function speed_multiplier
+hand/snap.rs: constant MAX_H
+hand/snap.rs: constant MAX_W
+hand/snap.rs: constant MIN_SIDE
+hand/snap.rs: function plausible_target
+hand/snap.rs: function snap_point
+hand/snap.rs: method area
+hand/snap.rs: method center
+hand/snap.rs: method contains
+hand/snap.rs: method distance
+hand/snap.rs: struct Rect
+improve.rs: constant WEEKLY_TOP_N
+lazy_atspi.rs: function ever_ready
+lazy_brain.rs: function is_brain_running
+lazy_brain.rs: function kill_brain
+lazy_cdp.rs: function ever_ready
+live/commands/mouse.rs: associated item mark
+live/commands/mouse.rs: associated item new
+live/commands/mouse.rs: associated item summary
+live/commands/mouse.rs: function eased_steps
+live/commands/mouse.rs: function format_phase_summary
+live/commands/mouse.rs: function resolve_element
+live/commands/mouse.rs: struct PhaseTimer
+live/commands/wa_open.rs: constant CANDIDATE_BUDGET_MS
+live/commands/wa_open.rs: constant MAX_CANDIDATES
+live/commands/wa_open.rs: constant SLOW_LIST_MS
+live/commands/wa_open.rs: constant TOTAL_BUDGET_MS
+live/commands/wa_open.rs: enum WaOpen
+live/commands/wa_open.rs: function deep_link
+live/commands/wa_open.rs: function header_matches
+live/commands/wa_open.rs: function is_whatsapp_process
+live/commands/wa_open.rs: function learn_alias
+live/commands/wa_open.rs: function learned_aliases
+live/commands/wa_open.rs: function learned_phone
+live/commands/wa_open.rs: function name_candidates
+live/commands/wa_open.rs: function normalize_phone
+live/commands/wa_open.rs: function open_chat
+live/commands/wa_open.rs: function pick_match
+live/commands/wa_open.rs: function spoken_name
+live/commands/wa_open.rs: struct ChatItem
+live/commands/wa_open.rs: trait WaEnv
+live/commands/whatsapp.rs: function full_send_flow
+live/commands/window.rs: function elevated_block_reason
+live/commands/window.rs: function is_foreground_app
+live/commands/window.rs: function wait_and_focus_app
+live/commands/window.rs: function window_process_elevated
+live/mod.rs: enum LiveIntent
+live/state.rs: method app_context
+live/state.rs: method has_pending_text
+live_glass.rs: function has_active_hitboxes
+live_glass.rs: function is_cursor_inside_hitbox
+live_glass.rs: method contains
+luminance_probe.rs: associated item mode
+luminance_probe.rs: associated item new
+luminance_probe.rs: function calculate_relative_luminance
+luminance_probe.rs: method as_str
+mcp_client.rs: field id
+meeting_detect.rs: function get_process_name
+meeting_detect.rs: method set_paused
+memcore/mailwatch.rs: field 0
+memcore/offer.rs: function take
+memcore/session.rs: constant IGNORED_EXES
+memcore/session.rs: constant INSTALLER_HINTS
+memcore/session.rs: constant MAX_APPS
+memcore/session.rs: constant MAX_FOLDERS
+memcore/session.rs: function base_name
+memcore/session.rs: function build
+memcore/session.rs: function exe_is_ignored
+memcore/session.rs: function is_browser_exe
+memcore/session.rs: function is_editor_with_folders
+memcore/session.rs: function is_packaged
+memcore/session.rs: function is_private_browser_title
+memcore/session.rs: function parse_editor_folders
+memcore/session.rs: function path_is_sensitive
+memcore/session.rs: function percent_decode
+memcore/session.rs: function sanitize_args
+memcore/session.rs: function uri_to_path
+memcore/session.rs: struct RawWindow
+memcore/store.rs: field tier
+memcore/store.rs: method audit_ops
+memory.rs: function core_value
+memory.rs: function update_mail_watch_status
+mic_permissions.rs: constant ALLOWED_ORIGIN_PREFIXES
+nlu_update.rs: field size
+nlu_update.rs: field updated_at
+nlu_update.rs: function downloaded_model_dir
+orchestrator.rs: enum TourRun
+orchestrator.rs: function apply_tour_actions
+orchestrator.rs: function build_worker_payload
+orchestrator.rs: function end_tour_fetch
+orchestrator.rs: function screen_key_guidance
+orchestrator.rs: function show_sidebar_spatial
+orchestrator.rs: function tour_end_reason_label
+orchestrator.rs: function tour_fallback
+orchestrator.rs: variant Idle
+orchestrator.rs: variant Listening
+orchestrator.rs: variant Speaking
+pii_filter.rs: function count_hits
+pipeline_bench.rs: function fmt_ms
+pipeline_bench.rs: function fmt_us
+policy.rs: function contains_ci
+policy.rs: method is_allowed
+policy.rs: method needs_confirmation
+policy.rs: variant ReadText
+policy.rs: variant WriteText
+router.rs: variant Worker
+screen_context.rs: associated item prompt_block
+screen_context.rs: associated item unknown
+screen_context.rs: field ocr_lines
+screen_context.rs: field url
+screen_context.rs: field window_title
+screen_context.rs: function compact_ocr_lines
+screen_tour.rs: constant ANSWER_MAX_WORDS
+screen_tour.rs: constant CALLOUT_TEXT_MAX_WORDS
+screen_tour.rs: constant CALLOUT_TITLE_MAX_WORDS
+screen_tour.rs: constant CLOSER
+screen_tour.rs: constant FALLBACK_OVERVIEW
+screen_tour.rs: constant MAX_ITEMS
+screen_tour.rs: constant MAX_TOTAL_SPOKEN_WORDS
+screen_tour.rs: constant OVERVIEW_MAX_WORDS
+screen_tour.rs: constant SCREEN_ACKS
+screen_tour.rs: constant SPOKEN_MAX_WORDS
+screen_tour.rs: constant TOUR_MAX_OUTPUT_TOKENS
+screen_tour.rs: constant TOUR_TOTAL_TIMEOUT_SECS
+screen_tour.rs: enum Action
+screen_tour.rs: enum EndReason
+screen_tour.rs: function analyze_tour_image
+screen_tour.rs: function box_area_fraction
+screen_tour.rs: function build_tour_prompt
+screen_tour.rs: function callout_json
+screen_tour.rs: function dwell_ms
+screen_tour.rs: function iou
+screen_tour.rs: function limit_words
+screen_tour.rs: function narration_steps
+screen_tour.rs: function salvage
+screen_tour.rs: function screen_ack
+screen_tour.rs: function setting_enabled
+screen_tour.rs: function str_field
+screen_tour.rs: function tour_enabled
+screen_tour.rs: function tour_model_setting
+screen_tour.rs: function validate_script
+screen_tour.rs: function wants_narrated_tour
+screen_tour.rs: function word_count
+screen_tour.rs: item ?
+screen_tour.rs: method to_payload
+screen_tour.rs: struct NarrStep
+screen_tour.rs: struct TourEngine
+screen_tour.rs: struct TourItem
+screen_tour.rs: struct TourScript
+semantic.rs: method should_try_pixels
+stage.rs: function cursor_pos
+stage.rs: function is_shown
+stage.rs: function set_capture_excluded
+stage.rs: method contains
+stage.rs: method distance_to_point
+stt_deepgram.rs: field confidence
+symbol_extractor.rs: enum SymbolKind
+symbol_extractor.rs: function extract_symbols
+symbol_extractor.rs: function kind_from_node
+symbol_extractor.rs: function node_lines
+symbol_extractor.rs: function qualified_name
+symbol_extractor.rs: function stable_id
+symbol_extractor.rs: function symbols_query
+symbol_extractor.rs: struct Symbol
+system_center.rs: constant ACTIONS
+system_center.rs: function inspect_window_native
+system_center.rs: function inspect_window_semantic
+system_center.rs: function inspect_window_via_bridge
+tts.rs: associated item new
+tts.rs: associated item update
+tts.rs: constant NARRATION_GAP_MS
+tts.rs: enum NarrateOutcome
+tts.rs: enum NarrationEvent
+tts.rs: function narrate
+tts.rs: function pad_silence
+tts.rs: struct NarrationTracker
+tts_kokoro.rs: constant MAX_PHONEME_CHARS
+tts_kokoro.rs: function unknown_phonemes
+tts_network.rs: constant NETWORK_CHECK_TIMEOUT
+turn_detect.rs: function should_end_turn
+vision.rs: field fell_back
+vision.rs: field provider
+vision.rs: field quota_hit
+vision.rs: field raced
+vision.rs: function best_computer_use_resolution
+vision.rs: function bgra_to_rgba
+vision.rs: function build_email_extraction_prompt
+vision.rs: function capture_region_jpeg_base64
+vision.rs: function denormalize_computer_use_coord
+vision.rs: function denormalize_spatial_box
+vision.rs: function locate_via_vision
+vision.rs: function parse_screen_email_json
+vision.rs: function pin_anchor_for
+vision.rs: function resolve_named_target
+vision.rs: struct ScreenEmailContext
+voice_catalog.rs: function find_by_kokoro_voice
+voice_catalog.rs: function read_manifest
+voice_profile.rs: method acceptance_threshold
+voice_profile.rs: method delete
+voice_profile.rs: method implicit_enroll
+voice_profile.rs: method num_embeddings
+wakeword_oww.rs: associated function new
+wakeword_oww.rs: field impulsive_ratio
+wakeword_oww.rs: function stt_capturing
+wakeword_oww.rs: function verify_transcript
+wakeword_oww.rs: method floor
+youtube_center.rs: constant ACTIONS

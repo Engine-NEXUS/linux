@@ -70,15 +70,6 @@ impl SessionKind {
             }
         }
     }
-
-    /// Short user-facing description, for TTS and logs.
-    pub fn describe(self) -> &'static str {
-        match self {
-            SessionKind::Wayland => "a native Wayland session",
-            SessionKind::X11 => "an X11 session",
-            SessionKind::Headless => "a session with no display",
-        }
-    }
 }
 
 /// Where a trustworthy "which window is in front" answer can come from.
@@ -366,7 +357,6 @@ mod tests {
     fn every_variant_has_a_non_empty_description() {
         // Guards against a new variant being added without prose.
         for k in [SessionKind::Wayland, SessionKind::X11, SessionKind::Headless] {
-            assert!(!k.describe().is_empty());
             assert!(!k.input_capability().is_empty());
         }
     }
