@@ -71,37 +71,52 @@ pub struct RectPayload {
     pub h: i32,
 }
 
+/// Default orb box, physical px. Linux is smaller: on a 1080p laptop at 100 %
+/// scale the Windows 200 px orb looked oversized under the top panel.
+pub(crate) const DEFAULT_ORB_SIZE: u32 = if cfg!(target_os = "linux") { 160 } else { 200 };
+/// One size range for startup, `set_orb_position` and calibration's orb rail,
+/// so a size set live or by calibration survives a restart (startup used to
+/// clamp to 180, which snapped smaller saved sizes back up).
+const ORB_SIZE_MIN: u32 = 100;
+const ORB_SIZE_MAX: u32 = 400;
+
 /// Read orb position + size from settings.json.
-/// Falls back to defaults (center-bottom, 200px) if the file is missing,
-/// can't be parsed, or doesn't contain the orb fields.
+/// Falls back to defaults (top centre, [`DEFAULT_ORB_SIZE`]) if the file is
+/// missing, can't be parsed, or doesn't contain the orb fields.
 pub fn read_orb_settings<R: Runtime>(app: &AppHandle<R>) -> (f64, f64, u32) {
     let dir = match app.path().app_data_dir() {
         Ok(d) => d,
-        Err(_) => return (0.5, 0.0, 200),
+        Err(_) => return (0.5, 0.0, DEFAULT_ORB_SIZE),
     };
     let path = dir.join("settings.json");
     if !path.exists() {
-        return (0.5, 0.0, 200);
+        return (0.5, 0.0, DEFAULT_ORB_SIZE);
     }
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return (0.5, 0.0, 200),
+        Err(_) => return (0.5, 0.0, DEFAULT_ORB_SIZE),
     };
     let json: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return (0.5, 0.0, 200),
+        Err(_) => return (0.5, 0.0, DEFAULT_ORB_SIZE),
     };
+    orb_settings_from_json(&json)
+}
+
+fn orb_settings_from_json(json: &serde_json::Value) -> (f64, f64, u32) {
     let pos = json.get("orbPosition").and_then(|v| v.as_str()).unwrap_or("top");
     let (h, v): (f64, f64) = if pos == "bottom" {
         (0.5, 1.0)
     } else {
         (0.5, 0.0)
     };
-    let size = json.get("orbSize").and_then(|v| v.as_u64()).unwrap_or(200) as u32;
-    // Clamp to safe ranges (orb/waves box 180–400 — ensures room for particle sphere).
+    let size = json
+        .get("orbSize")
+        .and_then(|v| v.as_u64())
+        .map_or(DEFAULT_ORB_SIZE, |v| v.min(u64::from(ORB_SIZE_MAX)) as u32);
     let h = h.max(0.0).min(1.0);
     let v = v.max(0.0).min(1.0);
-    let size = size.max(180).min(400);
+    let size = size.clamp(ORB_SIZE_MIN, ORB_SIZE_MAX);
     (h, v, size)
 }
 
@@ -371,7 +386,7 @@ pub fn set_orb_position<R: Runtime>(
 ) -> Result<(), String> {
     let h = horizontal_pct.max(0.0).min(1.0);
     let v = vertical_pct.max(0.0).min(1.0);
-    let s = size.max(100).min(400);
+    let s = size.clamp(ORB_SIZE_MIN, ORB_SIZE_MAX);
     let rect = rect_for(&app, h, v, s);
     *LAST_ORB_RECT.lock() = Some(rect);
     crate::commands::emit_logged(&app, "stage:orb_rect", rect);
@@ -385,6 +400,17 @@ pub fn set_orb_position<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_orb_size_survives_startup_within_the_shared_range() {
+        let size = |j: serde_json::Value| orb_settings_from_json(&j).2;
+        assert_eq!(size(serde_json::json!({ "orbSize": 150 })), 150); // was snapped to 180
+        assert_eq!(size(serde_json::json!({ "orbSize": 20 })), ORB_SIZE_MIN);
+        assert_eq!(size(serde_json::json!({ "orbSize": 9000 })), ORB_SIZE_MAX);
+        assert_eq!(size(serde_json::json!({})), DEFAULT_ORB_SIZE);
+        #[cfg(target_os = "linux")]
+        assert_eq!(DEFAULT_ORB_SIZE, 160);
+    }
 
     // 1920x1080 @ 1x, 200px window.
     const SW: i32 = 1920;

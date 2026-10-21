@@ -1913,7 +1913,7 @@ fn default_orb_vertical_pct() -> f64 {
 }
 
 fn default_orb_size() -> u32 {
-    200
+    crate::window_manager::DEFAULT_ORB_SIZE
 }
 
 fn default_moonshine_model() -> String {
@@ -2080,7 +2080,7 @@ impl Default for NexusSettings {
             offline_voice_model: default_offline_voice_model(),
             orb_horizontal_pct: 0.5,
             orb_vertical_pct: 0.0,
-            orb_size: 200,
+            orb_size: default_orb_size(),
             orb_color: default_orb_color(),
             orb_position: default_orb_position(),
             orb_capsule_style: default_orb_capsule_style(),
