@@ -13,9 +13,10 @@
 html, body, #root {
   height: 100%;
   font-family: var(--nx-font);
-  background: var(--nx-bg);
+  background: transparent !important;
   color: var(--nx-text-primary);
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
 /* ── Layout ──────────────────────────────────────────────────── */
@@ -23,14 +24,40 @@ html, body, #root {
   display: flex;
   height: 100vh;
   overflow: hidden;
+  background: var(--nx-bg);
+  backdrop-filter: var(--nx-glass-blur);
+  -webkit-backdrop-filter: var(--nx-glass-blur);
+  border: var(--nx-glass-border);
+  border-radius: 14px;
+  box-shadow: var(--nx-glass-shadow);
+  position: relative;
+}
+
+/* ── Window Titlebar Drag Region ────────────────────────────── */
+.nx-window-titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  z-index: 1000;
+  user-select: none;
+  border-bottom: 1px solid var(--nx-border);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 /* ── Sidebar (tabs) ──────────────────────────────────────────── */
 .nx-sidebar {
   width: 200px;
   background: var(--nx-bg-card);
+  backdrop-filter: var(--nx-glass-blur);
+  -webkit-backdrop-filter: var(--nx-glass-blur);
   border-right: 1px solid var(--nx-border);
-  padding: var(--nx-space-6) var(--nx-space-3);
+  padding: 48px var(--nx-space-3) var(--nx-space-6);
   display: flex;
   flex-direction: column;
   gap: var(--nx-space-1);
@@ -96,7 +123,7 @@ html, body, #root {
 .nx-content {
   flex: 1;
   overflow-y: auto;
-  padding: var(--nx-space-6) var(--nx-space-8);
+  padding: 48px var(--nx-space-8) 80px;
   display: flex;
   flex-direction: column;
   gap: var(--nx-space-5);
@@ -392,7 +419,9 @@ html, body, #root {
   gap: var(--nx-space-3);
   padding: var(--nx-space-4) var(--nx-space-8);
   border-top: 1px solid var(--nx-border);
-  background: var(--nx-bg);
+  background: var(--nx-bg-card);
+  backdrop-filter: var(--nx-glass-blur);
+  -webkit-backdrop-filter: var(--nx-glass-blur);
   flex-shrink: 0;
 }
 
@@ -402,4 +431,151 @@ html, body, #root {
 .nx-content::-webkit-scrollbar-thumb {
   background: var(--nx-border);
   border-radius: 3px;
+}
+
+/* ── Voice Persona Matrix (Feature 83) ───────────────────────── */
+.nx-persona-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+  max-height: 440px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.nx-persona-grid::-webkit-scrollbar { width: 4px; }
+.nx-persona-grid::-webkit-scrollbar-track { background: transparent; }
+.nx-persona-grid::-webkit-scrollbar-thumb {
+  background: var(--nx-border);
+  border-radius: 2px;
+}
+
+.nx-persona-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-radius: var(--nx-radius);
+  background: var(--nx-bg-card);
+  border: 1px solid var(--nx-border);
+  cursor: pointer;
+  transition: all var(--nx-duration-fast) var(--nx-ease);
+  position: relative;
+}
+
+.nx-persona-card:hover {
+  background: var(--nx-bg-hover);
+  border-color: var(--nx-border-hover);
+  transform: translateY(-1px);
+}
+
+.nx-persona-card--active {
+  border-color: var(--nx-accent-blue);
+  background: rgba(59, 130, 246, 0.08);
+  box-shadow: 0 0 0 1px var(--nx-accent-blue), 0 4px 16px rgba(59, 130, 246, 0.15);
+}
+
+.nx-persona-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.nx-persona-avatar {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.nx-persona-check {
+  color: var(--nx-accent-blue);
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nx-persona-name {
+  font-size: var(--nx-text-sm);
+  font-weight: var(--nx-weight-bold);
+  color: var(--nx-text-primary);
+}
+
+.nx-persona-accent {
+  font-size: var(--nx-text-xs);
+  color: var(--nx-text-tertiary);
+}
+
+.nx-persona-desc {
+  font-size: var(--nx-text-xs);
+  line-height: 1.45;
+  color: var(--nx-text-secondary);
+  min-height: 32px;
+}
+
+.nx-persona-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--nx-text-tertiary);
+}
+
+.nx-persona-sync {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  align-self: flex-start;
+}
+
+.nx-persona-sync--ready {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.nx-persona-sync--pending {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.10);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.nx-persona-sync--busy {
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.40);
+  animation: nx-sync-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes nx-sync-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+.nx-persona-play-btn {
+  padding: 4px 10px;
+  font-size: var(--nx-text-xs);
+  font-weight: var(--nx-weight-medium);
+  border-radius: var(--nx-radius-sm);
+  background: transparent;
+  border: 1px solid var(--nx-border);
+  color: var(--nx-text-secondary);
+  cursor: pointer;
+  align-self: flex-start;
+  transition: all var(--nx-duration-fast) var(--nx-ease);
+  margin-top: 2px;
+}
+
+.nx-persona-play-btn:hover:not(:disabled) {
+  background: var(--nx-bg-hover);
+  border-color: var(--nx-border-hover);
+  color: var(--nx-text-primary);
+}
+
+.nx-persona-play-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

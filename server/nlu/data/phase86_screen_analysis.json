@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "source": "nexus_synthetic_phase86",
+  "review_status": "approved_for_candidate_training",
+  "policy": "screen_analysis BERT coverage. One new label (train.py + nlu_server.py synced).",
+  "total_examples": 43,
+  "unique_families": 43,
+  "intent_counts": {
+    "screen_analysis": 38,
+    "unknown": 5
+  },
+  "examples": [
+    {
+      "text": "analyse the screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "analyse my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "analyse this screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "analyse the screen for me",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "analyse my screen for me",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "analyze the screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "analyze my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "analyze this screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "analyze the screen for me",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "analyze my screen for me",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what's on my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what is on my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what's on the screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what is on the screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what's on screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what do you see on my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "whats on my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what do i see",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what am i looking at",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what am i seeing",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "tell me what i see",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "explain what i see",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "explain what i am looking at",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "tell me what's here",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "what is this on my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "describe my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "describe the screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "read my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "read the screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "scan my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "scan the screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "check my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "check the screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "look at my screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "look at the screen for me",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "research on this for me",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "research this screen",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "research my screen for me",
+      "intent": "screen_analysis",
+      "slots": {}
+    },
+    {
+      "text": "research quantum computing breakthroughs",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "analyse pr 5 in zync",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "check my email",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "read that report",
+      "intent": "unknown",
+      "slots": {}
+    },
+    {
+      "text": "scan the document for me",
+      "intent": "unknown",
+      "slots": {}
+    }
+  ]
+}

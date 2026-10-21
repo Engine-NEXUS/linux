@@ -80,6 +80,10 @@ pub struct MeetingState {
     /// 0 means TTS has never ended (or hasn't started yet), so the gate
     /// is not active.
     last_tts_end_ms: AtomicU64,
+
+    /// Until this monotonic ms (relative to `epoch`) the meeting TTS mute is lifted — set for ONE
+    /// Critical proactive alert (Phase 9). 0 = no override.
+    tts_override_until_ms: AtomicU64,
 }
 
 impl MeetingState {
@@ -91,6 +95,7 @@ impl MeetingState {
             detection_enabled: AtomicBool::new(true),
             epoch: Instant::now(),
             last_tts_end_ms: AtomicU64::new(0),
+            tts_override_until_ms: AtomicU64::new(0),
         }
     }
 
@@ -118,6 +123,20 @@ impl MeetingState {
     pub fn should_suppress_tts(&self) -> bool {
         self.detection_enabled.load(Ordering::Relaxed)
             && self.meeting_active.load(Ordering::Relaxed)
+            && !self.tts_override_active()
+    }
+
+    /// Lift the meeting TTS mute for `window_ms` (one Critical alert; the user opted in via
+    /// `proactiveCriticalInMeeting`). Expires on its own — never a permanent un-mute.
+    pub fn allow_tts_override(&self, window_ms: u64) {
+        let now = Instant::now().duration_since(self.epoch).as_millis() as u64;
+        self.tts_override_until_ms.store(now + window_ms, Ordering::Relaxed);
+    }
+
+    /// True while a Critical-alert override window is open.
+    pub fn tts_override_active(&self) -> bool {
+        let until = self.tts_override_until_ms.load(Ordering::Relaxed);
+        until != 0 && Instant::now().duration_since(self.epoch).as_millis() as u64 <= until
     }
 
     /// Returns `true` if the user has manually paused NEXUS.
@@ -215,12 +234,20 @@ const MEETING_PROCESS_NAMES: &[&str] = &[
     "webex",
 ];
 
+/// True when a process name matches one of the known meeting applications.
+#[cfg(not(target_os = "windows"))]
+fn meeting_process_present(name: &str) -> bool {
+    MEETING_PROCESS_NAMES
+        .iter()
+        .any(|meeting_name| name.eq_ignore_ascii_case(meeting_name))
+}
+
 /// Check if any known meeting application process is running.
 ///
 /// Uses the `sysinfo` crate. Non-Windows only — this is less precise than
 /// WASAPI because it detects whether a meeting app is *running*, not
 /// whether it is actively using the microphone.
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 fn check_meeting_processes() -> bool {
     use sysinfo::System;
     let mut sys = System::new_all();
@@ -228,9 +255,30 @@ fn check_meeting_processes() -> bool {
 
     sys.processes().values().any(|process| {
         let name = process.name().to_string_lossy();
-        MEETING_PROCESS_NAMES
-            .iter()
-            .any(|meeting_name| name.eq_ignore_ascii_case(meeting_name))
+        meeting_process_present(&name)
+    })
+}
+
+/// Check if any known meeting application process is running (Linux).
+///
+/// Reuses ONE `sysinfo::System` across polls. `System::new_all()` re-reads
+/// every process's metadata *and* the machine's CPU/memory/network counters —
+/// far too expensive to repeat every 2 s on a laptop that is trying to stay
+/// quiet. `System::new()` starts empty and `refresh_processes` updates only
+/// the process table, which is all the name match needs.
+#[cfg(target_os = "linux")]
+fn check_meeting_processes() -> bool {
+    use std::sync::{Mutex, OnceLock};
+    use sysinfo::{ProcessesToUpdate, System};
+
+    static SYSTEM: OnceLock<Mutex<System>> = OnceLock::new();
+    let system = SYSTEM.get_or_init(|| Mutex::new(System::new()));
+    let mut sys = system.lock().unwrap_or_else(|e| e.into_inner());
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+
+    sys.processes().values().any(|process| {
+        let name = process.name().to_string_lossy();
+        meeting_process_present(&name)
     })
 }
 
@@ -256,6 +304,15 @@ pub async fn run_detection_loop(state: Arc<MeetingState>) {
 
     let mut current_state = false;
 
+    // Linux: browser meetings (Meet in Chromium, Zoom in Firefox, …) have no
+    // process of their own. The only cheap local signal is "a browser holds
+    // the microphone", read from the audio server — ONE command, at most every
+    // 5 s, quiet when the tool is missing.
+    #[cfg(target_os = "linux")]
+    let mut last_browser_check = Instant::now();
+    #[cfg(target_os = "linux")]
+    let mut browser_active = false;
+
     loop {
         tokio::time::sleep(poll_interval).await;
 
@@ -272,9 +329,23 @@ pub async fn run_detection_loop(state: Arc<MeetingState>) {
         #[cfg(target_os = "windows")]
         let detected = check_wasapi_microphone_usage();
 
-        // Layer 2: Process detection (macOS/Linux fallback)
-        #[cfg(not(target_os = "windows"))]
+        // Layer 2: Process detection (macOS fallback)
+        #[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
         let detected = check_meeting_processes();
+
+        // Layer 2 + browser capture (Linux): a native meeting app, OR a browser
+        // that is recording the microphone right now.
+        #[cfg(target_os = "linux")]
+        let detected = {
+            if last_browser_check.elapsed() >= std::time::Duration::from_secs(5) {
+                last_browser_check = Instant::now();
+                browser_active = crate::meeting_linux::browser_capture_active();
+                if browser_active {
+                    tracing::debug!("meeting detection: a browser holds the microphone");
+                }
+            }
+            check_meeting_processes() || browser_active
+        };
 
         // Apply hysteresis
         if detected {
@@ -503,6 +574,11 @@ unsafe fn wasapi_check_inner() -> bool {
             "explorer.exe",               // Windows Explorer
             "TextInputHost.exe",          // Text input (touch keyboard, etc.)
             "WindowsInternal.ComposableShell.Experiences.TextInput.InputApp.exe",
+            "python.exe",                 // Python scripts (testers, STT sidecar)
+            "python3.exe",
+            "pythonw.exe",
+            "nexus.exe",                  // Self
+            "node.exe",                   // Node runner
         ];
         if SYSTEM_PROCESS_EXCLUSIONS.iter().any(|s| proc_name.eq_ignore_ascii_case(s)) {
             continue;
@@ -571,6 +647,34 @@ fn get_process_name(_pid: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 9: a Critical proactive alert may lift the meeting TTS mute for a short window only.
+    #[test]
+    fn tts_override_lifts_the_meeting_mute_briefly_and_expires() {
+        let st = MeetingState::new();
+        st.meeting_active.store(true, Ordering::Relaxed);
+        assert!(st.should_suppress_tts(), "meeting mutes speech by default");
+        assert!(!st.tts_override_active());
+
+        st.allow_tts_override(60_000);
+        assert!(st.tts_override_active());
+        assert!(!st.should_suppress_tts(), "override lifts the mute");
+        // wake detection is a different gate and stays suppressed during the meeting
+        assert!(st.should_suppress_wake());
+
+        // an expired window mutes again (never a permanent un-mute)
+        let st2 = MeetingState::new();
+        st2.meeting_active.store(true, Ordering::Relaxed);
+        st2.allow_tts_override(1);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(!st2.tts_override_active());
+        assert!(st2.should_suppress_tts());
+
+        // no meeting => never suppressed regardless of override state
+        let st3 = MeetingState::new();
+        assert!(!st3.should_suppress_tts());
+    }
+
 
     #[test]
     fn test_meeting_state_default() {

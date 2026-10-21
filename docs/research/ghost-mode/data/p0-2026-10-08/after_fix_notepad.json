@@ -1,0 +1,195 @@
+{
+  "actionable": {
+    "count": 23,
+    "distinct_accelerator_strings": {},
+    "with_accelerator_key": 0,
+    "with_accelerator_pct": 0.0,
+    "with_access_key": 16,
+    "with_access_pct": 69.6,
+    "with_any_keyboard_or_pattern": 23,
+    "with_any_pct": 100.0,
+    "with_expand_collapse": 8,
+    "with_invoke": 16,
+    "with_invoke_pct": 69.6,
+    "with_selection_item": 2,
+    "with_shortcut_in_name": 5,
+    "with_shortcut_in_name_pct": 21.7,
+    "with_toggle": 5
+  },
+  "current_list_actionables": {
+    "count": 23,
+    "first_ms": 44.4,
+    "later_ms": [
+      27.1,
+      24.1,
+      25.1,
+      23.6
+    ],
+    "recall_vs_window_rooted_pct": 100.0
+  },
+  "examples_shortcut_in_name": [
+    "Bold (Ctrl+B)",
+    "Italic (Ctrl+I)",
+    "Strikethrough (Ctrl+Shift+X)",
+    "Link (Ctrl+K)",
+    "Clear formatting (Ctrl+Space)"
+  ],
+  "examples_with_shortcut": [
+    {
+      "accelerator": "",
+      "access": "Alt, F",
+      "invoke": true,
+      "name": "File",
+      "type": "MenuItem"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, E",
+      "invoke": true,
+      "name": "Edit",
+      "type": "MenuItem"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, V",
+      "invoke": true,
+      "name": "View",
+      "type": "MenuItem"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, H",
+      "invoke": true,
+      "name": "Headings",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, L",
+      "invoke": true,
+      "name": "Lists",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, B",
+      "invoke": false,
+      "name": "Bold (Ctrl+B)",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, I",
+      "invoke": false,
+      "name": "Italic (Ctrl+I)",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, G",
+      "invoke": false,
+      "name": "Strikethrough (Ctrl+Shift+X)",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, K",
+      "invoke": false,
+      "name": "Link (Ctrl+K)",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, T",
+      "invoke": true,
+      "name": "Table",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, C",
+      "invoke": false,
+      "name": "Clear formatting (Ctrl+Space)",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, R",
+      "invoke": true,
+      "name": "Writing tools",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, P",
+      "invoke": true,
+      "name": "What's new",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, U",
+      "invoke": true,
+      "name": "User avatar",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Alt, S",
+      "invoke": true,
+      "name": "Settings",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Space",
+      "invoke": true,
+      "name": "System",
+      "type": "MenuItem"
+    }
+  ],
+  "label": "notepad",
+  "legacy_list_actionables": {
+    "count": 0,
+    "ms": 5096.9,
+    "recall_vs_window_rooted_pct": 0.0,
+    "rooted_at": {
+      "focused_children": 0,
+      "focused_control_type": "Document",
+      "focused_is_window": false
+    }
+  },
+  "process": {
+    "class": "Notepad",
+    "exe": "Notepad.exe",
+    "framework": "Win32",
+    "pid": 18728
+  },
+  "tree": {
+    "by_control_type": {
+      "Button": 17,
+      "Document": 1,
+      "List": 1,
+      "MenuBar": 2,
+      "MenuItem": 4,
+      "Pane": 9,
+      "Tab": 1,
+      "TabItem": 2,
+      "Text": 8,
+      "TitleBar": 1,
+      "Window": 1
+    },
+    "elements_total": 47
+  },
+  "window_rooted_cached": {
+    "cold_ms": 29.1,
+    "read_cached_props_ms": 3.2,
+    "warm_min_ms": 24.7,
+    "warm_runs_ms": [
+      25.3,
+      25.6,
+      24.7,
+      25.7
+    ]
+  }
+}

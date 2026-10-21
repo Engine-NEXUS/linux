@@ -97,28 +97,10 @@ fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
 }
 
 /// Captures the region behind the sidebar, blurs it, and returns a
-/// `data:image/png;base64,...` URI ready to drop into a CSS
+/// `data:image/jpeg;base64,...` URI ready to drop into a CSS
 /// `background-image`. Returns `None` on any failure (caller should
 /// fall back to the plain semi-transparent CSS look — never block
 /// showing the sidebar on this).
-pub fn capture_and_blur(x: i32, y: i32, w: i32, h: i32, sigma: f32) -> Option<String> {
-    let bgra = unsafe { capture_region_bgra(x, y, w, h) }?;
-    let rgba = bgra_to_rgba(&bgra);
-
-    let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(w as u32, h as u32, rgba)?;
-    let blurred = fast_blur(&img, sigma);
-
-    let mut png_bytes: Vec<u8> = Vec::new();
-    DynamicImage::ImageRgba8(blurred)
-        .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-        .ok()?;
-
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-    Some(format!("data:image/png;base64,{b64}"))
-}
-
-/// Same as capture_and_blur but uses JPEG encoding for much faster delivery.
 /// Used for both the initial backdrop capture and the live-blur loop.
 pub fn capture_and_blur_jpeg(x: i32, y: i32, w: i32, h: i32, sigma: f32) -> Option<String> {
     let bgra = unsafe { capture_region_bgra(x, y, w, h) }?;
@@ -137,11 +119,11 @@ pub fn capture_and_blur_jpeg(x: i32, y: i32, w: i32, h: i32, sigma: f32) -> Opti
     Some(format!("data:image/jpeg;base64,{b64}"))
 }
 
-/// Live-loop frame interval: 4 FPS. At 1 FPS the backdrop felt like a
-/// static picture; at 4 FPS with half-res frames + CSS crossfade the motion
-/// behind the glass reads as live. Cost per changed frame is ~15-25ms
-/// (downscaled blur); idle ticks cost ~1ms (hash only).
-pub const LIVE_BLUR_INTERVAL_MS: u64 = 250;
+/// Live-loop frame interval: 1 FPS. Captures desktop changes (Alt+Tab,
+/// window moves, video) without hammering the CPU. Cost per changed
+/// frame is ~10-18ms (downscaled blur + JPEG); idle ticks cost ~1ms
+/// (hash only). At 1 Hz average CPU is <2% of one core.
+pub const LIVE_BLUR_INTERVAL_MS: u64 = 1000;
 
 /// Downscale factor for live frames. The backdrop is heavily blurred anyway,
 /// so half resolution is visually identical at ~1/4 the blur + JPEG cost.
@@ -150,14 +132,14 @@ pub const LIVE_BLUR_DOWNSCALE: f32 = 0.5;
 /// Blurs an already-captured BGRA buffer at reduced resolution and encodes
 /// it as a JPEG data URI. Same look as `blur_bgra_to_jpeg` (the image is
 /// pure blur, CSS `background-size: cover` upscales it) at ~1/4 the cost —
-/// this is what makes 4 FPS affordable.
-pub fn blur_bgra_to_jpeg_fast(bgra: &[u8], w: i32, h: i32, sigma: f32) -> Option<String> {
+/// this is what makes 4 FPS affordable. `sigma` is unused (hardcoded to 10.0).
+pub fn blur_bgra_to_jpeg_fast(bgra: &[u8], w: i32, h: i32, _sigma: f32) -> Option<String> {
     let rgba = bgra_to_rgba(bgra);
     let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(w as u32, h as u32, rgba)?;
     let sw = ((w as f32 * LIVE_BLUR_DOWNSCALE).max(1.0)) as u32;
     let sh = ((h as f32 * LIVE_BLUR_DOWNSCALE).max(1.0)) as u32;
     let small = image::imageops::resize(&img, sw, sh, image::imageops::FilterType::Triangle);
-    let blurred = fast_blur(&small, sigma * LIVE_BLUR_DOWNSCALE);
+    let blurred = fast_blur(&small, 10.0 * LIVE_BLUR_DOWNSCALE);
 
     let mut jpeg_bytes: Vec<u8> = Vec::new();
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 55);
@@ -190,23 +172,4 @@ pub fn frame_hash(bgra: &[u8]) -> u64 {
 /// Returns `None` on capture failure.
 pub fn capture_region_bgra_public(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
     unsafe { capture_region_bgra(x, y, w, h) }
-}
-
-/// Blurs an already-captured BGRA buffer and encodes it as a JPEG data URI.
-/// This avoids re-capturing the screen when the caller already has the raw
-/// bytes (e.g. after hashing them for change detection).
-/// Kept as the full-resolution fallback; live loops use `blur_bgra_to_jpeg_fast`.
-#[allow(dead_code)]
-pub fn blur_bgra_to_jpeg(bgra: &[u8], w: i32, h: i32, sigma: f32) -> Option<String> {
-    let rgba = bgra_to_rgba(bgra);
-    let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(w as u32, h as u32, rgba)?;
-    let blurred = fast_blur(&img, sigma);
-
-    let mut jpeg_bytes: Vec<u8> = Vec::new();
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_bytes, 60);
-    encoder.encode_image(&DynamicImage::ImageRgba8(blurred)).ok()?;
-
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
-    Some(format!("data:image/jpeg;base64,{b64}"))
 }

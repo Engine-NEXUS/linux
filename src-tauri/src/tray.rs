@@ -7,7 +7,7 @@ use std::os::windows::process::CommandExt;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, MenuItemKind, CheckMenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, Runtime, WebviewWindow,
+    AppHandle, Manager, Runtime,
 };
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_autostart::ManagerExt;
@@ -21,7 +21,8 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
     let separator2 = PredefinedMenuItem::separator(app)?;
     let autostart = CheckMenuItem::with_id(app, "autostart", "Start at Login", true, true, None::<&str>)?;
     let separator3 = PredefinedMenuItem::separator(app)?;
-    let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Command Hub…", true, None::<&str>)?;
+    let full_settings = MenuItem::with_id(app, "full_settings", "Command Hub (Full Window)", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit NEXUS", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[
         &show,
@@ -31,6 +32,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
         &autostart,
         &separator3,
         &settings,
+        &full_settings,
         &quit,
     ])?;
 
@@ -41,14 +43,7 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, id| match id.id().as_ref() {
             "show" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = crate::window_manager::configure_non_activating_overlay(&w);
-                    let _ = w.set_ignore_cursor_events(false);
-                    // Only use direct eval — frontend listens to __NEXUS_WAKE__
-                    // and also to Tauri events, so emitting both causes double wake.
-                    let _ = w.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-                }
+                crate::window_manager::wake_orb_src(app, "tray-menu");
             }
             "pause" => {
                 // Toggle manual pause via meeting state
@@ -67,10 +62,8 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
                     }
                     if now_paused {
                         tracing::info!("tray: NEXUS paused (manual)");
-                        let _ = app.emit("meeting:paused", ());
                     } else {
                         tracing::info!("tray: NEXUS resumed (manual)");
-                        let _ = app.emit("meeting:resumed", ());
                     }
                 }
             }
@@ -82,6 +75,14 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
                         tracing::warn!("tray: failed to open settings sidebar: {e}");
                     }
                 });
+            }
+            "full_settings" => {
+                // Open the full settings window (SettingsApp — save/autostart/
+                // setup-wizard/clear-transcript). Covered by main-cap since
+                // the capability fix; the window had zero openers before.
+                if let Err(e) = crate::commands::open_settings_window(app.clone()) {
+                    tracing::warn!("tray: failed to open settings window: {e}");
+                }
             }
             "autostart" => {
                 // Toggle the autostart check menu item
@@ -151,16 +152,16 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
                     }
                 }
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                crate::volume::force_restore_volume();
+                app.exit(0)
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                 let app = tray.app_handle();
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-                }
+                crate::window_manager::wake_orb_src(app, "tray-click");
             }
         })
         .build(app)?;
@@ -190,12 +191,4 @@ pub fn setup<R: Runtime>(app: &AppHandle<R>) -> Result<(), tauri::Error> {
     // Keep a reference so the compiler knows `handle` is used for future extension.
     let _ = handle;
     Ok(())
-}
-
-// re-export Emitter for menu closures
-use tauri::Emitter;
-
-#[allow(dead_code)]
-fn ensure_window<R: Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
-    app.get_webview_window("main")
 }

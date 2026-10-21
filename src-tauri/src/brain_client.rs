@@ -165,17 +165,17 @@ pub async fn is_brain_available() -> bool {
 }
 
 /// Convert brain server response to ParsedIntent.
-/// The brain uses the same 46-intent schema as the NLU server, so we
+/// The brain uses the same intent schema as the NLU server, so we
 /// delegate to nlu_client::nlu_to_parsed_intent for the full mapping.
-/// This ensures all 46 intents are handled, including GitHub commands
-/// that the previous incomplete mapping was dropping.
+/// `raw` is unavailable in the brain response shape — pass the empty
+/// prompt (screen_analysis degrades to a generic analysis).
 fn brain_to_parsed_intent(intent: &str, slots: &serde_json::Value) -> Option<ParsedIntent> {
     // The brain server returns pr_number and other numeric slots as
     // strings sometimes (Qwen generates JSON with string values).
     // nlu_to_parsed_intent expects u64 for some fields, so we normalize
     // the slots to ensure numeric fields are numbers, not strings.
     let normalized_slots = normalize_slots(slots);
-    crate::nlu_client::nlu_to_parsed_intent(intent, &normalized_slots)
+    crate::nlu_client::nlu_to_parsed_intent(intent, &normalized_slots, "")
 }
 
 /// Normalize slot values: convert string-encoded numbers to actual numbers

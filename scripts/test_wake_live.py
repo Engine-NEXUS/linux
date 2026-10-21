@@ -244,20 +244,39 @@ def run_live_test(threshold=None, model_path=None):
     consecutive_hits = 0
     PATIENCE_FRAMES = 2  # Physical articulation of NEXUS takes >= 350ms (>= 4 frames)
 
-    def make_meter(score, length=20):
+    # Detect console Unicode block support
+    try:
+        " ▂▃▄▅▆▇█".encode(sys.stdout.encoding or "utf-8")
+        WAVE_CHARS = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+        METER_FILLED = "█"
+        METER_EMPTY = "░"
+    except Exception:
+        WAVE_CHARS = [" ", " ", ".", "-", "=", "+", "*", "#", "%"]
+        METER_FILLED = "#"
+        METER_EMPTY = "-"
+
+    def make_meter(score, length=16):
         filled = int(score * length)
-        bar = "█" * filled + "░" * (length - filled)
+        bar = METER_FILLED * filled + METER_EMPTY * (length - filled)
         return f"[{bar}] {score:5.1%}"
 
-    print(f"  Listening... (Speak 'NEXUS' to test)\n")
+    def make_waveform(samples, gain, width=12):
+        slices = np.array_split(samples, width)
+        bars = []
+        for s in slices:
+            s_rms = float(np.sqrt(np.mean(s ** 2))) * gain
+            level = int(np.clip((s_rms - 0.0003) / 0.022 * 8.0, 0, 8))
+            bars.append(WAVE_CHARS[level])
+        return "".join(bars)
 
+    print(f"  Listening... (Speak 'NEXUS' to test)\n")
     try:
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
                             blocksize=CHUNK_SAMPLES) as stream:
             while True:
                 chunk, overflow = stream.read(CHUNK_SAMPLES)
                 audio_data = chunk.flatten()
-                
+
                 score, rms, gain = pipeline.process_chunk(audio_data)
                 now = time.time()
 
@@ -277,12 +296,13 @@ def run_live_test(threshold=None, model_path=None):
                     print(f"     Status: \033[32m● WAKE WORD HEARD SIR!\033[0m\n")
                     pipeline.reset_after_trigger()
                 else:
-                    # Live score line
+                    # Live score line with real-time speaker audio wave visualizer
                     meter = make_meter(score)
-                    rms_bar = "·" * int(min(rms * 500, 15))
-                    status = "\033[33m👂 Listening\033[0m" if rms > 0.0005 else "\033[90m💤 Quiet\033[0m"
+                    wave = make_waveform(audio_data, gain, width=12)
+                    is_voice = (rms > 0.0006)
+                    status = "\033[1;32m🎙️  VOICE\033[0m" if is_voice else "\033[90m💤 QUIET\033[0m"
                     pat_marker = f" [Hit: {consecutive_hits}/{PATIENCE_FRAMES}]" if consecutive_hits > 0 else ""
-                    print(f"\r  {status} {meter} | Gain: {gain:4.1f}x | Energy: {rms_bar:<15s}{pat_marker}", end="", flush=True)
+                    print(f"\r  {status} {meter} | Wave: \033[36m[{wave}]\033[0m | RMS: {rms:6.4f} (AGC {gain:4.1f}x){pat_marker} ", end="", flush=True)
 
     except KeyboardInterrupt:
         pass
@@ -379,7 +399,7 @@ def run_batch_test(threshold=DEFAULT_THRESHOLD, model_path=None):
 def main():
     parser = argparse.ArgumentParser(description="NEXUS Wake Word Live & Batch Performance Tester")
     parser.add_argument("--batch", action="store_true", help="Run batch evaluation on dataset files")
-    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Trigger threshold (default: 0.35)")
+    parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help=f"Trigger threshold (default: {DEFAULT_THRESHOLD}). Note: this tool re-implements the pipeline in Python; `nexus wake replay` scores the real Rust engine.")
     parser.add_argument("--model", type=str, default=None, help="Custom .onnx model path")
 
     args = parser.parse_args()

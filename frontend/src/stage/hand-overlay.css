@@ -1,0 +1,59 @@
+/* Hand mode overlay (stage). Everything is click-through. */
+.hand-ring,
+.hand-ripple,
+.hand-chip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  display: none;
+  z-index: 40;
+}
+
+.hand-ring.on {
+  display: block;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2px dashed rgba(255, 196, 64, 0.95);
+  background: rgba(255, 196, 64, 0.08);
+  box-shadow: 0 0 14px rgba(255, 196, 64, 0.5);
+  will-change: transform;
+}
+.hand-ring.hand-ring--down {
+  border-style: solid;
+  background: rgba(255, 196, 64, 0.35);
+}
+.hand-ring.hand-ring--drag {
+  border-style: solid;
+  border-color: rgba(255, 120, 64, 0.95);
+  background: rgba(255, 120, 64, 0.35);
+}
+
+.hand-ripple.on {
+  display: block;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 196, 64, 0.95);
+  animation: hand-ripple 0.5s ease-out forwards;
+}
+@keyframes hand-ripple {
+  from { opacity: 0.95; scale: 0.3; }
+  to { opacity: 0; scale: 1.4; }
+}
+
+.hand-chip.on {
+  display: block;
+  /* left/top are set from the orb capsule's rect (HandOverlay.tsx) */
+  padding: 6px 14px;
+  border-radius: 14px;
+  font: 600 13px/1.2 "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0.02em;
+  color: #fff;
+  background: rgba(14, 18, 26, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  white-space: nowrap;
+}
+.hand-chip--preview.on { border-color: rgba(255, 196, 64, 0.9); }
+.hand-chip--live.on { background: rgba(160, 30, 30, 0.95); border-color: rgba(255, 120, 120, 0.9); }

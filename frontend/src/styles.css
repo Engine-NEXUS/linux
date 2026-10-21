@@ -1,65 +1,215 @@
-/* Transparent background for floating orb */
-html, body, #root {
-  margin: 0;
-  padding: 0;
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden;
-  background: transparent !important;
-  -webkit-user-select: none;
-  user-select: none;
-  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+/* Avatar/calibration/ghost-waves styles for the orb hosted inside the
+ * `stage` fullscreen overlay (see stage/OrbFrame.tsx). Only imported by
+ * stage/main.tsx — stage.html already owns the base html/body/#root
+ * transparent-fullscreen reset, so it isn't duplicated here.
+ *
+ * Phase 5 cleanup (wakeup-orb redesign plan): this file used to also
+ * style the retired `main`/`#app` OS window (slide-up/down transitions,
+ * a `#root` reset, a CSS-fallback `.orb` with its own pulse keyframes,
+ * `.avatar-section`, the dead `.transcript`/`.caption` display:none rule)
+ * — all removed, confirmed zero remaining references after main.tsx/
+ * App.tsx were deleted in Phase 1 (window consolidation).
+ */
+
+/* Avatar wrapper - transparent, only Lottie strokes are visible.
+ * Sizing/layout lives here (a real stylesheet rule) rather than as a
+ * React inline `style` prop: the stage window's CSP injects a per-load
+ * nonce into style-src for Tauri's own IPC init script, which per the
+ * CSP spec makes 'unsafe-inline' inert for the WHOLE directive — any
+ * dynamically-applied inline style is silently dropped, collapsing this
+ * element (and everything inside it, since children size off its 100%
+ * height) to zero size. Live bug, 2026-10-04 — see OrbFrame.tsx's
+ * matching note for the orb-frame positioning side of the same fix. */
+/* ─── Black Slider Box Enclosure ─── */
+.orb-slider {
+  position: fixed;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 9998;
+  will-change: transform, opacity;
+  box-sizing: border-box;
+  opacity: 0;
 }
 
-/* Fullscreen transparent stage — the orb roams inside it.
- * The native window is maximized + click-through when idle, so this
- * container must never intercept clicks itself; only the orb does. */
-#app {
-  width: 100vw;
-  height: 100vh;
-  background: transparent !important;
+.orb-capsule {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000000 !important;
+  background-color: #000000 !important;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.95), 0 4px 14px rgba(0, 0, 0, 0.85);
+  padding: 14px;
+  box-sizing: border-box;
   overflow: hidden;
+  position: relative;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.orb-slider--top .orb-capsule {
+  border-top: none;
+  border-radius: 0 0 10px 10px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.95), 0 4px 14px rgba(0, 0, 0, 0.85);
+}
+
+.orb-slider--bottom .orb-capsule {
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  box-shadow: 0 -16px 44px rgba(0, 0, 0, 0.95), 0 -4px 14px rgba(0, 0, 0, 0.85);
+}
+
+.orb-capsule:hover {
+  border-color: rgba(255, 255, 255, 0.26);
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 1), 0 0 16px rgba(242, 184, 89, 0.25);
+}
+
+/* ─── Aura style (Linux redesign): the bare orb, ringed by the audio-reactive
+   aura (aura/AuraCanvas.tsx). No box: the orb floats over the desktop. ─── */
+.orb-aura {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  padding: 14px;
+  box-sizing: border-box;
+}
+
+/* What the aura rims: a circle the size of the visible particle sphere
+   (about 62% of the frame with the 14px padding above). */
+.orb-aura-anchor {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 62%;
+  height: 62%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
   pointer-events: none;
 }
 
-/* With transparent: false, the window has a solid bg. Make it match the orb area. */
-html, body {
-  background: transparent !important;
+/* The aura's WebGL canvas. The host sizes, places and shows it (CSSOM); it
+   sits just under the orb. Normal compositing, NOT `plus-lighter`: the shader
+   writes a coverage alpha, and plus-lighter would wash out over bright
+   desktop content instead of reading as a glow. */
+.aura-canvas {
+  position: fixed;
+  left: 0;
+  top: 0;
+  display: none;
+  pointer-events: none;
+  mix-blend-mode: normal;
+  z-index: 9997;
 }
 
-/* Roaming orb — positioned via inline transform from useRoam. */
-.stage-orb {
+/* ─── Feature 106: Pebble Wakeup Design (Organic Contour) ─── */
+.orb-pebble {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000000 !important;
+  background-color: #000000 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 46px;
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.96), 0 4px 16px rgba(0, 0, 0, 0.85);
+  padding: 14px;
+  box-sizing: border-box;
+  overflow: hidden;
+  position: relative;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, border-radius 0.3s ease;
+}
+
+.orb-slider--top .orb-pebble {
+  border-top: none;
+  border-radius: 0 0 48px 48px;
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.96), 0 4px 16px rgba(0, 0, 0, 0.85);
+}
+
+.orb-slider--bottom .orb-pebble {
+  border-bottom: none;
+  border-radius: 48px 48px 0 0;
+  box-shadow: 0 -22px 54px rgba(0, 0, 0, 0.96), 0 -4px 16px rgba(0, 0, 0, 0.85);
+}
+
+.orb-pebble:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 1), 0 0 18px rgba(56, 189, 248, 0.2);
+}
+
+/* ─── Fluid Bezel Scoop & Elastic Thread Stretch Container ─── */
+.pebble-scoop-wrapper {
+  position: relative;
+  width: 301px;
+  height: 105px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 20px 50px rgba(0, 0, 0, 0.98));
+}
+
+.pebble-scoop-svg {
   position: absolute;
   top: 0;
   left: 0;
-  width: 180px;
-  height: 180px;
-  pointer-events: auto;
-  touch-action: none;
-  cursor: grab;
-  will-change: transform;
-}
-.stage-orb:active {
-  cursor: grabbing;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
 }
 
-/* Avatar wrapper - transparent, only Lottie strokes are visible */
+.orb-cradle-wrapper {
+  position: absolute;
+  width: 100px;
+  height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  will-change: transform, opacity;
+}
+
+.orb-sphere-wrapper {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .avatar-wrap {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transition: transform 0.3s ease, filter 0.3s ease;
   cursor: pointer;
   background: transparent;
+  position: relative;
 }
 
-.avatar-wrap--listening {
-  transform: scale(1.05);
-}
-
-.avatar-wrap--thinking {
-  animation: pulse-think 1s ease-in-out infinite;
-}
-
+/* Zoom is owned by the rAF frame-locked driver (zoomForFrame in Avatar.tsx),
+   never by wall-clock CSS pulses — same tempo is not the same phase. These
+   rules explicitly clear any pulse so state classes can't reintroduce drift. */
+.avatar-wrap--listening,
+.avatar-wrap--thinking,
 .avatar-wrap--speaking {
-  animation: pulse-speak 0.5s ease-in-out infinite;
+  animation: none;
 }
 
 /* Waiting: orb holds its frame with a steady glow (no pulse) while it
@@ -70,61 +220,135 @@ html, body {
   filter: drop-shadow(0 0 18px rgba(120, 180, 255, 0.65));
 }
 
-@keyframes pulse-think {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.08); }
+/* Ghost always-on display (orb-as-display plan): the WebGL orb is the
+   persistent ghost visual — no CSS state pulses fight its own motion.
+   Ghost enter uses the orb's own assemble() particle flight, not CSS. */
+.avatar-wrap--ghost {
+  animation: none;
 }
 
-@keyframes pulse-speak {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.05); }
+/* Calibration mode: grab cursor + subtle halo ring so the element reads
+   as "pick me up and drag me" while the companion HUD is open. */
+.avatar-wrap--calibrating {
+  cursor: grab;
+  filter: drop-shadow(0 0 22px rgba(37, 158, 214, 0.55));
 }
 
-/* CSS fallback orb */
-.orb {
-  width: 80px;
-  height: 80px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #6aa8ff, #1d3b8f 60%, #0a1330);
-  box-shadow:
-    0 0 40px rgba(70, 130, 255, 0.5) inset,
-    0 0 30px rgba(70, 130, 255, 0.4);
-  animation: breathe 3s ease-in-out infinite;
+/* Calibration target-switch pulse (plan 04 §4): brief highlight even
+   when both rects are identical, so the switch reads. Toggled suffix
+   restarts the animation on every bump. */
+.calib-pulse-0,
+.calib-pulse-1 {
+  animation: preview-pulse 220ms ease-out;
 }
 
-.orb--listening { animation: pulse-listen 1s ease-in-out infinite; }
-.orb--thinking  { animation: spin 1.2s linear infinite; }
-.orb--speaking  { animation: pulse-speak 0.4s ease-in-out infinite; }
-
-@keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.06); } }
-@keyframes pulse-listen { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
-@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
-
-/* Hide transcript and caption for small orb mode */
-.transcript, .caption {
-  display: none;
+@keyframes preview-pulse {
+  0% {
+    filter: drop-shadow(0 0 6px rgba(37, 158, 214, 0.4));
+  }
+  50% {
+    filter: drop-shadow(0 0 30px rgba(37, 158, 214, 0.9));
+  }
+  100% {
+    filter: drop-shadow(0 0 22px rgba(37, 158, 214, 0.55));
+  }
 }
 
-.avatar-section {
+/* Calibration hit-catcher: makes fully-transparent window regions
+   hittable during drag calibration (OS skips alpha-0 pixels). */
+.calibration-hitcatcher {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.012);
+  pointer-events: auto;
+}
+
+/* Size badge under the element while calibrating (task §4). */
+.calibration-badge {
+  position: absolute;
+  left: 50%;
+  bottom: -26px;
+  transform: translateX(-50%);
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: rgba(233, 240, 250, 0.92);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.ghost-waves {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: transparent !important;
-  transition: transform 0.3s ease, filter 0.3s ease;
+  gap: 14px;
+  pointer-events: none;
+  /* No entrance zoom: the 220ms pinch already covers the transition, and a
+     container 0.6→1 zoom fakes audio growth in silent rooms. The bars bloom
+     on first real STT/TTS level (grownRef gate in Avatar.tsx). */
 }
 
-/* Held (dragging): slight lift. Awake (woken): pop to attention. */
-.avatar-section--held {
-  transform: scale(1.08);
-  filter: brightness(1.15);
-}
-.avatar-section--awake {
-  transform: scale(1.05);
+.ghost-bar {
+  width: 22px;
+  border-radius: 11px;
+  transform-origin: center;
+  animation-name: ghost-wave;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.12);
 }
 
-/* Force Lottie SVG to fill its container */
-.avatar-section svg {
-  width: 100% !important;
-  height: 100% !important;
+@keyframes ghost-wave {
+  0%, 100% { transform: scaleY(0.55); }
+  50% { transform: scaleY(1); }
+}
+
+.avatar-voice-orb-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The <voice-orb> custom element's own base sizing — moved from a React
+ * inline `style` prop (VoiceOrb.tsx) for the same CSP reason as above. */
+.voice-orb-el {
   display: block;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: 1;
+  contain: layout paint;
+}
+
+/* ── Light theme: the orb capsule turns light and the particles turn black
+   (voice-orb `theme="light"` = black ink). Dark rules above are untouched. ── */
+:root[data-theme="light"] .orb-capsule {
+  background: #fafafa !important;
+  background-color: #fafafa !important;
+  border-color: rgba(60, 60, 67, 0.22);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.28), 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .orb-slider--top .orb-capsule {
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.28), 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .orb-slider--bottom .orb-capsule {
+  box-shadow: 0 -16px 44px rgba(0, 0, 0, 0.28), 0 -4px 14px rgba(0, 0, 0, 0.18);
+}
+:root[data-theme="light"] .orb-capsule:hover {
+  border-color: rgba(60, 60, 67, 0.34);
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.32);
+}
+
+/* Ghost hot mic parked after repeated ambient turns: the orb stays up, dimmed
+   and desaturated, so it is obvious NEXUS stopped listening until a re-wake. */
+.orb-slider[data-parked="true"] .orb-capsule,
+.orb-slider[data-parked="true"] .orb-pebble {
+  opacity: 0.45;
+  filter: grayscale(1);
 }

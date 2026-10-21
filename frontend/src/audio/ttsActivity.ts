@@ -52,14 +52,5 @@ export async function initTtsActivityListener(): Promise<void> {
     // Ignore outside Tauri (dev browser, tests).
   }
 }
-
-/** Test hook: reset module state between tests. */
-export function __resetTtsActivityForTest(): void {
-  initialized = false;
-  clearGrace();
-  try {
-    useAssistant.getState().setTtsActive(false);
-  } catch {
-    // Store may not exist in unit tests importing this module standalone.
-  }
-}
+// NOTE: __resetTtsActivityForTest was deleted (audit M5) — no test file
+// ever imported it.

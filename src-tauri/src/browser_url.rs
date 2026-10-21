@@ -140,19 +140,168 @@ fn get_browser_url_windows() -> Option<String> {
         }
     };
 
-    url.filter(|u| u.starts_with("http"))
+    let resolved_url = url.map(|u| {
+        let trimmed = u.trim().to_string();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            trimmed
+        } else if trimmed.contains("mail.google.com") || trimmed.contains("github.com") || trimmed.contains('.') {
+            format!("https://{}", trimmed)
+        } else {
+            trimmed
+        }
+    });
+
+    if resolved_url.is_some() {
+        return resolved_url;
+    }
+
+    // Fallback: inspect foreground window title for Gmail
+    if let Some(title) = get_foreground_window_title() {
+        let lower = title.to_lowercase();
+        if lower.contains("gmail") {
+            tracing::info!("[browser_url] detected Gmail in window title: {}", title);
+            return Some(format!(
+                "https://mail.google.com/mail/u/0/#inbox?title={}",
+                url_encode(&title)
+            ));
+        }
+    }
+
+    None
+}
+
+fn url_encode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() * 3);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            b' ' => result.push('+'),
+            _ => result.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    result
 }
 
 #[cfg(target_os = "windows")]
 fn read_url_from_edit(edit: &uiautomation::UIElement) -> Option<String> {
     use uiautomation::types::UIProperty;
-    let url_variant = edit.get_property_value(UIProperty::ValueValue).ok()?;
-    let url = url_variant.get_string().ok()?;
-    if url.is_empty() {
-        None
-    } else {
-        Some(url)
+    if let Ok(url_variant) = edit.get_property_value(UIProperty::ValueValue) {
+        if let Ok(url) = url_variant.get_string() {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() && (trimmed.contains('.') || trimmed.starts_with("http")) {
+                return Some(trimmed.to_string());
+            }
+        }
     }
+    if let Ok(name) = edit.get_name() {
+        let trimmed = name.trim();
+        if !trimmed.is_empty()
+            && (trimmed.contains('.') || trimmed.starts_with("http"))
+            && !trimmed.contains("Address and search bar")
+        {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn get_foreground_window_title() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0 == 0 {
+            return None;
+        }
+        let mut title_buf = vec![0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut title_buf);
+        if len == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&title_buf[..len as usize]))
+    }
+}
+
+// ─── Screen-tour context accessors (pub(crate)) ──────────────────────
+
+/// Foreground window title (screen-tour context).
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_window_title() -> Option<String> {
+    get_foreground_window_title()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn foreground_window_title() -> Option<String> {
+    crate::live::commands::window::get_foreground_window_title()
+}
+
+/// Foreground process executable name, lower-case (e.g. `brave.exe`).
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_process_name() -> Option<String> {
+    get_process_name(get_foreground_process_id()?)
+}
+
+/// Full path of the foreground process executable (to open a URL in the SAME browser the user is
+/// looking at instead of whatever the system default is).
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_process_path() -> Option<std::path::PathBuf> {
+    get_process_path(get_foreground_process_id()?)
+}
+
+/// True for the browsers whose page content we can locate.
+pub(crate) fn is_browser_process(name: &str) -> bool {
+    matches!(
+        name,
+        "chrome.exe" | "brave.exe" | "msedge.exe" | "firefox.exe" | "opera.exe" | "vivaldi.exe"
+    )
+}
+
+/// Foreground window rect in physical px: (x, y, w, h).
+#[cfg(target_os = "windows")]
+pub(crate) fn foreground_window_rect() -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0 == 0 {
+            return None;
+        }
+        let mut r = RECT::default();
+        if !GetWindowRect(hwnd, &mut r).as_bool() {
+            return None;
+        }
+        Some((r.left, r.top, r.right - r.left, r.bottom - r.top))
+    }
+}
+
+/// Page-content rect of the foreground browser (UI Automation `Document`
+/// control = the web view, i.e. without tab strip / URL bar / bookmarks).
+/// Physical px (x, y, w, h). None when the tree does not expose it (the
+/// caller then falls back to the window rect minus a toolbar inset).
+#[cfg(target_os = "windows")]
+pub(crate) fn browser_document_rect() -> Option<(i32, i32, i32, i32)> {
+    use uiautomation::controls::ControlType;
+    use uiautomation::types::Handle;
+    use uiautomation::UIAutomation;
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0 == 0 {
+        return None;
+    }
+    let automation = UIAutomation::new().ok()?;
+    let window = automation.element_from_handle(Handle::from(hwnd.0 as isize)).ok()?;
+    let doc = automation
+        .create_matcher()
+        .from(window)
+        .timeout(700)
+        .control_type(ControlType::Document)
+        .find_first()
+        .ok()?;
+    let r = doc.get_bounding_rectangle().ok()?;
+    let (x, y) = (r.get_left(), r.get_top());
+    Some((x, y, r.get_right() - x, r.get_bottom() - y))
 }
 
 #[cfg(target_os = "windows")]
@@ -185,6 +334,23 @@ fn get_process_name(pid: u32) -> Option<String> {
             return None;
         }
         Some(String::from_utf16_lossy(&name_buf[..len as usize]).to_lowercase())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_process_path(pid: u32) -> Option<std::path::PathBuf> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::ProcessStatus::K32GetModuleFileNameExW;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid).ok()?;
+        let mut buf = vec![0u16; 1024];
+        let len = K32GetModuleFileNameExW(handle, None, &mut buf);
+        let _ = CloseHandle(handle);
+        if len == 0 {
+            return None;
+        }
+        Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
     }
 }
 
@@ -276,6 +442,47 @@ fn get_browser_url_linux() -> Option<String> {
     }
 }
 
+// ─── Gmail URL Thread Extraction ─────────────────────────────────────
+
+/// Extracts a Gmail thread ID or message identifier from an active Gmail URL.
+/// Matches URLs containing `mail.google.com` with a fragment ending in a thread/message ID:
+/// e.g. `https://mail.google.com/mail/u/0/#inbox/FMfcgzQVzQ...` -> `Some("FMfcgzQVzQ...")`
+/// e.g. `https://mail.google.com/mail/u/0/#all/18ac5d7e3` -> `Some("18ac5d7e3")`
+pub fn extract_gmail_thread_id_from_url(url: &str) -> Option<String> {
+    if !url.contains("mail.google.com") {
+        return None;
+    }
+
+    // Split on '#' to get the hash fragment
+    let hash = url.split('#').nth(1)?;
+
+    // Common paths: inbox/<id>, all/<id>, search/<query>/<id>, label/<name>/<id>
+    let parts: Vec<&str> = hash.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let last_segment = parts.last()?.trim();
+    // Valid Gmail thread IDs are alphanumeric strings usually between 8 and 40 characters
+    if last_segment.len() >= 8 && last_segment.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        Some(last_segment.to_string())
+    } else {
+        None
+    }
+}
+
+/// Extracts the numeric account index `/u/<N>/` from an active Gmail URL.
+/// e.g. `https://mail.google.com/mail/u/1/#inbox/...` -> `Some(1)`
+pub fn extract_gmail_account_index_from_url(url: &str) -> Option<usize> {
+    if let Some(pos) = url.find("/mail/u/") {
+        let rem = &url[pos + 8..];
+        if let Some(slash) = rem.find('/') {
+            return rem[..slash].parse::<usize>().ok();
+        }
+    }
+    None
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -287,5 +494,61 @@ mod tests {
         // This test just verifies the function doesn't panic.
         // It may return None if no browser is foreground.
         let _ = get_active_browser_url();
+    }
+
+    #[test]
+    fn test_extract_gmail_thread_id_from_url() {
+        // Standard inbox thread
+        let u1 = "https://mail.google.com/mail/u/0/#inbox/FMfcgzQVzQZlPkrXFw";
+        assert_eq!(
+            extract_gmail_thread_id_from_url(u1),
+            Some("FMfcgzQVzQZlPkrXFw".to_string())
+        );
+
+        // All mail thread with hex ID
+        let u2 = "https://mail.google.com/mail/u/1/#all/18ac5d7e3901";
+        assert_eq!(
+            extract_gmail_thread_id_from_url(u2),
+            Some("18ac5d7e3901".to_string())
+        );
+
+        // Search thread
+        let u3 = "https://mail.google.com/mail/u/0/#search/project/FMfcgzQ1234567";
+        assert_eq!(
+            extract_gmail_thread_id_from_url(u3),
+            Some("FMfcgzQ1234567".to_string())
+        );
+
+        // Main inbox list without opened email
+        let u_list = "https://mail.google.com/mail/u/0/#inbox";
+        assert_eq!(extract_gmail_thread_id_from_url(u_list), None);
+
+        // Non-Gmail site
+        let u_github = "https://github.com/facebook/react/pull/12345";
+        assert_eq!(extract_gmail_thread_id_from_url(u_github), None);
+    }
+
+    #[test]
+    fn test_extract_gmail_account_index_from_url() {
+        assert_eq!(
+            extract_gmail_account_index_from_url("https://mail.google.com/mail/u/0/#inbox/FMfcgzQ123"),
+            Some(0)
+        );
+        assert_eq!(
+            extract_gmail_account_index_from_url("https://mail.google.com/mail/u/1/#all/18ac5d7e3"),
+            Some(1)
+        );
+        assert_eq!(
+            extract_gmail_account_index_from_url("https://mail.google.com/mail/u/5/#search/test/FMfcgz"),
+            Some(5)
+        );
+        assert_eq!(
+            extract_gmail_account_index_from_url("https://mail.google.com/mail/#inbox"),
+            None
+        );
+        assert_eq!(
+            extract_gmail_account_index_from_url("https://news.ycombinator.com"),
+            None
+        );
     }
 }

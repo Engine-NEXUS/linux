@@ -24,7 +24,7 @@ import { execSync, spawnSync } from "node:child_process";
 // We control all arguments (no user input) — the warning is a false positive
 // for our use case of launching .cmd shims like npm.cmd on Windows.
 process.removeAllListeners("warning");
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, copyFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync, copyFileSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { platform, arch } from "node:os";
@@ -287,31 +287,56 @@ function installLinux() {
 
 // ─── Commands ────────────────────────────────────────────────────────────────
 
-/// Verify faster-whisper Python package is installed.
-/// The STT server (server/stt_server.py) uses faster-whisper tiny.en
-/// which auto-downloads the model from HuggingFace on first transcription.
-function checkFasterWhisper() {
-  const result = spawnSync(IS_WIN ? "python" : "python3", ["-c", "import faster_whisper; print('ok')"], {
+/// Verify the Moonshine STT Python package is installed.
+/// The STT server (server/stt_server.py) uses Moonshine Streaming
+/// (ONNX Runtime; auto-downloads the model on first transcription).
+function checkMoonshine() {
+  const result = spawnSync(IS_WIN ? "python" : "python3", ["-c", "import moonshine_voice; print('ok')"], {
     stdio: "pipe",
     encoding: "utf-8",
     shell: IS_WIN,
   });
 
   if (result.status === 0 && result.stdout?.trim() === "ok") {
-    ok("faster-whisper installed (STT server ready)");
+    ok("moonshine-voice installed (STT server ready)");
   } else {
-    warn("faster-whisper not installed — installing now...");
+    warn("moonshine-voice not installed — installing now...");
     try {
-      let pipCmd = `${IS_WIN ? "python" : "python3"} -m pip install faster-whisper fastapi uvicorn python-multipart`;
-      if (IS_LINUX) pipCmd += " --break-system-packages";
-      execSync(pipCmd, {
+      execSync(`${IS_WIN ? "python" : "python3"} -m pip install moonshine-voice fastapi uvicorn python-multipart websockets`, {
         stdio: "inherit",
         encoding: "utf-8",
-        shell: IS_WIN || IS_LINUX,
+        shell: IS_WIN,
       });
-      ok("faster-whisper installed successfully");
+      ok("moonshine-voice installed successfully");
     } catch {
-      warn("Failed to install faster-whisper — STT will not work. Run: pip install faster-whisper fastapi uvicorn python-multipart");
+      warn("Failed to install moonshine-voice — STT will not work. Run: pip install moonshine-voice fastapi uvicorn python-multipart websockets");
+    }
+  }
+
+  // `websockets` (or `wsproto`) is uvicorn's actual WebSocket implementation
+  // — neither fastapi nor uvicorn depends on it directly, so an existing
+  // install (moonshine_voice already present, the branch above skipped)
+  // can still be missing it. Needed for the Phase 4 live-caption /stream
+  // endpoint only — its absence degrades silently (no live caption), but
+  // check for it separately so a fresh `nexus setup` actually enables it.
+  const wsResult = spawnSync(IS_WIN ? "python" : "python3", ["-c", "import websockets; print('ok')"], {
+    stdio: "pipe",
+    encoding: "utf-8",
+    shell: IS_WIN,
+  });
+  if (wsResult.status === 0 && wsResult.stdout?.trim() === "ok") {
+    ok("websockets installed (live caption stream ready)");
+  } else {
+    warn("websockets not installed — installing now (live caption stream)...");
+    try {
+      execSync(`${IS_WIN ? "python" : "python3"} -m pip install websockets`, {
+        stdio: "inherit",
+        encoding: "utf-8",
+        shell: IS_WIN,
+      });
+      ok("websockets installed successfully");
+    } catch {
+      warn("Failed to install websockets — live caption will stay disabled (batch STT unaffected). Run: pip install websockets");
     }
   }
 }
@@ -354,14 +379,26 @@ function cmdSetup() {
     run("npm", ["--prefix", "server/worker", "install"], { allowFail: true });
   }
 
-  // 5. Install NLU Python dependencies
-  info("Installing NLU server Python dependencies...");
-  const nluReq = join(ROOT, "server", "nlu", "requirements.txt");
-  if (existsSync(nluReq)) {
-    const pipArgs = ["-m", "pip", "install", "-r", nluReq];
-    if (IS_LINUX) pipArgs.push("--break-system-packages");
-    run(pythonCmd(), pipArgs,
-      { allowFail: true, hint: "If pip fails, create a venv: python -m venv .venv && activate it" });
+  // 5. Install Python dependencies
+  if (IS_LINUX) {
+    info("Installing Python sidecar dependencies into user venv...");
+    const venvDir = join(process.env.HOME || "", ".local", "share", "nexus", "venv");
+    if (!existsSync(venvDir)) {
+      mkdirSync(dirname(venvDir), { recursive: true });
+      run("python3", ["-m", "venv", "--system-site-packages", venvDir], { allowFail: true });
+    }
+    const pip = join(venvDir, "bin", "pip");
+    const reqLinux = join(ROOT, "server", "requirements-linux.txt");
+    if (existsSync(pip) && existsSync(reqLinux)) {
+      run(pip, ["install", "-r", reqLinux], { allowFail: true });
+    }
+  } else {
+    info("Installing NLU server Python dependencies...");
+    const nluReq = join(ROOT, "server", "nlu", "requirements.txt");
+    if (existsSync(nluReq)) {
+      run(pythonCmd(), ["-m", "pip", "install", "-r", nluReq],
+        { allowFail: true, hint: "If pip fails, create a venv: python -m venv .venv && activate it" });
+    }
   }
 
   // 6. Verify NLU model is present (either in server/nlu/model/ or resources/)
@@ -375,8 +412,8 @@ function cmdSetup() {
     warn("NLU model not found — NLU server will fail. Run: cd server/nlu && python train.py && python export_onnx.py");
   }
 
-  // 7. Verify faster-whisper is installed (STT server dependency)
-  checkFasterWhisper();
+  // 7. Verify moonshine-voice is installed (STT server dependency)
+  checkMoonshine();
 
   // 8. Build
   info("Building NEXUS...");
@@ -546,17 +583,44 @@ function syncNluModel() {
   }
 }
 
+/// Sync all Python sidecars from server/ into src-tauri/resources/server/.
+/// The installer and production lazy_* loaders run the resources/ copies.
+/// Both copies must remain 100% identical.
+function syncServerScripts() {
+  const files = [
+    "atspi_server.py",
+    "cdp_server.py",
+    "nlu_server.py",
+    "ocr_server.py",
+    "stt_server.py",
+  ];
+  let synced = 0;
+  for (const f of files) {
+    const src = join(ROOT, "server", f);
+    const dst = join(ROOT, "src-tauri", "resources", "server", f);
+    if (existsSync(src)) {
+      copyFileSync(src, dst);
+      synced++;
+    }
+  }
+  if (synced > 0) {
+    ok(`Server scripts synced to resources (${synced} file(s))`);
+  }
+}
+
 function cmdBuild() {
   // Kill any running instance first — cargo can't replace a running binary
   killRunningNexus();
 
   // Sync the NLU model from server/nlu/model/ to src-tauri/resources/server/nlu/model/
-  // This ensures the installer always bundles the latest trained model.
-  // The NLU server reads from resources/ in production (no server/ dir in installed builds).
   syncNluModel();
+  // Also sync the server entrypoints so production never ships stale sidecars
+  syncServerScripts();
 
   info("Building frontend (Vite)...");
   run("npm", ["--prefix", "frontend", "install"], { allowFail: true, stdio: "ignore" });
+  // Hand mode: MediaPipe wasm + hand model into frontend/public/hand (git-ignored, ~17 MB).
+  run("node", ["scripts/sync-hand-assets.mjs"], { allowFail: true });
   run("npm", ["--prefix", "frontend", "run", "build"]);
 
   info("Building Rust release binary (custom-protocol + admin-brain)...");
@@ -569,7 +633,7 @@ function cmdBuild() {
     try {
       const glob = readdirSync("/usr/lib").filter(f => f.startsWith("llvm-"));
       if (glob.length > 0) {
-        glob.sort().reverse(); // get highest version
+        glob.sort().reverse();
         const p = join("/usr/lib", glob[0], "lib");
         if (existsSync(join(p, "libclang.so"))) {
           cargoEnv.LIBCLANG_PATH = p;
@@ -579,7 +643,6 @@ function cmdBuild() {
     } catch {}
   }
   // admin-brain: enables the Qwen brain (admin-only, runtime-gated by admin.json).
-  // The brain code is compiled in but does nothing unless admin.json has is_admin=true.
   run("cargo", ["build", "--release", "--features", "custom-protocol,admin-brain"],
     { cwd: join(ROOT, "src-tauri"), env: cargoEnv,
       hint: "Make sure LIBCLANG_PATH is set (Windows) or LLVM is installed" });
@@ -595,11 +658,14 @@ function cmdBuild() {
 
 function cmdDev() {
   info("Starting Tauri dev mode (hot reload via Vite)...");
-  // tauri dev runs the Vite dev server + the Rust app with devUrl
-  // We need the tauri CLI — check for cargo-tauri or npx tauri
-  const tauriCli = has("cargo-tauri") ? ["cargo", "tauri", "dev"]
-    : ["npx", "--prefix", join(ROOT, "frontend"), "tauri", "dev"];
-  run(tauriCli[0], tauriCli.slice(1), { cwd: join(ROOT, "src-tauri") });
+  const localTauri = join(ROOT, "frontend", "node_modules", ".bin", "tauri");
+  if (has("cargo-tauri")) {
+    run("cargo", ["tauri", "dev"], { cwd: join(ROOT, "src-tauri") });
+  } else if (existsSync(localTauri)) {
+    run(localTauri, ["dev"], { cwd: join(ROOT, "src-tauri") });
+  } else {
+    run("npx", ["--prefix", join(ROOT, "frontend"), "tauri", "dev"], { cwd: join(ROOT, "src-tauri") });
+  }
 }
 
 function cmdRun() {
@@ -611,32 +677,42 @@ function cmdRun() {
   }
 
   if (IS_WIN) {
-    // Windows: use run.ps1 for the unified color-coded console experience.
-    // It kills old instances, clears logs, launches nexus.exe, and tails
-    // all logs (Rust wake-word, audio, frontend CDP) in one stream.
     const runScript = join(ROOT, "scripts", "run.ps1");
     if (existsSync(runScript)) {
       info("Launching NEXUS via unified console (run.ps1)...");
-      // Pass through any extra args (e.g. -Build, -Debug)
       const extraArgs = process.argv.slice(3).filter(a => !a.startsWith("-"));
       const psArgs = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", runScript];
-      // Check for --debug or -Debug flag
       if (process.argv.includes("--debug") || process.argv.includes("-Debug")) {
         psArgs.push("-Debug");
       }
       if (process.argv.includes("--build") || process.argv.includes("-Build")) {
         psArgs.push("-Build");
       }
+      if (process.argv.includes("--verbose") || process.argv.includes("-Verbose") || process.argv.includes("-v") || process.argv.includes("--watch-debug")) {
+        psArgs.push("-VerboseLogs");
+      }
       run("pwsh", psArgs, { shell: false });
       return;
     }
-    // Fall back to direct launch if run.ps1 doesn't exist
     info(`Launching NEXUS: ${binPath}`);
-    run(binPath, [], { stdio: "inherit" });
+    run(binPath, [], { stdio: "ignore" });
   } else {
-    // Unix: launch directly (no run.ps1 equivalent)
-    info(`Launching NEXUS: ${binPath}`);
-    run(binPath, [], { stdio: "inherit" });
+    // Unix: launch directly, with the Python venv on Linux.
+    // GDK_BACKEND is deliberately NOT set here: the binary picks the GTK
+    // backend itself (gdk_backend_linux), and it only forces X11 when an
+    // XWayland display is actually available. Setting it here would point
+    // GTK at an X server that may not exist and stop the app from starting.
+    const runEnv = { ...process.env };
+    if (IS_LINUX) {
+      const venvPython = join(process.env.HOME || "", ".local", "share", "nexus", "venv", "bin", "python3");
+      if (existsSync(venvPython) && !runEnv.NEXUS_PYTHON) {
+        runEnv.NEXUS_PYTHON = venvPython;
+        runEnv.PATH = `${dirname(venvPython)}:${runEnv.PATH || ""}`;
+      }
+    }
+    const extraArgs = process.argv.slice(2).filter(a => a !== "run" && a !== "start");
+    info(`Launching NEXUS: ${binPath} ${extraArgs.join(" ")}`.trim());
+    run(binPath, extraArgs, { stdio: "inherit", env: runEnv });
   }
 }
 
@@ -681,22 +757,109 @@ function cmdCheck() {
   // Wake word model
   check("Wake word ONNX model", () => existsSync(join(ROOT, "src-tauri", "resources", "oww", "nexus.onnx")));
 
-  // Display session — informational, not pass/fail.
-  // The computer-control stack branches on this: keyboard synthesis needs XTEST,
-  // and there is no portable foreground-window API on native Wayland, so the
-  // screen-vision privacy gate fails closed there (see
-  // docs/features/research/21 and src-tauri/src/session.rs).
-  if (!IS_WIN) {
+  if (IS_LINUX) {
+    console.log(`\n${C.bold}${C.cyan}Linux Platform Diagnostics${C.reset}\n`);
+
+    // 1. Python venv check
+    const venvDir = process.env.NEXUS_VENV || join(process.env.HOME || "", ".local", "share", "nexus", "venv");
+    const venvPython = process.env.NEXUS_PYTHON || join(venvDir, "bin", "python3");
+    const hasVenv = existsSync(venvPython);
+    check(`Python sidecar venv (${venvPython})`, () => hasVenv);
+
+    // 2. Sidecar imports verification
+    const py = hasVenv ? venvPython : (hasPython() ? pythonCmd() : null);
+    if (py) {
+      const sidecarImports = [
+        { name: "atspi_server (gi/Atspi, fastapi, uvicorn)", code: "import gi; gi.require_version('Atspi', '2.0'); from gi.repository import Atspi; import fastapi, uvicorn; print('ok')" },
+        { name: "cdp_server (websockets, fastapi, uvicorn)", code: "import websockets, fastapi, uvicorn; print('ok')" },
+        { name: "ocr_server (rapidocr, cv2, numpy, onnxruntime)", code: "import rapidocr, cv2, numpy, onnxruntime, fastapi, uvicorn; print('ok')" },
+        { name: "stt_server (moonshine_voice, fastapi, uvicorn)", code: "import moonshine_voice, fastapi, uvicorn; print('ok')" },
+        { name: "nlu_server (transformers, onnxruntime, numpy)", code: "import transformers, onnxruntime, numpy, fastapi, uvicorn; print('ok')" },
+      ];
+
+      for (const sc of sidecarImports) {
+        check(`Sidecar dependencies: ${sc.name}`, () => {
+          const res = spawnSync(py, ["-c", sc.code], { encoding: "utf-8", timeout: 15000 });
+          return res.status === 0 && res.stdout.includes("ok");
+        });
+      }
+    } else {
+      err("Cannot test sidecar dependencies: no Python interpreter found");
+      fail++;
+    }
+
+    // 3. Audio control: wpctl (PipeWire)
+    check("PipeWire audio control (wpctl)", () => has("wpctl"));
+
+    // 4. AT-SPI bus is up
+    check("AT-SPI accessibility bus active", () => {
+      if (has("busctl")) {
+        try {
+          const res = spawnSync("busctl", ["--user", "status", "org.a11y.Bus"], { encoding: "utf-8", timeout: 5000 });
+          if (res.status === 0) return true;
+        } catch {}
+      }
+      if (py) {
+        try {
+          const res = spawnSync(py, ["-c", "import gi; gi.require_version('Atspi', '2.0'); from gi.repository import Atspi; Atspi.init(); print('ok' if Atspi.get_desktop_count() >= 0 else 'fail')"], { encoding: "utf-8", timeout: 5000 });
+          if (res.status === 0 && res.stdout.includes("ok")) return true;
+        } catch {}
+      }
+      return Boolean(process.env.AT_SPI_BUS_ADDRESS);
+    });
+
+    // 5. Session type (X11/Wayland) and desktop
     const st = process.env.XDG_SESSION_TYPE || "-";
     const wl = process.env.WAYLAND_DISPLAY || "-";
     const dp = process.env.DISPLAY || "-";
+    const desktop = process.env.XDG_CURRENT_DESKTOP || process.env.DESKTOP_SESSION || "unknown";
     const kind = st !== "-" ? st : (wl !== "-" ? "wayland" : dp !== "-" ? "x11" : "headless");
-    const cap = kind === "wayland"
-      ? "XTEST unavailable — needs semantic input or libei/portal"
-      : kind === "x11"
-        ? "XTEST available (XWayland routes via portal)"
-        : "no display";
-    console.log(`  ${C.dim}display session:${C.reset} ${kind} ${C.dim}(${cap}) ${C.dim}[XDG_SESSION_TYPE=${st} WAYLAND_DISPLAY=${wl} DISPLAY=${dp}]${C.reset}`);
+    check(`Display session: ${desktop} (${kind})`, () => kind === "wayland" || kind === "x11");
+
+    // 6. Global wake hotkey registered
+    check("Global wake hotkey registered", () => {
+      const desktopUpper = desktop.toUpperCase();
+      const cosmicCustom = join(process.env.HOME || "", ".config", "cosmic", "com.system76.CosmicSettings.Shortcuts", "v1", "custom");
+      if (desktopUpper.includes("COSMIC") || existsSync(cosmicCustom)) {
+        if (existsSync(cosmicCustom)) {
+          try {
+            const content = readFileSync(cosmicCustom, "utf-8");
+            return /nexus\s+--wake/i.test(content) || /description:\s*Some\(\s*"Nexus"\s*\)/i.test(content);
+          } catch {}
+        }
+        return false;
+      }
+      if (has("gsettings")) {
+        try {
+          const out = execSync("gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings", { encoding: "utf-8" });
+          return out.includes("nexus-wake");
+        } catch {}
+      }
+      return false;
+    });
+  }
+
+  // MCP bridges (P3.3): live probe of the local bridges + hosted servers
+  // via the existing read-only checker. Bridge DOWN lines carry the fix
+  // command. Doesn't fail the tool check (bridges are optional) —
+  // reported separately below.
+  if (hasPython()) {
+    const probe = spawnSync(pythonCmd(), [join(ROOT, "scripts", "mcp_check.py")], {
+      encoding: "utf-8",
+      timeout: 60000,
+    });
+    const out = (probe.stdout || "").trim();
+    if (out) {
+      console.log(out);
+      const down = (out.match(/DOWN/g) || []).length;
+      if (down > 0) {
+        console.log(`${C.yellow}  ${down} bridge/server(s) down — fix hints above. Optional: run 'nexus mcp check' for the full end-to-end probe.${C.reset}`);
+      }
+    } else {
+      warn("MCP bridge probe produced no output (run: nexus mcp check)");
+    }
+  } else {
+    warn("Python missing — skipped MCP bridge probe (run: nexus mcp check)");
   }
 
   console.log(`\n${C.bold}${pass > 0 && fail === 0 ? C.green : C.yellow}${pass} passed, ${fail} failed${C.reset}\n`);
@@ -767,9 +930,7 @@ function cmdTrain() {
     info("Installing training dependencies...");
     const reqPath = join(ROOT, "server", "nlu", "requirements-train.txt");
     if (existsSync(reqPath)) {
-      const trainPipArgs = ["-m", "pip", "install", "-r", reqPath];
-      if (IS_LINUX) trainPipArgs.push("--break-system-packages");
-      run(py, trainPipArgs, {
+      run(py, ["-m", "pip", "install", "-r", reqPath], {
         allowFail: true,
         hint: "If pip fails, create a venv: python -m venv .venv && activate it",
       });
@@ -837,9 +998,7 @@ function cmdCollect() {
   });
   if (depCheck.stdout?.trim() !== "ok") {
     info("Installing audio recording dependencies...");
-    const audioPipArgs = ["-m", "pip", "install", "sounddevice", "numpy", "scipy"];
-    if (IS_LINUX) audioPipArgs.push("--break-system-packages");
-    run(py, audioPipArgs, {
+    run(py, ["-m", "pip", "install", "sounddevice", "numpy", "scipy"], {
       allowFail: true,
       hint: "If pip fails, create a venv: python -m venv .venv && activate it",
     });
@@ -870,6 +1029,26 @@ function cmdMcpCheck() {
     process.exit(1);
   }
   run(py, [checkScript], { cwd: ROOT });
+}
+
+/// TEMPORARY ghost voice-entry tracer (delete after the fix lands).
+/// Shows every pipeline stage and pinpoints the missing link — statically
+/// (is the code there?) and from a real run log (did each stage fire?).
+/// Read-only: touches no app code, no settings, no devices.
+/// Contributors run: nexus trace-ghost [--log run.log]
+function cmdTraceGhost() {
+  const traceScript = join(ROOT, "scripts", "trace_ghost.py");
+  if (!existsSync(traceScript)) {
+    err("Trace script not found: " + traceScript);
+    process.exit(1);
+  }
+  const py = pythonCmd();
+  if (!py) {
+    err("Python not found. Install Python 3.12+ and add it to PATH.");
+    process.exit(1);
+  }
+  // Pass through --log <file> (and nothing else executes anything).
+  run(py, [traceScript, ...process.argv.slice(3)], { cwd: ROOT });
 }
 
 /// Inspect training dataset category coverage, voice sample health, and targeted recommendations.
@@ -915,9 +1094,7 @@ function cmdWake() {
   });
   if (depCheck.stdout?.trim() !== "ok") {
     info("Installing audio recording dependencies...");
-    const audioPipArgs = ["-m", "pip", "install", "sounddevice", "numpy", "scipy"];
-    if (IS_LINUX) audioPipArgs.push("--break-system-packages");
-    run(py, audioPipArgs, {
+    run(py, ["-m", "pip", "install", "sounddevice", "numpy", "scipy"], {
       allowFail: true,
       hint: "If pip fails, create a venv: python -m venv .venv && activate it",
     });
@@ -939,7 +1116,47 @@ function cmdWake() {
     return;
   }
 
-  if (sub === "test" || sub === "live" || sub === "benchmark" || sub === "devices") {
+  if (sub === "compare" || (sub === "test" && process.argv.slice(4).includes("--compare"))) {
+    const compareScript = join(ROOT, "scripts", "test_wake_compare.py");
+    if (!existsSync(compareScript)) {
+      err("Compare script not found: " + compareScript);
+      process.exit(1);
+    }
+    const cleanArgs = process.argv.slice(4).filter(a => a !== "--compare");
+    info("Starting simultaneous wake word & live ASR comparison...");
+    run(py, [compareScript, ...cleanArgs], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "replay") {
+    // Source of truth for wake accuracy: the real Rust engine over recordings.
+    if (!hasCargo()) {
+      err("cargo not found: the replay harness runs the Rust wake engine.");
+      process.exit(1);
+    }
+    let replayArgs = process.argv.slice(4);
+    if (!replayArgs.some(a => a === "--manifest" || a === "--pos" || a === "--neg" || a === "--help" || a === "-h")) {
+      replayArgs = ["--manifest", join(ROOT, "wake_word_data", "manifest.jsonl"), ...replayArgs];
+    }
+    info("Scoring the real wake engine over recordings (stage 1)...");
+    run("cargo", ["run", "--release", "--quiet", "--example", "wake_replay", "--", ...replayArgs],
+      { cwd: join(ROOT, "src-tauri") });
+    return;
+  }
+
+  if (sub === "devices") {
+    // test_wake_live.py has no --devices flag; the device benchmark is its own script.
+    const devScript = join(ROOT, "scripts", "test_device_invariance.py");
+    if (!existsSync(devScript)) {
+      err("Device benchmark script not found: " + devScript);
+      process.exit(1);
+    }
+    info("Starting simulated microphone-profile benchmark...");
+    run(py, [devScript, ...process.argv.slice(4)], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "test" || sub === "live" || sub === "benchmark") {
     const testScript = join(ROOT, "scripts", "test_wake_live.py");
     if (!existsSync(testScript)) {
       err("Test script not found: " + testScript);
@@ -948,9 +1165,6 @@ function cmdWake() {
     const testArgs = process.argv.slice(4);
     if (sub === "benchmark" && !testArgs.includes("--batch")) {
       testArgs.push("--batch");
-    }
-    if (sub === "devices" && !testArgs.includes("--devices")) {
-      testArgs.push("--devices");
     }
     info("Starting wake word live tester / benchmark...");
     run(py, [testScript, ...testArgs], { cwd: ROOT });
@@ -965,6 +1179,18 @@ function cmdWake() {
     }
     info("Starting wake word neural classifier training...");
     run(py, [trainScript], { cwd: ROOT });
+    return;
+  }
+
+  if (sub === "synth" || sub === "synthesize") {
+    const synthScript = join(ROOT, "scripts", "synthesize_wake_accents.py");
+    if (!existsSync(synthScript)) {
+      err("Synth script not found: " + synthScript);
+      process.exit(1);
+    }
+    const synthArgs = process.argv.slice(4);
+    info("Starting multi-accent synthetic wake word generator (Alexa/Google standard)...");
+    run(py, [synthScript, ...synthArgs], { cwd: ROOT });
     return;
   }
 
@@ -999,9 +1225,12 @@ function cmdWake() {
     info("Usage:");
     info("  nexus wake probe                 (probe microphone hardware & calibrate acoustic profile)");
     info("  nexus wake test                  (real-time live microphone listening test)");
+    info("  nexus wake test --compare        (simultaneous wake test & live speech transcription comparison)");
     info("  nexus wake test --batch          (benchmark model against all 3,000 dataset WAVs)");
-    info("  nexus wake test --devices        (benchmark model across 5 hardware microphone profiles)");
+    info("  nexus wake devices               (benchmark model across 5 simulated microphone profiles)");
+    info("  nexus wake replay [--split test] (score the REAL Rust engine: recall, false fires/hour, thresholds)");
     info("  nexus wake train                 (train device-invariant wake neural model)");
+    info("  nexus wake synth                 (synthesize multi-accent training samples via neural TTS)");
     info("  nexus wake ingest                (ingest & screen open-source noise corpora)");
     info("  nexus wake record 300            (record 300 positive wake words)");
     info("  nexus wake record negative 100   (record 100 negative soundalikes)");
@@ -1098,11 +1327,17 @@ ${C.cyan}Environment:${C.reset}
   NEXUS_STT_PORT     STT port override (default: 39217)
 
 ${C.cyan}Notes:${C.reset}
-  • STT uses faster-whisper tiny.en (lazy-started Python sidecar on port 39217)
+  • STT uses Moonshine Streaming local fallback + Groq Whisper cloud primary (lazy Python sidecar on port 39217)
   • NLU server is lazy-started Python (BERT-Mini, model committed in repo)
-  • TTS uses Fish Audio (set API key in Settings) with Web Speech fallback
+  • TTS uses edge-tts (cloud) with local Kokoro fallback
   • Wake word uses openWakeWord (ONNX, pure Rust, model in repo)
 `);
+}
+
+function cmdTestWatch() {
+  const script = join(ROOT, "scripts", "test_watch_live.ps1");
+  const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, ...process.argv.slice(3)];
+  run("pwsh", args, { shell: false });
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
@@ -1116,6 +1351,7 @@ switch (command) {
   case "dev":     cmdDev(); break;
   case "start":
   case "run":     cmdRun(); break;
+  case "test-watch": cmdTestWatch(); break;
   case "check":   cmdCheck(); break;
   case "clean":   cmdClean(); break;
   case "worker":  cmdWorker(); break;
@@ -1123,6 +1359,8 @@ switch (command) {
   case "audit":   cmdAudit(); break;
   case "collect": cmdCollect(); break;
   case "wake":    cmdWake(); break;
+  // TEMPORARY: ghost voice-entry tracer (see cmdTraceGhost).
+  case "trace-ghost": cmdTraceGhost(); break;
   case "stats":
   case "status":
   case "coverage":
@@ -1132,6 +1370,10 @@ switch (command) {
     err("Usage: nexus mcp check");
     process.exit(1);
   case "data":    cmdData(); break;
+  case "--wake":
+  case "--setup":
+  case "--background":
+    cmdRun(); break;
   case "help":
   case "--help":
   case "-h":

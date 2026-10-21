@@ -38,18 +38,17 @@ html, body {
   position: relative;
   display: flex;
   flex-direction: column;
-  /* The blurred backdrop image is rendered by ::after (see below)
-     with a CSS opacity transition for smooth crossfading between live
-     capture frames. --sidebar-backdrop-image is set on <html> from JS
-     (PrListApp.tsx) when the "sidebar:backdrop" event arrives from Rust. */
-  background-color: rgba(20, 20, 22, 0.60);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background-color: var(--apple-surface-base, rgba(12, 12, 16, 0.72));
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid var(--apple-border-strong, rgba(255, 255, 255, 0.12));
   border-radius: 18px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
   padding: 14px 16px 8px 16px;
   gap: 10px;
   overflow: hidden;
   isolation: isolate;
+  color: var(--apple-text-primary, #ffffff);
 }
 
 /* Blurred backdrop layer — renders the live-capture JPEG behind all
@@ -62,8 +61,9 @@ html, body {
   position: absolute;
   inset: 0;
   border-radius: 18px;
-  background-color: rgba(8, 8, 10, 0.45);
-  background-image: var(--sidebar-backdrop-image, none);
+  background-image:
+    linear-gradient(180deg, rgba(8, 8, 10, 0.65) 0%, rgba(8, 8, 10, 0.45) 100%),
+    var(--sidebar-backdrop-image, none);
   background-size: cover;
   background-position: center;
   opacity: 1;

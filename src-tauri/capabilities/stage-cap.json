@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "stage-cap",
+  "description": "Capabilities for the NEXUS fullscreen stage window: invoke-only commands, heartbeat, hitbox updates, event listen/emit.",
+  "windows": ["stage"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-set-position",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close"
+  ]
+}

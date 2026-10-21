@@ -8,7 +8,10 @@ import {
   type OAuthStatus,
 } from "./oauth";
 import { VoiceEnrollment } from "./VoiceEnrollment";
-import { CURATED_VOICES, previewVoice, stopTts, type VoiceOption } from "../audio/ttsPlayer";
+import { identityBanner, type IdentityBanner } from "./identityBanner";
+import { CURATED_VOICES, previewVoice, stopTts, type VoiceOption, ICONIC_PERSONAS } from "../audio/ttsPlayer";
+import { initThemeSync } from "../sidebar/theme";
+import { globalHotkeyHint, globalHotkeyLabel } from "../platform";
 
 type Step = 0 | 1 | 2 | 3;
 const STEP_LABELS = ["Persona & Voice", "Permissions", "Preferences", "Accounts"];
@@ -17,11 +20,16 @@ export function SetupApp() {
   const [step, setStep] = useState<Step>(0);
   const [serverUrl, setServerUrl] = useState("");
   const [userId, setUserId] = useState("");
-  const [selectedVoice, setSelectedVoice] = useState<string>("en_US-amy-medium");
+  const [selectedVoice, setSelectedVoice] = useState<string>("en-GB-RyanNeural");
   const [playingVoice, setPlayingVoice] = useState<string | null>(null);
 
+  // Sync theme
+  useEffect(() => {
+    initThemeSync();
+  }, []);
+
   // Settings
-  const [hotkey] = useState("Ctrl+Super+Space");
+  const [hotkey] = useState(globalHotkeyLabel());
   const [wakeWordEnabled, setWakeWordEnabled] = useState(true);
   const [autostart, setAutostart] = useState(true);
   const [ttsVolume, setTtsVolume] = useState(75);
@@ -36,10 +44,17 @@ export function SetupApp() {
   // Accounts
   const [oauthStatus, setOauthStatus] = useState<Record<string, OAuthStatus>>({});
   const [connecting, setConnecting] = useState<string | null>(null);
+  // Feature 88: canonical laptop identity (claim handshake on Accounts step).
+  const [identity, setIdentity] = useState<{ state: string; reason?: string | null } | null>(null);
+  const [claiming, setClaiming] = useState(false);
   // connectingPhase: "opening" → browser is opening
   //                  "waiting" → browser is open, waiting for user to authorize
   //                  "done"    → connected successfully
   const [connectingPhase, setConnectingPhase] = useState<"opening" | "waiting" | "done">("opening");
+  // Learned identity (50% bootstrap): real profile fetched post-connect
+  // (token → provider API, never stored) + seeded into user.json gaps.
+  // Replaces the old hardcoded "nexus-assistant@google.com" subtitle.
+  const [learnedIdentity, setLearnedIdentity] = useState<Record<string, { name?: string; email?: string; picture?: string }>>({});
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -64,6 +79,17 @@ export function SetupApp() {
       .catch(() => {});
   }, []);
 
+  // Escape key discards/closes the setup window
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        invoke("close_setup_window", { firstRun: false }).catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
   // Auto-check mic permission when entering the Permissions step
   useEffect(() => {
     if (step === 1) {
@@ -85,8 +111,7 @@ export function SetupApp() {
   };
 
   const checkServer = useCallback(async () => {
-    if (!serverUrl || !userId) return;
-    setSidecarBaseUrl(serverUrl);
+    if (serverUrl) setSidecarBaseUrl(serverUrl);
     try {
       const status = await getOAuthStatus(userId);
       setOauthStatus(status);
@@ -99,6 +124,64 @@ export function SetupApp() {
   useEffect(() => {
     if (step === 3) checkServer();
   }, [step, checkServer]);
+
+  // Feature 88: claim the canonical profile when the Accounts step opens.
+  useEffect(() => {
+    if (step !== 3) return;
+    let cancelled = false;
+    setClaiming(true);
+    invoke<{ state: string; reason?: string | null }>("claim_profile")
+      .then((st) => { if (!cancelled) setIdentity(st); })
+      .catch((err) => {
+        console.warn("[NEXUS] setup: claim failed:", err);
+        if (!cancelled) setIdentity({ state: "provisional", reason: "offline" });
+      })
+      .finally(() => { if (!cancelled) setClaiming(false); });
+    return () => { cancelled = true; };
+  }, [step]);
+
+  // Post-connect identity learn (50% bootstrap): Worker token (never
+  // stored — passed straight to the provider API) → real profile →
+  // display + seed into user.json gaps via memory_seed_setup_identity.
+  // Worker-held tokens stay server-side; NOTHING here touches the local
+  // engine vault (documented no-bridge decision).
+  const fetchSetupIdentity = async (
+    provider: "google" | "github" | "swiggy",
+    base: string,
+    uid: string,
+  ): Promise<{ name?: string; email?: string; picture?: string } | null> => {
+    try {
+      const tokenResp = await fetch(
+        `${base}/oauth/${provider}-token?user_id=${encodeURIComponent(uid)}`,
+      );
+      if (!tokenResp.ok) return null;
+      const { token } = (await tokenResp.json()) as { token?: string };
+      if (!token) return null;
+      if (provider === "google") {
+        const u = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!u.ok) return null;
+        const j = (await u.json()) as { name?: string; email?: string; picture?: string };
+        const id = { name: j.name, email: j.email, picture: j.picture };
+        await invoke("memory_seed_setup_identity", { name: id.name ?? null, email: id.email ?? null, picture: id.picture ?? null }).catch(() => {});
+        return id;
+      }
+      if (provider === "github") {
+        const u = await fetch("https://api.github.com/user", {
+          headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+        });
+        if (!u.ok) return null;
+        const j = (await u.json()) as { login?: string; name?: string; email?: string; avatar_url?: string };
+        const id = { name: j.name ?? j.login, email: j.email, picture: j.avatar_url };
+        await invoke("memory_seed_setup_identity", { name: id.name ?? null, email: id.email ?? null, picture: id.picture ?? null }).catch(() => {});
+        return id;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  };
 
   const handleConnect = async (provider: "google" | "github" | "swiggy") => {
     // Fallback: if serverUrl hasn't loaded yet, try loading it now
@@ -138,6 +221,10 @@ export function SetupApp() {
       setConnectingPhase("done");
       await checkServer();
       console.log(`[Setup] ${provider} connected successfully`);
+      // Learn who the user is from the fresh connection (never blocks).
+      void fetchSetupIdentity(provider, url, userId).then((id) => {
+        if (id) setLearnedIdentity((prev) => ({ ...prev, [provider]: id }));
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[Setup] ${provider} connection failed:`, msg, err);
@@ -275,12 +362,17 @@ export function SetupApp() {
       const updated = {
         ...current,
         ttsVoice: selectedVoice,
+        edgeTtsVoice: selectedVoice,
         hotkey,
         wakeWordEnabled,
         autostart,
         ttsVolume,
       };
       await invoke("save_settings", { settings: updated });
+      const persona = ICONIC_PERSONAS.find((p) => p.cloudId === selectedVoice);
+      if (persona) {
+        invoke("set_voice_preference", { voiceKey: persona.key }).catch(() => {});
+      }
     } catch (e) {
       console.warn("Failed to persist settings:", e);
     }
@@ -308,6 +400,28 @@ export function SetupApp() {
 
   return (
     <div className="setup-root">
+      {/* Window Drag Titlebar */}
+      <div data-tauri-drag-region className="setup-window-titlebar">
+        <span style={{ fontSize: "11px", fontWeight: 600, opacity: 0.65, letterSpacing: "0.5px" }}>NEXUS SETUP</span>
+        <button
+          type="button"
+          onClick={() => invoke("close_setup_window", { firstRun: false }).catch(() => {})}
+          style={{
+            background: "none",
+            border: "none",
+            color: "var(--nx-text-secondary)",
+            cursor: "pointer",
+            padding: "4px 8px",
+            fontSize: "14px",
+            lineHeight: 1,
+            borderRadius: "6px",
+          }}
+          title="Close (Esc)"
+        >
+          ✕
+        </button>
+      </div>
+
       {error && <div className="setup-error">{error}</div>}
 
       <div style={{ flex: 1 }}>
@@ -550,10 +664,10 @@ export function SetupApp() {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px", border: "1px solid var(--nx-border)", borderRadius: "8px" }}>
                     <div>
                       <div style={{ fontWeight: 600, fontSize: "var(--nx-text-sm)" }}>Global Hotkey</div>
-                      <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)" }}>Ctrl+Super+Space — instantly wake/toggle assistant</div>
+                      <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)" }}>{globalHotkeyHint("Ctrl+Space — instantly wake/toggle assistant")}</div>
                     </div>
                     <div style={{ padding: "6px 10px", fontSize: "var(--nx-text-xs)", border: "1px solid var(--nx-border)", borderRadius: "6px", width: "140px", textAlign: "center", color: "var(--nx-text-secondary)", background: "var(--nx-surface-2)" }}>
-                      Ctrl+Super+Space
+                      {globalHotkeyLabel()}
                     </div>
                   </div>
 
@@ -634,6 +748,30 @@ export function SetupApp() {
                 <div className="installer-title">Connect Integrations</div>
                 <div className="installer-subtitle">Connect your app accounts before you proceed.</div>
 
+                {(() => {
+                  if (claiming && !identity) return null;
+                  const banner: IdentityBanner | null = identity ? identityBanner(identity) : null;
+                  if (!banner) return null;
+                  const colors: Record<IdentityBanner["tone"], { bg: string; border: string; fg: string }> = {
+                    amber: { bg: "rgba(251,191,36,0.10)", border: "rgba(251,191,36,0.45)", fg: "#fbbf24" },
+                    green: { bg: "rgba(34,197,94,0.10)", border: "rgba(34,197,94,0.45)", fg: "#22c55e" },
+                    red: { bg: "rgba(239,68,68,0.10)", border: "rgba(239,68,68,0.45)", fg: "#ef4444" },
+                    dim: { bg: "rgba(148,163,184,0.08)", border: "rgba(148,163,184,0.35)", fg: "#94a3b8" },
+                  };
+                  const c = colors[banner.tone];
+                  return (
+                    <div
+                      style={{
+                        marginTop: 12, padding: "10px 14px", borderRadius: 10, textAlign: "left",
+                        background: c.bg, border: `1px solid ${c.border}`, color: c.fg,
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{banner.title}</div>
+                      <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>{banner.subtitle}</div>
+                    </div>
+                  );
+                })()}
+
                 <div className="installer-list">
                   <div className="installer-list-item" onClick={() => !oauthStatus.google?.connected && connecting !== "google" && handleConnect("google")}>
                     <div className="installer-icon-circle">
@@ -657,7 +795,9 @@ export function SetupApp() {
                         {connecting === "google" && connectingPhase === "opening" && "Opening Google..."}
                         {connecting === "google" && connectingPhase === "waiting" && "Waiting for authorization..."}
                         {connecting === "google" && connectingPhase === "done" && "Connected!"}
-                        {connecting !== "google" && (oauthStatus.google?.connected ? "nexus-assistant@google.com" : "Gmail, Calendar & Meet")}
+                        {connecting !== "google" && (oauthStatus.google?.connected
+                          ? (learnedIdentity.google?.email ?? learnedIdentity.google?.name ?? "Connected — learning who you are…")
+                          : "Gmail, Calendar & Meet (powers Worker cloud features)")}
                       </div>
                     </div>
                     {!oauthStatus.google?.connected && connecting !== "google" && (
@@ -689,7 +829,9 @@ export function SetupApp() {
                         {connecting === "github" && connectingPhase === "opening" && "Opening GitHub..."}
                         {connecting === "github" && connectingPhase === "waiting" && "Waiting for authorization..."}
                         {connecting === "github" && connectingPhase === "done" && "Connected!"}
-                        {connecting !== "github" && (oauthStatus.github?.connected ? "GitHub User" : "Click to connect — opens GitHub in browser")}
+                        {connecting !== "github" && (oauthStatus.github?.connected
+                          ? (learnedIdentity.github?.name ?? learnedIdentity.github?.email ?? "Connected — learning who you are…")
+                          : "Code, PRs & repos (powers Worker cloud features)")}
                       </div>
                     </div>
                     {!oauthStatus.github?.connected && connecting !== "github" && (
@@ -702,6 +844,41 @@ export function SetupApp() {
                     )}
                   </div>
                 </div>
+
+                {/* What NEXUS learned (50% bootstrap): real identity from
+                    each connection, source-tagged, audit-visible. Phone and
+                    address appear only if shared in your Google Account. */}
+                {(learnedIdentity.google || learnedIdentity.github) && (
+                  <div className="installer-learned">
+                    <div className="installer-learned-title">What NEXUS learned about you</div>
+                    {learnedIdentity.google && (
+                      <div className="installer-learned-row">
+                        {learnedIdentity.google.picture && (
+                          <img src={learnedIdentity.google.picture} alt="" className="installer-learned-avatar" />
+                        )}
+                        <span>
+                          {learnedIdentity.google.name ?? learnedIdentity.google.email ?? "Google account"}
+                          {learnedIdentity.google.email && learnedIdentity.google.name ? ` · ${learnedIdentity.google.email}` : ""}
+                          {" — from Google"}
+                        </span>
+                      </div>
+                    )}
+                    {learnedIdentity.github && (
+                      <div className="installer-learned-row">
+                        {learnedIdentity.github.picture && (
+                          <img src={learnedIdentity.github.picture} alt="" className="installer-learned-avatar" />
+                        )}
+                        <span>
+                          {learnedIdentity.github.name ?? learnedIdentity.github.email ?? "GitHub account"}
+                          {" — from GitHub"}
+                        </span>
+                      </div>
+                    )}
+                    <div className="installer-learned-note">
+                      Stored on this device only. Review anytime: “what do you remember about me”.
+                    </div>
+                  </div>
+                )}
 
                 <button className="installer-btn-proceed" onClick={handleFinish}>
                   Proceed

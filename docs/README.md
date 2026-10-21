@@ -128,3 +128,6 @@ If you are exploring the codebase or contributing a new feature, follow this rea
 | **Local NLU Server** | `49152` | `nlu_server.py` (FastAPI + ONNX) | 55-intent classification and BIO slot extraction (BERT-Mini) |
 | **Admin Brain (Admin only)** | `39219` | `brain_server.py` (llama.cpp / Qwen) | Local reasoning, compound command planning, and phrasings generation |
 | **Cloudflare Worker** | Cloud | `server/worker/` (Cloudflare TypeScript) | OAuth token exchange, D1 credential storage, 9Router LLM cascade, and R2 model OTA |
+
+## Memory Core
+Organised guide to the on-device memory, Google sign-in changes and the WhatsApp watcher: [memory-core/README.md](memory-core/README.md)

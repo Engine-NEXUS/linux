@@ -54,6 +54,15 @@
     "order_food",
     "search_product",
     "send_whatsapp_message",
+    "ghost_mode_enter",
+    "ghost_mode_exit",
+    "start_dictation",
+    "stop_dictation",
+    "watch_screen_email",
+    "browser_tab",
+    "browser_close_tab",
+    "browser_search_focus",
+    "screen_analysis",
     "unknown"
   ],
   "slots": [

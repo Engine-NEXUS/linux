@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "hand-cap",
+  "description": "Hand mode camera window: sends landmarks to Rust and listens for HUD state. No window or shell permissions.",
+  "windows": ["hand"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-emit",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

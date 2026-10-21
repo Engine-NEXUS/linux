@@ -58,7 +58,7 @@ class NluFoundationTests(unittest.TestCase):
                 )
             finally:
                 nlu.STAGING_DIR = original
-            self.assertTrue(any("leaks into frozen evaluation" in error for error in errors))
+            self.assertTrue(any("leaks into validation, calibration, or final-test" in error for error in errors))
 
 
 class WakeFoundationTests(unittest.TestCase):

@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../frontend/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "sh -c '[ -f ../frontend/package.json ] && npm --prefix ../frontend run dev || npm --prefix frontend run dev'",
-    "beforeBuildCommand": ""
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -20,47 +20,58 @@
     },
     "security": {
       "csp": "default-src 'self'; connect-src 'self' wss: https: ipc: http://ipc.localhost; media-src 'self' blob: data: https: http:; img-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:",
-      "capabilities": ["main-cap", "sidebar-cap", "architect-cap", "loading-cap", "pr-list-cap"],
+      "capabilities": ["setup-settings-cap", "sidebar-cap", "settings-sidebar-cap", "stage-cap", "global-shortcut-cap"],
       "assetProtocol": { "enable": false }
     },
     "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
-    "targets": ["deb"],
+    "targets": "all",
     "resources": [
       "resources/oww/**/*",
-      "resources/espeak-ng-data/**/*",
+      "resources/vad/*",
+      "resources/smart_turn/*",
       "resources/server/stt_server.py",
       "resources/server/nlu_server.py",
-      "resources/server/ocr_server.py",
-
-      "resources/server/atspi_server.py",
-      "resources/server/cdp_server.py",
       "resources/server/nlu/requirements.txt",
       "resources/server/nlu/model/nexus_nlu.onnx",
       "resources/server/nlu/model/nexus_nlu.onnx.data",
       "resources/server/nlu/model/labels.json",
       "resources/server/nlu/model/tokenizer/*",
-      "resources/piper/en_US-amy-medium.onnx",
-      "resources/piper/en_US-amy-medium.onnx.json"
+      "resources/agent_watch_sidecar/server.cjs",
+      "resources/agent_watch_sidecar/package.json"
     ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
-      "icons/128x128@2x.png"
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
     ],
-    "linux": {
-      "deb": {
-        "depends": [
-          "libwebkit2gtk-4.1-0",
-          "libgtk-3-0",
-          "libayatana-appindicator3-1",
-          "librsvg2-2",
-          "libasound2",
-          "libssl3"
-        ]
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "template": "installer/nexus-installer.nsi",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "installerIcon": "icons/icon.ico",
+        "compression": "lzma",
+        "displayLanguageSelector": false
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
       }
+    },
+    "macOS": {
+      "signingIdentity": "Developer ID Application: YOUR_TEAM",
+      "providerShortName": "NEXUS",
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
+    },
+    "linux": {
+      "appimage": { "bundleMediaFramework": true }
     },
     "copyright": "© 2026 NEXUS",
     "category": "Productivity",

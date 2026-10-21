@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NEXUS Voice Orb — Complete State & Thinking Morphology Gallery (12 Designs)</title>
+  <style>
+    :root {
+      --bg: #07080c;
+      --card-bg: rgba(16, 18, 27, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --accent: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      padding: 24px;
+      overflow-x: hidden;
+    }
+    header {
+      max-width: 1560px;
+      margin: 0 auto 20px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .title-area h1 {
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(135deg, #fff 40%, #c084fc 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .title-area p {
+      color: var(--text-muted);
+      font-size: 14px;
+      margin-top: 4px;
+    }
+    .global-controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 6px 12px;
+      border-radius: 100px;
+      border: 1px solid var(--card-border);
+    }
+    .state-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 6px 14px;
+      border-radius: 100px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .state-btn:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.06);
+    }
+    .state-btn.active {
+      color: #fff;
+      background: var(--accent);
+      box-shadow: 0 0 16px rgba(168, 85, 247, 0.45);
+    }
+
+    .audio-sim-bar {
+      max-width: 1560px;
+      margin: 0 auto 24px;
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      font-size: 13px;
+    }
+    .audio-sim-bar input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent);
+    }
+
+    .filter-tabs {
+      max-width: 1560px;
+      margin: 0 auto 20px;
+      display: flex;
+      gap: 8px;
+    }
+    .filter-btn {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .filter-btn.active {
+      background: rgba(168, 85, 247, 0.2);
+      border-color: var(--accent);
+      color: #fff;
+    }
+
+    .gallery-grid {
+      max-width: 1560px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 24px;
+    }
+
+    .design-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 18px;
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      backdrop-filter: blur(20px);
+    }
+    .design-card:hover {
+      border-color: rgba(168, 85, 247, 0.5);
+      transform: translateY(-3px);
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+    .number-badge {
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--accent);
+      background: rgba(168, 85, 247, 0.12);
+      border: 1px solid rgba(168, 85, 247, 0.3);
+      padding: 2px 10px;
+      border-radius: 8px;
+      letter-spacing: -0.5px;
+    }
+    .design-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .design-tag {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #c084fc;
+      margin-top: 2px;
+      font-weight: 600;
+    }
+    .canvas-container {
+      width: 100%;
+      height: 280px;
+      background: radial-gradient(circle at center, rgba(35, 26, 52, 0.45) 0%, rgba(9, 10, 15, 0.85) 70%, transparent 100%);
+      border-radius: 14px;
+      margin-bottom: 14px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .state-indicator {
+      position: absolute;
+      top: 10px;
+      right: 12px;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 100px;
+      background: rgba(0,0,0,0.65);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      color: #e2e8f0;
+      letter-spacing: 0.3px;
+    }
+    .state-diff-box {
+      font-size: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 12px;
+      line-height: 1.45;
+    }
+    .state-diff-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+    .state-diff-row:last-child { margin-bottom: 0; }
+    .diff-label {
+      font-weight: 600;
+      color: #d8b4fe;
+      min-width: 68px;
+    }
+    .diff-desc {
+      color: #94a3b8;
+    }
+    .card-desc {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.5;
+      margin-bottom: 14px;
+      flex-grow: 1;
+    }
+    .copy-pick-btn {
+      margin-top: 8px;
+      width: 100%;
+      padding: 10px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--card-border);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+    .copy-pick-btn:hover {
+      background: var(--accent);
+      border-color: var(--accent);
+      box-shadow: 0 0 16px rgba(168, 85, 247, 0.5);
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="title-area">
+      <h1>NEXUS Voice Orb — Complete State & Thinking Morphology Gallery (12 Unique Designs)</h1>
+      <p>Every design features distinctive Thinking, Speaking, and Listening mechanics so you can choose the perfect combination</p>
+    </div>
+    <div class="global-controls">
+      <span style="font-size: 12px; color: var(--text-muted); margin-right: 4px;">Global State:</span>
+      <button class="state-btn" onclick="setGlobalState('idle')">Idle</button>
+      <button class="state-btn" onclick="setGlobalState('listening')">Listening</button>
+      <button class="state-btn active" onclick="setGlobalState('thinking')">Thinking</button>
+      <button class="state-btn" onclick="setGlobalState('speaking')">Speaking</button>
+    </div>
+  </header>
+
+  <div class="audio-sim-bar">
+    <span style="font-weight: 600;">Simulate Speech / Audio Reactivity:</span>
+    <input type="range" id="audioSlider" min="0" max="1" step="0.01" value="0.30" oninput="updateAudio(this.value)">
+    <span id="audioVal" style="font-family: monospace; color: var(--accent);">0.30</span>
+    <button style="background: rgba(255,255,255,0.06); border: 1px solid var(--card-border); color: #fff; padding: 4px 12px; border-radius: 6px; cursor: pointer;" onclick="toggleAudioPulse()">
+      🎵 Auto-Pulse Beat
+    </button>
+  </div>
+
+  <div class="gallery-grid" id="galleryGrid"></div>
+
+  <script>
+    const PARTICLE_COUNT = 3800;
+    let currentState = 'thinking';
+    let audioLevel = 0.30;
+    let autoPulse = false;
+
+    // 12 Distinct Mathematical Formulations
+    const DESIGNS = [
+      {
+        id: 1,
+        name: "Canonical Torus Ribbon Knot",
+        tag: "v2.mp4 Frame 03 Reference",
+        thinkTitle: "Parametric (p=2, q=3) Woven Knot",
+        listenTitle: "Acoustic Inward Suction Vortex",
+        speakTitle: "Fluid Droplet with Teardrop Sag",
+        desc: "The canonical closed continuous 3D ribbon loop from the v2 design video. Elegant, perfectly woven without seams.",
+        type: "torus_knot"
+      },
+      {
+        id: 2,
+        name: "64-Strand Fibonacci Neural Starburst",
+        tag: "Complex Organic Tendrils",
+        thinkTitle: "Curling Fibonacci Ribbon Tendrils",
+        listenTitle: "Contracted Tight Amber Core",
+        speakTitle: "Pulsating Organic Biomorphic Blossom",
+        desc: "Dense glowing stardust core branching into 64 curling harmonic ribbons that twist and intertwine as thoughts synthesize.",
+        type: "neural_starburst"
+      },
+      {
+        id: 3,
+        name: "Mobius Infinity Ribbon (Dual Lobe)",
+        tag: "Topological Figure-8 Loop",
+        thinkTitle: "Continuous Twisted Lemniscate in 3D",
+        listenTitle: "Bipolar Orbiting Stardust Rings",
+        speakTitle: "Audio-Oscillating Double Droplet",
+        desc: "Figure-8 infinity loop with continuous surface twist. Particles stream indefinitely through the center cross-over point.",
+        type: "mobius_infinity"
+      },
+      {
+        id: 4,
+        name: "Quantum Multi-Axis Gyro Rings",
+        tag: "Kinetic AI Core / Arc Reactor",
+        thinkTitle: "3 Orthogonal Concentric Gimbal Rings",
+        listenTitle: "High-Frequency Atomic Resonance",
+        speakTitle: "Expanding Sonic Shockwave Shells",
+        desc: "Three high-speed orthogonal orbital rings spinning on independent axes around a dense, high-frequency pulsating core.",
+        type: "quantum_gyro"
+      },
+      {
+        id: 5,
+        name: "Accretion Vortex Spiral",
+        tag: "Cosmic Gravitational Swirl",
+        thinkTitle: "Logarithmic Triple-Arm Galaxy Spiral",
+        listenTitle: "Inward Event-Horizon Suction",
+        speakTitle: "Rotational Pulsar Flare Ejections",
+        desc: "Galaxy-style logarithmic spiral arms with vertical wave displacement swirling toward an internal gravitational sink.",
+        type: "accretion_vortex"
+      },
+      {
+        id: 6,
+        name: "Trefoil Interwoven Celtic Helix",
+        tag: "Tri-Lobe Geometric Cage",
+        thinkTitle: "3 Braided Helical Rings at 120°",
+        listenTitle: "Triangular Resonating Prism",
+        speakTitle: "Tri-Lobe Pulsating Heart Chamber",
+        desc: "Three interwoven orbital ribbons intersecting symmetrically, creating a geometric rotating cage of pure thought.",
+        type: "trefoil_cage"
+      },
+      {
+        id: 7,
+        name: "Double DNA Helix Cascade",
+        tag: "Organic Genetic Wave",
+        thinkTitle: "Braided Counter-Rotating Double Helix",
+        listenTitle: "Compressed Cylinder Breathing",
+        speakTitle: "Longitudinal Speech Compression Waves",
+        desc: "Two interconnected helical particle strands revolving in opposite phase with cross-linking stardust rungs.",
+        type: "dna_helix"
+      },
+      {
+        id: 8,
+        name: "Hyper-Dimensional Tesseract Cage",
+        tag: "4D Projection Wireframe",
+        thinkTitle: "Rotating Hypercube Inversion Loop",
+        listenTitle: "Isometric Crystal Lensing",
+        speakTitle: "Polyhedral Audio Pulse Lattice",
+        desc: "Particles map to vertices and edges of an 8-cell 4D hypercube undergoing continuous stereographic 3D rotation.",
+        type: "tesseract_4d"
+      },
+      {
+        id: 9,
+        name: "Bioluminescent Jellyfish Bell",
+        tag: "Deep-Sea Hydrodynamic Ripple",
+        thinkTitle: "Pulsating Fluid Umbrella Bell + Trails",
+        listenTitle: "Surface Tension Inward Inversion",
+        speakTitle: "Expanding Radial Tentacle Pulses",
+        desc: "Organic mushroom bell dome with harmonic wave ripples and delicate trailing stardust tendrils undulating in deep zero-gravity.",
+        type: "hydro_jellyfish"
+      },
+      {
+        id: 10,
+        name: "Supernova Magnetic Dynamo",
+        tag: "Dipole Plasma Field Lines",
+        thinkTitle: "3D Toroidal Dipole Magnetic Field Lines",
+        listenTitle: "Polar Convergence Streams",
+        speakTitle: "Equatorial Plasma Bursts",
+        desc: "Particles follow magnetic flux loops looping out from the north pole and wrapping symmetrically into the south pole.",
+        type: "magnetic_dynamo"
+      },
+      {
+        id: 11,
+        name: "Crystalline Geodesic Icosahedron",
+        tag: "Sacred Geometry Facets",
+        thinkTitle: "Expanding & Inverting Sacred Polyhedron",
+        listenTitle: "Rigid Faceted Diamond Shell",
+        speakTitle: "Acoustic Facet Extrusions",
+        desc: "Golden-ratio geodesic polyhedron with 20 triangular faces that breathe, invert, and interlock during cognitive reasoning.",
+        type: "geodesic_crystal"
+      },
+      {
+        id: 12,
+        name: "Solar Nebula / Planetary Ring System",
+        tag: "Celestial Orbital Mechanics",
+        thinkTitle: "Tilted Saturnian Rings with Core Sun",
+        listenTitle: "Infalling Comet Streamers",
+        speakTitle: "Solar Flare Audio Coronal Mass Ejection",
+        desc: "Brilliant glowing central star surrounded by multiple concentric elliptical particle rings with realistic orbital precession.",
+        type: "solar_nebula"
+      }
+    ];
+
+    // Build Cards
+    const grid = document.getElementById('galleryGrid');
+    DESIGNS.forEach(d => {
+      const card = document.createElement('div');
+      card.className = 'design-card';
+      card.innerHTML = `
+        <div class="card-header">
+          <div>
+            <div class="design-title">${d.name}</div>
+            <div class="design-tag">${d.tag}</div>
+          </div>
+          <span class="number-badge">#${d.id}</span>
+        </div>
+        <div class="canvas-container">
+          <canvas id="canvas_${d.id}"></canvas>
+          <div class="state-indicator" id="state_${d.id}">THINKING</div>
+        </div>
+        <div class="state-diff-box">
+          <div class="state-diff-row"><span class="diff-label">Thinking:</span><span class="diff-desc">${d.thinkTitle}</span></div>
+          <div class="state-diff-row"><span class="diff-label">Listening:</span><span class="diff-desc">${d.listenTitle}</span></div>
+          <div class="state-diff-row"><span class="diff-label">Speaking:</span><span class="diff-desc">${d.speakTitle}</span></div>
+        </div>
+        <div class="card-desc">${d.desc}</div>
+        <button class="copy-pick-btn" onclick="chooseDesign(${d.id})">
+          ✨ Choose Design #${d.id}
+        </button>
+      `;
+      grid.appendChild(card);
+    });
+
+    // Vertex Shader Generator per Design Type
+    function getVertexShader(designType) {
+      return `
+        precision highp float;
+        attribute vec4 a_position; // sphere pos (xyz) + seed (w)
+        uniform float u_time;
+        uniform float u_state_idle;
+        uniform float u_state_listen;
+        uniform float u_state_think;
+        uniform float u_state_speak;
+        uniform float u_audio;
+        varying float v_depth;
+        varying float v_spark;
+
+        #define PI 3.14159265359
+
+        vec3 turn(vec3 p, float a) {
+          float c = cos(a), s = sin(a);
+          return vec3(p.x*c + p.z*s, p.y, -p.x*s + p.z*c);
+        }
+        vec3 rotateX(vec3 p, float a) {
+          float c = cos(a), s = sin(a);
+          return vec3(p.x, p.y*c - p.z*s, p.y*s + p.z*c);
+        }
+        vec3 rotateY(vec3 p, float a) {
+          float c = cos(a), s = sin(a);
+          return vec3(p.x*c + p.z*s, p.y, -p.x*s + p.z*c);
+        }
+        vec3 rotateZ(vec3 p, float a) {
+          float c = cos(a), s = sin(a);
+          return vec3(p.x*c - p.y*s, p.x*s + p.y*c, p.z);
+        }
+
+        float hash(vec3 p) {
+          p = fract(p*0.3183099+0.1);
+          p *= 17.0;
+          return fract(p.x*p.y*p.z*(p.x+p.y+p.z));
+        }
+        float noise(vec3 x) {
+          vec3 p = floor(x);
+          vec3 w = fract(x);
+          vec3 u = w*w*(3.0-2.0*w);
+          float n = p.x + p.y*157.0 + 113.0*p.z;
+          return mix(mix(mix(hash(p+vec3(0,0,0)),hash(p+vec3(1,0,0)),u.x),
+                         mix(hash(p+vec3(0,1,0)),hash(p+vec3(1,1,0)),u.x),u.y),
+                     mix(mix(hash(p+vec3(0,0,1)),hash(p+vec3(1,0,1)),u.x),
+                         mix(hash(p+vec3(0,1,1)),hash(p+vec3(1,1,1)),u.x),u.y),u.z);
+        }
+
+        void main() {
+          vec3 n = a_position.xyz;
+          float seed = a_position.w;
+          float t = u_time;
+
+          // 1. BASE IDLE
+          float idleBreath = 0.94 + 0.06*sin(t*1.8 + seed*6.28);
+          vec3 p_idle = turn(n, t*0.12) * idleBreath;
+
+          // 2. LISTENING & SPEAKING VARIANTS
+          vec3 p_listen = vec3(0.0);
+          vec3 p_speak = vec3(0.0);
+          vec3 p_think = vec3(0.0);
+
+          #if ${designType === 'torus_knot' ? 1 : 0}
+            // #1 Torus Knot
+            float ku = seed * 2.0 * PI;
+            float kv = fract(seed * 43.17) * 2.0 - 1.0;
+            float kw = fract(seed * 91.23) * 2.0 - 1.0;
+            float knotR = 0.88 * (1.0 + 0.38*cos(3.0*ku + t*0.40));
+            vec3 knotC = vec3(knotR * cos(2.0*ku + t*0.26), knotR * sin(2.0*ku + t*0.26), -0.54 * sin(3.0*ku + t*0.40));
+            vec3 knotT = normalize(vec3(-2.0*knotR*sin(2.0*ku), 2.0*knotR*cos(2.0*ku), -1.62*cos(3.0*ku)));
+            vec3 knotN = normalize(cross(knotT, vec3(0.0, 0.0, 1.0)) + 0.0001);
+            vec3 knotB = cross(knotT, knotN);
+            float ribbonW = 0.24 * (0.85 + 0.15*sin(ku*4.0 + t));
+            p_think = turn(rotateX(knotC + knotN*(kv*ribbonW) + knotB*(kw*0.04), 0.2*sin(t*0.3)), t*0.42);
+            // Listen & Speak
+            p_listen = turn(n, t*0.18) * (0.95 - u_audio*0.15*sin(seed*20.0 + t*8.0));
+            float fluidN = noise(n*1.2 + vec3(t*0.3, -t*0.2, t*0.15));
+            p_speak = turn(n, t*0.22) * (1.0 + 0.15*fluidN + (0.25*u_audio)*fluidN - 0.12*clamp(-n.y, 0.0, 1.0));
+
+          #elif ${designType === 'neural_starburst' ? 1 : 0}
+            // #2 Neural Starburst
+            float sId = floor(seed * 64.0);
+            float sAlong = fract(seed * 64.0);
+            float sy = 1.0 - 2.0*(sId + 0.5)/64.0;
+            float sr = sqrt(max(0.0, 1.0 - sy*sy));
+            float sang = sId * 2.399963;
+            vec3 sDir = vec3(sr*cos(sang), sy, sr*sin(sang));
+            vec3 perp1 = normalize(cross(sDir, vec3(0.0, 1.0, 0.0)) + 0.0001);
+            float reach = pow(sAlong, 1.6);
+            float curl = sin(sAlong*8.0 + sId + t*1.2)*0.45;
+            p_think = turn((sDir * reach * 1.85 + perp1 * curl * reach), t*0.35);
+            // Listen: dense core
+            p_listen = turn(n, t*0.2) * (0.75 + u_audio*0.1*sin(t*12.0));
+            // Speak: blossom
+            float bloom = sin(length(n.xy)*6.0 - t*3.0) * 0.25 * u_audio;
+            p_speak = turn(n * (1.1 + bloom), t*0.15);
+
+          #elif ${designType === 'mobius_infinity' ? 1 : 0}
+            // #3 Mobius Infinity
+            float u = seed * 4.0 * PI;
+            float v = fract(seed * 71.3) * 0.25 - 0.125;
+            float scale = 1.25 / (1.0 + sin(u*0.5)*sin(u*0.5));
+            vec3 infC = vec3(scale * cos(u*0.5), scale * sin(u*0.5) * cos(u*0.5), 0.35 * sin(u + t*0.8));
+            vec3 infN = vec3(-sin(u*0.5), cos(u*0.5), 0.5*cos(u));
+            p_think = turn(rotateZ(infC + normalize(infN)*v, 0.3*sin(t*0.5)), t*0.45);
+            // Listen: dual rings
+            float lobe = sign(n.x);
+            p_listen = turn(vec3(n.x*0.6 + lobe*0.5, n.y*0.8, n.z*0.8), t*0.25) * (0.9 + u_audio*0.2);
+            p_speak = turn(n, t*0.2) * (1.0 + 0.3*u_audio*sin(u*3.0 - t*6.0));
+
+          #elif ${designType === 'quantum_gyro' ? 1 : 0}
+            // #4 Quantum Gyro
+            float ring = floor(seed * 3.0);
+            float a = fract(seed * 3.0) * 2.0 * PI;
+            vec3 rP = vec3(cos(a), sin(a), (fract(seed*123.0)-0.5)*0.10);
+            if (ring == 0.0) rP = rotateX(rP, t*1.2);
+            if (ring == 1.0) rP = rotateY(rP, t*1.5);
+            if (ring == 2.0) rP = rotateZ(rP, t*0.9);
+            if (seed < 0.20) rP = n * 0.40 * (0.9 + 0.1*sin(t*4.0));
+            p_think = turn(rP * 1.15, t*0.2);
+            // Listen: high freq spin
+            p_listen = turn(n, t*0.8) * (0.85 + u_audio*0.2*sin(t*15.0));
+            // Speak: expanding shells
+            float shell = fract(t*2.0 + seed*2.0);
+            p_speak = turn(n * (0.7 + shell*0.6*u_audio), t*0.2);
+
+          #elif ${designType === 'accretion_vortex' ? 1 : 0}
+            // #5 Vortex Spiral
+            float prog = fract(seed * 3.0);
+            float sR = pow(prog, 0.65) * 1.55;
+            float sA = prog * 6.28 * 2.0 + floor(seed*3.0)*(2.0*PI/3.0) - t*1.6;
+            p_think = turn(rotateX(vec3(sR*cos(sA), sR*sin(sA), (prog-0.5)*0.45*cos(sA)), 0.5), t*0.3);
+            p_listen = turn(n * (0.8 - prog*0.2*u_audio), t*prog*2.0);
+            p_speak = turn(n * (1.0 + 0.3*u_audio*cos(sA*2.0)), t*0.4);
+
+          #elif ${designType === 'trefoil_cage' ? 1 : 0}
+            // #6 Trefoil Celtic Cage
+            float strand = floor(seed * 3.0);
+            float ang = fract(seed * 3.0) * 2.0 * PI;
+            float phase = strand * (2.0*PI/3.0);
+            float R = 0.95 + 0.15*cos(3.0*ang + t*1.2);
+            vec3 ringPos = vec3(R*cos(ang + t*0.5), R*sin(ang + t*0.5), 0.35*sin(2.0*ang + phase));
+            if (strand == 1.0) ringPos = rotateX(ringPos, 1.05);
+            if (strand == 2.0) ringPos = rotateZ(ringPos, 1.05);
+            p_think = turn(ringPos + n*0.06, t*0.3);
+            p_listen = turn(n * (0.9 + 0.1*cos(3.0*ang)), t*0.25);
+            p_speak = turn(n * (1.0 + 0.25*u_audio*sin(phase - t*5.0)), t*0.2);
+
+          #elif ${designType === 'dna_helix' ? 1 : 0}
+            // #7 DNA Helix
+            float strand = floor(seed * 2.0);
+            float hZ = (fract(seed * 2.0) - 0.5) * 2.4;
+            float hAng = hZ * 3.5 + t*1.5 + strand*PI;
+            float hR = 0.65 + 0.1*sin(t*2.0);
+            vec3 helixP = vec3(hR*cos(hAng), hZ, hR*sin(hAng));
+            if (fract(seed*17.0) < 0.25) helixP.xz *= fract(seed*33.0); // rungs
+            p_think = turn(rotateX(helixP, 0.4), t*0.35);
+            p_listen = vec3(n.x*0.7, n.y*1.2, n.z*0.7) * (0.9 + u_audio*0.15*sin(t*6.0));
+            p_speak = turn(n * (1.0 + 0.25*u_audio*cos(hZ*6.0 - t*8.0)), t*0.2);
+
+          #elif ${designType === 'tesseract_4d' ? 1 : 0}
+            // #8 Tesseract 4D
+            float vId = floor(seed * 16.0);
+            float x4 = mod(vId, 2.0)*2.0 - 1.0;
+            float y4 = mod(floor(vId/2.0), 2.0)*2.0 - 1.0;
+            float z4 = mod(floor(vId/4.0), 2.0)*2.0 - 1.0;
+            float w4 = mod(floor(vId/8.0), 2.0)*2.0 - 1.0;
+            float ang4 = t * 0.8;
+            float rx = x4*cos(ang4) - w4*sin(ang4);
+            float rw = x4*sin(ang4) + w4*cos(ang4);
+            float pers = 1.0 / (2.2 - rw*0.5);
+            vec3 tessP = vec3(rx, y4, z4) * pers * 1.3 + n*0.08;
+            p_think = turn(tessP, t*0.3);
+            p_listen = turn(n * (0.85 + u_audio*0.2), t*0.4);
+            p_speak = turn(n * (1.0 + 0.3*u_audio*rw), t*0.2);
+
+          #elif ${designType === 'hydro_jellyfish' ? 1 : 0}
+            // #9 Hydro Jellyfish
+            float isBell = step(0.35, seed);
+            float waveJ = sin(seed*25.0 - t*3.0);
+            vec3 bellP = vec3(n.x * (1.2 + 0.2*waveJ), abs(n.y)*0.8 + 0.2*waveJ, n.z * (1.2 + 0.2*waveJ));
+            vec3 tentP = vec3(n.x*0.4 + 0.15*sin(n.y*6.0+t*4.0), -abs(n.y)*1.4 - 0.2, n.z*0.4 + 0.15*cos(n.y*6.0+t*4.0));
+            p_think = turn(mix(tentP, bellP, isBell), t*0.2);
+            p_listen = turn(n * (0.8 + 0.2*sin(t*8.0)*u_audio), t*0.2);
+            p_speak = turn(n * (1.0 + 0.35*u_audio*sin(n.y*8.0 - t*10.0)), t*0.2);
+
+          #elif ${designType === 'magnetic_dynamo' ? 1 : 0}
+            // #10 Magnetic Dynamo
+            float theta = acos(clamp(n.y, -1.0, 1.0));
+            float magR = 1.25 * sin(theta)*sin(theta) * (0.8 + 0.2*sin(t*1.5));
+            vec3 magP = vec3(magR*cos(seed*6.28 + t*0.8), n.y*1.2, magR*sin(seed*6.28 + t*0.8));
+            p_think = turn(magP, t*0.3);
+            p_listen = turn(vec3(n.x*0.6, n.y*1.3, n.z*0.6), t*0.3) * (0.9 + u_audio*0.2);
+            p_speak = turn(vec3(n.x*1.3, n.y*0.7, n.z*1.3) * (1.0 + 0.3*u_audio), t*0.2);
+
+          #elif ${designType === 'geodesic_crystal' ? 1 : 0}
+            // #11 Geodesic Crystal
+            vec3 fN = normalize(floor(n * 2.5 + 0.5));
+            float facet = dot(n, fN);
+            vec3 crystP = fN * (0.85 + 0.2*facet) * (1.0 + 0.1*sin(t*2.0 + facet*5.0));
+            p_think = turn(rotateZ(crystP + n*0.1, t*0.4), t*0.3);
+            p_listen = turn(crystP * 0.9, t*0.5) * (1.0 + u_audio*0.2);
+            p_speak = turn(crystP * (1.0 + 0.4*u_audio*facet), t*0.2);
+
+          #elif ${designType === 'solar_nebula' ? 1 : 0}
+            // #12 Solar Nebula Rings
+            float isRing = step(0.30, seed);
+            float rRad = 0.8 + fract(seed*7.0)*0.8;
+            float rAng = seed*20.0 + t*(0.6 + fract(seed*3.0)*0.5);
+            vec3 ringP = vec3(rRad*cos(rAng), (fract(seed*41.0)-0.5)*0.08, rRad*sin(rAng));
+            ringP = rotateX(ringP, 0.45);
+            vec3 sunP = n * 0.45 * (1.0 + 0.1*sin(t*5.0));
+            p_think = turn(mix(sunP, ringP, isRing), t*0.25);
+            p_listen = turn(n * (0.8 + u_audio*0.25*sin(t*10.0)), t*0.4);
+            p_speak = turn(n * (1.0 + 0.35*u_audio*sin(seed*30.0 - t*8.0)), t*0.2);
+          #endif
+
+          // Blend states
+          vec3 blended = p_idle * u_state_idle
+                       + p_listen * u_state_listen
+                       + p_think * u_state_think
+                       + p_speak * u_state_speak;
+
+          float depth = clamp((blended.z + 1.5) / 3.0, 0.0, 1.0);
+          v_depth = depth;
+          v_spark = step(0.93, fract(seed*999.0 + t*2.0));
+
+          gl_Position = vec4(blended.xy * 0.75, 0.0, 1.0);
+          gl_PointSize = max(1.5, (1.8 + 1.2*depth + (u_state_speak*u_audio*2.5)));
+        }
+      `;
+    }
+
+    const fragmentShaderSource = `
+      precision mediump float;
+      varying float v_depth;
+      varying float v_spark;
+      void main() {
+        float dist = length(gl_PointCoord - 0.5) * 2.0;
+        if (dist > 1.0) discard;
+        float alpha = 1.0 - smoothstep(0.2, 1.0, dist);
+        vec3 color = vec3(1.0, 1.0, 1.0);
+        gl_FragColor = vec4(color, alpha * (0.55 + 0.45*v_depth));
+      }
+    `;
+
+    // Initialize 12 instances
+    const instances = [];
+
+    DESIGNS.forEach(d => {
+      const canvas = document.getElementById(`canvas_${d.id}`);
+      const gl = canvas.getContext('webgl');
+      if (!gl) return;
+
+      const vs = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vs, getVertexShader(d.type));
+      gl.compileShader(vs);
+
+      const fs = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fs, fragmentShaderSource);
+      gl.compileShader(fs);
+
+      const prog = gl.createProgram();
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+
+      const count = PARTICLE_COUNT;
+      const data = new Float32Array(count * 4);
+      for (let i = 0; i < count; i++) {
+        const y = 1.0 - 2.0 * (i + 0.5) / count;
+        const r = Math.sqrt(Math.max(0.0, 1.0 - y * y));
+        const phi = i * 2.399963229728653;
+        data[i * 4 + 0] = r * Math.cos(phi);
+        data[i * 4 + 1] = y;
+        data[i * 4 + 2] = r * Math.sin(phi);
+        data[i * 4 + 3] = i / count;
+      }
+
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+
+      const aPos = gl.getAttribLocation(prog, 'a_position');
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 4, gl.FLOAT, false, 0, 0);
+
+      const uTime = gl.getUniformLocation(prog, 'u_time');
+      const uIdle = gl.getUniformLocation(prog, 'u_state_idle');
+      const uListen = gl.getUniformLocation(prog, 'u_state_listen');
+      const uThink = gl.getUniformLocation(prog, 'u_state_think');
+      const uSpeak = gl.getUniformLocation(prog, 'u_state_speak');
+      const uAudio = gl.getUniformLocation(prog, 'u_audio');
+
+      const weights = { idle: 0, listen: 0, think: 1, speak: 0 };
+
+      instances.push({
+        id: d.id,
+        gl,
+        prog,
+        weights,
+        count,
+        uniforms: { uTime, uIdle, uListen, uThink, uSpeak, uAudio }
+      });
+    });
+
+    // Resize
+    function resizeAll() {
+      instances.forEach(inst => {
+        const c = inst.gl.canvas;
+        const rect = c.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        c.width = rect.width * dpr;
+        c.height = rect.height * dpr;
+        inst.gl.viewport(0, 0, c.width, c.height);
+      });
+    }
+    window.addEventListener('resize', resizeAll);
+    setTimeout(resizeAll, 100);
+
+    // Render Loop
+    let startTime = performance.now();
+    function render(now) {
+      const time = (now - startTime) * 0.001;
+
+      if (autoPulse) {
+        audioLevel = 0.15 + 0.40 * (Math.sin(time * 6.5) * 0.5 + 0.5);
+        document.getElementById('audioSlider').value = audioLevel.toFixed(2);
+        document.getElementById('audioVal').innerText = audioLevel.toFixed(2);
+      }
+
+      instances.forEach(inst => {
+        const gl = inst.gl;
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+        gl.useProgram(inst.prog);
+
+        const targetWeights = {
+          idle: currentState === 'idle' ? 1 : 0,
+          listen: currentState === 'listening' ? 1 : 0,
+          think: currentState === 'thinking' ? 1 : 0,
+          speak: currentState === 'speaking' ? 1 : 0
+        };
+        const lerp = 0.09;
+        inst.weights.idle += (targetWeights.idle - inst.weights.idle) * lerp;
+        inst.weights.listen += (targetWeights.listen - inst.weights.listen) * lerp;
+        inst.weights.think += (targetWeights.think - inst.weights.think) * lerp;
+        inst.weights.speak += (targetWeights.speak - inst.weights.speak) * lerp;
+
+        gl.uniform1f(inst.uniforms.uTime, time);
+        gl.uniform1f(inst.uniforms.uIdle, inst.weights.idle);
+        gl.uniform1f(inst.uniforms.uListen, inst.weights.listen);
+        gl.uniform1f(inst.uniforms.uThink, inst.weights.think);
+        gl.uniform1f(inst.uniforms.uSpeak, inst.weights.speak);
+        gl.uniform1f(inst.uniforms.uAudio, audioLevel);
+
+        gl.drawArrays(gl.POINTS, 0, inst.count);
+      });
+
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+
+    // Controls
+    function setGlobalState(state) {
+      currentState = state;
+      document.querySelectorAll('.state-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.innerText.toLowerCase().includes(state));
+      });
+      DESIGNS.forEach(d => {
+        const badge = document.getElementById(`state_${d.id}`);
+        if (badge) badge.innerText = state.toUpperCase();
+      });
+    }
+
+    function updateAudio(val) {
+      audioLevel = parseFloat(val);
+      document.getElementById('audioVal').innerText = audioLevel.toFixed(2);
+    }
+
+    function toggleAudioPulse() {
+      autoPulse = !autoPulse;
+    }
+
+    function chooseDesign(id) {
+      const design = DESIGNS.find(d => d.id === id);
+      navigator.clipboard.writeText(`I choose Design #${design.id}: ${design.name}`);
+      alert(`Design #${design.id} (${design.name}) copied to clipboard!\n\nReply in chat: "I choose Design #${design.id}" to apply this full morphology set.`);
+    }
+  </script>
+</body>
+</html>

@@ -14,19 +14,55 @@
 html, body, #root {
   height: 100%;
   font-family: var(--nx-font);
-  background: var(--nx-bg);
+  background: transparent !important;
   color: var(--nx-text-primary);
   -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* ── Linux (WebKitGTK) ───────────────────────────────────────────────
+   The Linux build has no native window blur and no backdrop capture,
+   and WebKitGTK's backdrop-filter cannot composite against a
+   transparent window. The wizard card is therefore painted opaque
+   (see theme/tokens.css) and the area around it gets the same
+   backdrop, so the window never shows an unpainted surface.
+   body[data-platform] is set by platform.ts (setup/main.tsx). */
+body[data-platform="linux"] {
+  background: var(--nx-bg) !important;
 }
 
 /* ── Layout ──────────────────────────────────────────────────── */
 .setup-root {
   max-width: 480px;
-  margin: 0 auto;
-  padding: var(--nx-space-8) var(--nx-space-6) 100px;
-  min-height: 100%;
+  margin: 16px auto;
+  padding: 48px var(--nx-space-6) 100px;
+  min-height: calc(100% - 32px);
   display: flex;
   flex-direction: column;
+  background: var(--nx-bg);
+  backdrop-filter: var(--nx-glass-blur);
+  -webkit-backdrop-filter: var(--nx-glass-blur);
+  border: var(--nx-glass-border);
+  border-radius: 14px;
+  box-shadow: var(--nx-glass-shadow);
+  position: relative;
+}
+
+/* ── Window Titlebar Drag Region ────────────────────────────── */
+.setup-window-titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  z-index: 1000;
+  user-select: none;
+  border-bottom: 1px solid var(--nx-border);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 /* ── Welcome step ────────────────────────────────────────────── */
@@ -681,6 +717,46 @@ html, body, #root {
   color: #9CA3AF;
   display: flex;
   align-items: center;
+}
+
+/* Learned-identity panel (50% bootstrap): what each connection taught
+   NEXUS, shown right where the user connected it. */
+.installer-learned {
+  margin: 12px 0 4px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  text-align: left;
+}
+
+.installer-learned-title {
+  font-weight: 700;
+  font-size: 12px;
+  color: #059669;
+  margin-bottom: 6px;
+}
+
+.installer-learned-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #111827;
+  margin-bottom: 4px;
+}
+
+.installer-learned-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.installer-learned-note {
+  font-size: 11px;
+  color: #6B7280;
+  margin-top: 4px;
 }
 
 .installer-btn-proceed {

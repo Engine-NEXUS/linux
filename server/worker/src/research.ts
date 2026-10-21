@@ -174,22 +174,6 @@ export async function searchWikidata(query: string): Promise<SearchResult | null
   }
 }
 
-/**
- * Full retrieval: query Wikipedia + Wikidata in parallel.
- */
-export async function retrieve(query: string, lang: string = "en"): Promise<RetrievalResult> {
-  const [wiki, wikidata] = await Promise.all([
-    searchWikipedia(query, lang),
-    searchWikidata(query),
-  ]);
-
-  const results: SearchResult[] = [];
-  if (wiki && wiki.snippet) results.push(wiki);
-  if (wikidata && wikidata.snippet) results.push(wikidata);
-
-  return { results, query, lang };
-}
-
 // ─── Source 2: DuckDuckGo Instant Answer (no key, unlimited) ────────
 
 export async function searchDuckDuckGo(query: string): Promise<SearchResult | null> {

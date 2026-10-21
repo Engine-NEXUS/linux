@@ -1,0 +1,751 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ship Notes — Voice Orb</title>
+<style>
+  /* ============ Global layout & styling (transparent everything) ============ */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%;
+    min-height: 100%;
+    background-color: transparent;
+  }
+
+  body {
+    font-family: "Inter", "Geist", -apple-system, BlinkMacSystemFont,
+      "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #ffffff;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ============ Top nav ============ */
+  .nav {
+    width: 100%;
+    max-width: 1200px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 22px 32px;
+  }
+
+  .brand {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: #a1a1aa;
+  }
+
+  .pill-btn {
+    font-family: inherit;
+    font-size: 13px;
+    color: #ffffff;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 999px;
+    padding: 9px 20px;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease;
+  }
+
+  .pill-btn:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(255, 255, 255, 0.3);
+  }
+
+  /* ============ Headline ============ */
+  .headline {
+    margin-top: 34px;
+    font-size: clamp(34px, 5.4vw, 62px);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    text-align: center;
+    color: #ffffff;
+    padding: 0 20px;
+  }
+
+  .headline .face-pill {
+    display: inline-block;
+    color: #e879f9;
+    background: rgba(232, 121, 249, 0.1);
+    border-radius: 999px;
+    padding: 0.02em 0.42em 0.06em;
+    white-space: nowrap;
+  }
+
+  /* ============ State switcher tabs ============ */
+  .tabs {
+    display: flex;
+    gap: 10px;
+    margin-top: 26px;
+    padding: 0 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .tab {
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: #71717a;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    padding: 10px 22px 10px 24px;
+    cursor: pointer;
+    transition: color 0.35s ease, border-color 0.35s ease, background 0.35s ease;
+  }
+
+  .tab:hover { color: #d4d4d8; }
+
+  .tab.active { color: #ffffff; }
+  .tab.active[data-state="0"] { border-color: #f59e0b; background: rgba(245, 158, 11, 0.07); }
+  .tab.active[data-state="1"] { border-color: #a78bfa; background: rgba(167, 139, 250, 0.07); }
+  .tab.active[data-state="2"] { border-color: #ec4899; background: rgba(236, 72, 153, 0.07); }
+
+  /* ============ WebGL stage ============ */
+  .stage {
+    position: relative;
+    width: min(92vw, 640px);
+    height: min(54vh, 500px);
+    min-height: 340px;
+    margin-top: 6px;
+  }
+
+  #orb-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    background-color: transparent;
+  }
+
+  .webgl-fallback {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    color: #a1a1aa;
+    font-size: 14px;
+    text-align: center;
+    padding: 24px;
+  }
+
+  /* ============ Subtitles + dissolve layer ============ */
+  .subtitle-wrap {
+    position: relative;
+    margin-top: 2px;
+    min-height: 64px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    width: 100%;
+  }
+
+  .subtitle {
+    font-size: clamp(17px, 2.4vw, 22px);
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: #e4e4e7;
+    text-align: center;
+    padding: 0 24px;
+  }
+
+  #dissolve-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    background-color: transparent;
+  }
+
+  .foot-spacer { height: 48px; }
+</style>
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="brand">Ship Notes</div>
+    <button class="pill-btn" type="button">Free code &bull; Link in bio</button>
+  </nav>
+
+  <h1 class="headline">Your Jarvis needs <span class="face-pill">a face.</span></h1>
+
+  <div class="tabs" role="tablist" aria-label="Assistant state">
+    <button class="tab active" data-state="0" role="tab" type="button">Listening</button>
+    <button class="tab" data-state="1" role="tab" type="button">Thinking</button>
+    <button class="tab" data-state="2" role="tab" type="button">Speaking</button>
+  </div>
+
+  <div class="stage">
+    <canvas id="orb-canvas"></canvas>
+    <div class="webgl-fallback" id="webgl-fallback">
+      WebGL is unavailable in this browser, so the particle orb cannot render.
+    </div>
+  </div>
+
+  <div class="subtitle-wrap">
+    <div class="subtitle" id="subtitle">Good morning.</div>
+    <canvas id="dissolve-canvas"></canvas>
+  </div>
+
+  <div class="foot-spacer"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ================= Helpers ================= */
+
+  /** "#fef08a" -> [0.976, 0.941, 0.541] normalized RGB vector for shader uniforms. */
+  function hexToRgb(hex) {
+    const h = hex.replace("#", "");
+    return [
+      parseInt(h.slice(0, 2), 16) / 255,
+      parseInt(h.slice(2, 4), 16) / 255,
+      parseInt(h.slice(4, 6), 16) / 255
+    ];
+  }
+
+  function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  /* ================= WebGL setup (transparent context) ================= */
+
+  const canvas = document.getElementById("orb-canvas");
+  /** @type {WebGLRenderingContext|null} */
+  const gl = canvas.getContext("webgl", {
+    alpha: true,
+    antialias: true,
+    premultipliedAlpha: false,
+    depth: false,
+    stencil: false,
+    powerPreference: "high-performance"
+  });
+
+  if (!gl) {
+    document.getElementById("webgl-fallback").style.display = "flex";
+    return;
+  }
+
+  // Raw-WebGL equivalent of Three.js `renderer.setClearColor(0x000000, 0)`:
+  // fully transparent clear so the page behind the canvas shows through.
+  gl.clearColor(0.0, 0.0, 0.0, 0.0);
+  gl.disable(gl.DEPTH_TEST);
+  gl.enable(gl.BLEND);
+  // Additive glow blending for the light particles.
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  /* ================= Shaders ================= */
+
+  const VERT_SRC = `
+    precision highp float;
+
+    // Per-particle baked geometry (computed once on the CPU at init).
+    attribute vec3 aSphere;   // Fibonacci-sphere base position (unit radius)
+    attribute vec3 aRibbon;   // Static soft-edge jitter offset (thinking streams)
+    attribute vec4 aSeed;     // 4x uncorrelated randoms in [0,1)
+    attribute float aParam;   // 0..1 position along the stream
+    attribute vec4 aFlow;     // Thinking-stream backbone: baseY, amp, freq, phase
+
+    uniform float uTime;      // seconds
+    uniform float uFrom;      // state index we are morphing FROM (0/1/2)
+    uniform float uTo;        // state index we are morphing TO   (0/1/2)
+    uniform float uMix;       // 0..1 eased morph progress
+    uniform float uSize;      // base point size (device px at unit depth)
+    uniform float uProj;      // 1 / tan(fov/2)
+    uniform float uAspect;    // canvas.width / canvas.height
+    uniform float uPR;        // devicePixelRatio scale
+
+    varying vec3 vColor;
+
+    // --- Palette (normalized RGB, converted from the spec hex codes) ---
+    // LISTENING: champagne/starlight by depth
+    const vec3 LISTEN_FRONT = vec3(${hexToRgb("#fef08a").join(",")});
+    const vec3 LISTEN_MID   = vec3(${hexToRgb("#d97706").join(",")});
+    const vec3 LISTEN_BACK  = vec3(${hexToRgb("#78350f").join(",")});
+    // THINKING: grey + light red mix
+    const vec3 THINK_A = vec3(${hexToRgb("#b3b3b3").join(",")});
+    const vec3 THINK_B = vec3(${hexToRgb("#ff9999").join(",")});
+    const vec3 THINK_C = vec3(${hexToRgb("#cc6666").join(",")});
+    // SPEAKING: grey base + light red highlights
+    const vec3 SPEAK_FACE_A = vec3(${hexToRgb("#b3b3b3").join(",")});
+    const vec3 SPEAK_FACE_B = vec3(${hexToRgb("#ff9999").join(",")});
+    const vec3 SPEAK_RIM    = vec3(${hexToRgb("#994444").join(",")});
+
+    // --- Cheap hash + 3D value noise (low-frequency drift, NOT exact Perlin;
+    //     visually equivalent breathing at a fraction of the ALU cost) ---
+    float hash(vec3 p) {
+      p = fract(p * 0.3183099 + vec3(0.11, 0.17, 0.23));
+      p *= 17.0;
+      return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    }
+
+    float vnoise(vec3 p) {
+      vec3 i = floor(p);
+      vec3 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float n000 = hash(i);
+      float n100 = hash(i + vec3(1.0, 0.0, 0.0));
+      float n010 = hash(i + vec3(0.0, 1.0, 0.0));
+      float n110 = hash(i + vec3(1.0, 1.0, 0.0));
+      float n001 = hash(i + vec3(0.0, 0.0, 1.0));
+      float n101 = hash(i + vec3(1.0, 0.0, 1.0));
+      float n011 = hash(i + vec3(0.0, 1.0, 1.0));
+      float n111 = hash(i + vec3(1.0, 1.0, 1.0));
+      return mix(
+        mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+        mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+        f.z
+      );
+    }
+
+    vec3 rotY(vec3 p, float a) {
+      float c = cos(a);
+      float s = sin(a);
+      return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+    }
+
+    // STATE 0 — LISTENING: dense uniform sphere + gentle radial breathing.
+    vec3 spherePos(vec3 n, vec4 seed, float t) {
+      float breathe = 0.035 * sin(t * 1.3 + seed.x * 6.2831);
+      float drift = vnoise(n * 1.8 + vec3(0.0, t * 0.35, seed.y * 2.0)) - 0.5;
+      return n * (1.0 + breathe + drift * 0.09);
+    }
+
+    // STATE 1 — THINKING: intertwined flowing ribbons (reference:
+    // lavender wisps, left eye-loop + center crossover + wispy right tails).
+    // Backbone recomputed every frame with time-shifted phase, so particles
+    // genuinely travel downstream. X folds back on itself (non-monotonic)
+    // to carve the left loop and the center X-crossing seen in the ref.
+    vec3 ribbonPos(vec3 jitter, vec4 seed, float param, vec4 flow, float t) {
+      float uu = fract(param + t * 0.07);
+      float TAU = 6.2831;
+      float PI = 3.14159;
+      float ang = uu * flow.z * TAU + flow.w + t * 0.22;
+      // Longitudinal axis with fold-back: linear sweep + large single-lobe
+      // sine (amp*TAU > sweep => dx/du goes negative => loop) + fine ripple.
+      float x = (uu - 0.5) * 2.15
+        + 0.42 * sin(uu * TAU + flow.w * 1.7 + t * 0.18)
+        + 0.12 * sin(uu * TAU * 2.0 + flow.w * 0.6 - t * 0.15);
+      // Vertical: base + main S + second harmonic for crossover + center flutter.
+      float y = flow.x
+        + flow.y * sin(ang)
+        + flow.y * 0.45 * sin(ang * 2.1 + 1.3 + flow.w * 0.5);
+      y += 0.09 * sin(uu * TAU * 2.0 - t * 0.8 + seed.y * TAU) * sin(uu * PI);
+      float z = 0.28 * sin(ang * 1.15 + flow.w * 2.0) + 0.10 * sin(ang * 2.7);
+      vec3 p = vec3(x, y, z);
+      // Asymmetric soft edges: full body mid, dense left loop, wispy pointed right tail.
+      float leftFade = smoothstep(0.0, 0.12, uu);
+      float rightFade = 1.0 - smoothstep(0.55, 1.0, uu);
+      float taper = (0.30 + 0.70 * sin(uu * PI)) * (0.35 + 0.65 * leftFade) * (0.30 + 0.70 * rightFade);
+      p += jitter * taper * 1.15;
+      return p;
+    }
+
+    // STATE 2 — SPEAKING: spherical wobbly blob, audio-reactive squash & stretch.
+    vec3 blobPos(vec3 n, vec4 seed, float t) {
+      float d = vnoise(n * 2.6 + vec3(t * 0.7, t * 2.1, t * 1.3)) - 0.5;
+      vec3 p = n * (1.0 + d * 0.35);
+      p.x *= 1.0 + d * 0.55;   // stretch X
+      p.y *= 1.0 - d * 0.55;   // squish Y
+      p += vec3(
+        sin(t * 9.0 + seed.y * 6.2831),
+        sin(t * 8.2 + seed.z * 6.2831),
+        sin(t * 8.7 + seed.w * 6.2831)
+      ) * 0.02;
+      return p;
+    }
+
+    vec3 statePos(float s, vec3 n, vec3 ribbon, vec4 seed, float param, vec4 flow, float t) {
+      int si = int(s + 0.5);
+      if (si == 0) return spherePos(n, seed, t);
+      if (si == 1) return ribbonPos(ribbon, seed, param, flow, t);
+      return blobPos(n, seed, t);
+    }
+
+    vec3 stateCol(float s, vec3 p, vec4 seed, float param) {
+      int si = int(s + 0.5);
+      if (si == 0) {
+        // Depth-graded champagne: bright gold front -> copper -> dark amber back.
+        float d = clamp(p.z * 0.5 + 0.5, 0.0, 1.0);
+        vec3 c = mix(LISTEN_BACK, LISTEN_MID, smoothstep(0.0, 0.5, d));
+        return mix(c, LISTEN_FRONT, smoothstep(0.5, 1.0, d));
+      }
+      if (si == 1) {
+        // Lavender gradient swept along the ribbon curve.
+        vec3 c = mix(THINK_A, THINK_B, smoothstep(0.0, 0.65, param));
+        return mix(c, THINK_C, smoothstep(0.65, 1.0, param) * 0.85);
+      }
+      // Dual-tone blush: pink facing the camera, deep plum on the rim.
+      float facing = smoothstep(-0.3, 0.9, normalize(p).z);
+      vec3 face = mix(SPEAK_FACE_A, SPEAK_FACE_B, seed.x);
+      return mix(SPEAK_RIM, face, facing);
+    }
+
+    void main() {
+      vec3 posA = statePos(uFrom, aSphere, aRibbon, aSeed, aParam, aFlow, uTime);
+      vec3 posB = statePos(uTo, aSphere, aRibbon, aSeed, aParam, aFlow, uTime);
+      vec3 colA = stateCol(uFrom, posA, aSeed, aParam);
+      vec3 colB = stateCol(uTo, posB, aSeed, aParam);
+
+      vec3 pos = mix(posA, posB, uMix);
+      vColor = mix(colA, colB, uMix);
+
+      // Slow global turntable for a living feel.
+      pos = rotY(pos, uTime * 0.12);
+
+      // Minimal perspective projection (camera on +Z looking at origin).
+      vec3 v = pos;
+      v.z -= 3.1;
+      float persp = 1.0 / max(-v.z, 0.4);
+      gl_Position = vec4(v.x * persp * uProj / uAspect, v.y * persp * uProj, 0.0, 1.0);
+      gl_PointSize = max(uSize * persp * uPR, 1.0);
+    }
+  `;
+
+  const FRAG_SRC = `
+    precision mediump float;
+    varying vec3 vColor;
+
+    void main() {
+      vec2 uv = gl_PointCoord - vec2(0.5);
+      float d = length(uv);
+      float alpha = smoothstep(0.5, 0.06, d);
+      if (alpha <= 0.001) discard;
+      // Hot core + soft falloff for a glowing dot.
+      vec3 col = vColor * (0.7 + 0.6 * smoothstep(0.5, 0.0, d));
+      gl_FragColor = vec4(col * alpha, alpha);
+    }
+  `;
+
+  function compileShader(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      console.error("Shader error:", gl.getShaderInfoLog(sh));
+    }
+    return sh;
+  }
+
+  const program = gl.createProgram();
+  gl.attachShader(program, compileShader(gl.VERTEX_SHADER, VERT_SRC));
+  gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, FRAG_SRC));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error("Program link error:", gl.getProgramInfoLog(program));
+  }
+  gl.useProgram(program);
+
+  function attrib(name) {
+    const loc = gl.getAttribLocation(program, name);
+    if (loc < 0) console.error("Missing attribute:", name);
+    return loc;
+  }
+
+  function uniform(name) {
+    const loc = gl.getUniformLocation(program, name);
+    if (loc === null) console.error("Missing uniform:", name);
+    return loc;
+  }
+
+  const A_SPHERE = attrib("aSphere");
+  const A_RIBBON = attrib("aRibbon");
+  const A_SEED = attrib("aSeed");
+  const A_PARAM = attrib("aParam");
+  const A_FLOW = attrib("aFlow");
+
+  const U = {
+    time: uniform("uTime"),
+    from: uniform("uFrom"),
+    to: uniform("uTo"),
+    mix: uniform("uMix"),
+    size: uniform("uSize"),
+    proj: uniform("uProj"),
+    aspect: uniform("uAspect"),
+    pr: uniform("uPR")
+  };
+
+  /* ================= Particle buffers (18,000 points) ================= */
+
+  const COUNT = 18000;
+  const sphere = new Float32Array(COUNT * 3);
+  const ribbon = new Float32Array(COUNT * 3);
+  const seeds = new Float32Array(COUNT * 4);
+  const params = new Float32Array(COUNT);
+  const flow = new Float32Array(COUNT * 4);
+
+  const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+  // Three intertwined ribbons (matches the ref: top arch, middle eye-loop +
+  // center X-cross, bottom loop, converging wispy tails on the right).
+  const STREAMS = [
+    { baseY: 0.34, amp: 0.30, freq: 1.05 },
+    { baseY: 0.03, amp: 0.32, freq: 1.20 },
+    { baseY: -0.30, amp: 0.29, freq: 0.95 }
+  ];
+
+  // Approx-Gaussian jitter in [-1, 1] for soft stream edges.
+  function gauss() {
+    return (Math.random() + Math.random() + Math.random() - 1.5) / 1.5;
+  }
+
+  for (let i = 0; i < COUNT; i++) {
+    // Fibonacci sphere (dense, uniform).
+    const y = 1 - (i / (COUNT - 1)) * 2;
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    const th = i * GOLDEN_ANGLE;
+    sphere[i * 3] = Math.cos(th) * r;
+    sphere[i * 3 + 1] = y;
+    sphere[i * 3 + 2] = Math.sin(th) * r;
+
+    // Thinking-stream backbone params + static soft-edge jitter.
+    // (The actual band shape is recomputed in-shader every frame so the
+    // particles flow downstream; this only seeds which band each dot
+    // belongs to and how far it may stray from the core.)
+    const u = i / COUNT;
+    const s = STREAMS[i % 3];
+    flow[i * 4] = s.baseY + (Math.random() - 0.5) * 0.06;
+    flow[i * 4 + 1] = s.amp * (0.85 + Math.random() * 0.3);
+    flow[i * 4 + 2] = s.freq;
+    flow[i * 4 + 3] = (i % 3) * 2.1 + Math.random() * 0.5;
+    ribbon[i * 3] = gauss() * 0.05;
+    ribbon[i * 3 + 1] = gauss() * 0.10;
+    ribbon[i * 3 + 2] = gauss() * 0.07;
+
+    seeds[i * 4] = Math.random();
+    seeds[i * 4 + 1] = Math.random();
+    seeds[i * 4 + 2] = Math.random();
+    seeds[i * 4 + 3] = Math.random();
+    params[i] = u;
+  }
+
+  function makeBuffer(data, size, loc) {
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
+    return buf;
+  }
+
+  makeBuffer(sphere, 3, A_SPHERE);
+  makeBuffer(ribbon, 3, A_RIBBON);
+  makeBuffer(seeds, 4, A_SEED);
+  makeBuffer(params, 1, A_PARAM);
+  makeBuffer(flow, 4, A_FLOW);
+
+  /* ================= State machine (1.5s smooth morphs) ================= */
+
+  const MORPH_MS = 1500;
+  let stateFrom = 0;
+  let stateTo = 0;
+  let mixT = 1;
+  let mixStart = 0;
+
+  const tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
+
+  function setState(s) {
+    if (s === stateTo && mixT >= 1) return;
+    stateFrom = stateTo;
+    stateTo = s;
+    mixT = 0;
+    mixStart = performance.now();
+    tabs.forEach((t) => {
+      const active = Number(t.getAttribute("data-state")) === s;
+      t.classList.toggle("active", active);
+      if (active) t.setAttribute("aria-selected", "true");
+      else t.removeAttribute("aria-selected");
+    });
+  }
+
+  tabs.forEach((t) => {
+    t.addEventListener("click", () => setState(Number(t.getAttribute("data-state"))));
+  });
+
+  /* ================= Resize + render loop ================= */
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.floor(canvas.clientWidth * dpr);
+    const h = Math.floor(canvas.clientHeight * dpr);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+    gl.uniform1f(U.aspect, w / Math.max(1, h));
+    gl.uniform1f(U.pr, dpr);
+  }
+
+  window.addEventListener("resize", resize);
+
+  const t0 = performance.now();
+
+  function frame(now) {
+    if (mixT < 1) {
+      mixT = Math.min(1, (now - mixStart) / MORPH_MS);
+    }
+    const eased = easeInOutCubic(mixT);
+    if (mixT >= 1) {
+      stateFrom = stateTo; // settle: identical endpoints, zero cost drift
+    }
+
+    resize();
+
+    const t = (now - t0) / 1000;
+    gl.uniform1f(U.time, t);
+    gl.uniform1f(U.from, stateFrom);
+    gl.uniform1f(U.to, stateTo);
+    gl.uniform1f(U.mix, eased);
+    gl.uniform1f(U.size, 7.0);
+    gl.uniform1f(U.proj, 2.4);
+
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.POINTS, 0, COUNT);
+
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  requestAnimationFrame(frame);
+
+  /* ================= Subtitles + dissolve micro-interaction ================= */
+
+  const LINES = [
+    "Good morning.",
+    "You have three meetings today.",
+    "The first begins in twenty minutes.",
+    "Shall I brief you on the agenda?"
+  ];
+  const SUB_MS = 4200;
+
+  const subEl = document.getElementById("subtitle");
+  const fxCanvas = document.getElementById("dissolve-canvas");
+  const fx = fxCanvas.getContext("2d");
+  let subIdx = 0;
+  /** @type {Array<{x:number,y:number,vx:number,vy:number,life:number,max:number,size:number,hue:number}>} */
+  let motes = [];
+  let fxRunning = false;
+
+  function fxLoop() {
+    if (motes.length === 0) {
+      fxRunning = false;
+      fx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
+      return;
+    }
+    fxRunning = true;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    fx.clearRect(0, 0, fxCanvas.width, fxCanvas.height);
+    const wind = Math.sin(performance.now() / 700) * 0.25;
+
+    motes = motes.filter((m) => m.life > 0);
+    for (const m of motes) {
+      m.vy += 0.045 * dpr;          // gravity pulls the swarm downward
+      m.vx += wind * 0.02 * dpr;    // gentle lateral wind drift
+      m.vx *= 0.985;                // air drag
+      m.x += m.vx;
+      m.y += m.vy;
+      m.life -= 1;
+      const a = Math.max(0, m.life / m.max);
+      fx.globalAlpha = a * 0.9;
+      fx.fillStyle = m.hue === 0 ? "#ffffff" : (m.hue === 1 ? "#e9d5ff" : "#c4b5fd");
+      const s = Math.max(1, m.size * a);
+      fx.fillRect(m.x, m.y, s, s);
+    }
+    fx.globalAlpha = 1;
+    requestAnimationFrame(fxLoop);
+  }
+
+  function kickFx() {
+    if (!fxRunning) requestAnimationFrame(fxLoop);
+  }
+
+  /**
+   * Dissolve the CURRENT subtitle text into evaporating lilac/white dots:
+   * rasterize the text, sample bright pixels, convert each sample into a
+   * gravity+wind particle. The incoming line is set immediately after.
+   */
+  function dissolveCurrentText(nextText) {
+    const wrap = subEl.parentElement;
+    const rect = subEl.getBoundingClientRect();
+    const wrapRect = wrap.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    fxCanvas.width = Math.max(1, Math.floor(wrapRect.width * dpr));
+    fxCanvas.height = Math.max(1, Math.floor(wrapRect.height * dpr));
+
+    // Rasterize the outgoing line exactly as rendered.
+    const style = window.getComputedStyle(subEl);
+    const off = document.createElement("canvas");
+    off.width = fxCanvas.width;
+    off.height = fxCanvas.height;
+    const octx = off.getContext("2d", { willReadFrequently: true });
+    octx.scale(dpr, dpr);
+    octx.font = style.fontWeight + " " + style.fontSize + " " + style.fontFamily;
+    octx.textAlign = "center";
+    octx.textBaseline = "middle";
+    octx.fillStyle = "#ffffff";
+    const cx = wrapRect.width / 2;
+    const cy = (rect.top - wrapRect.top) + rect.height / 2;
+    octx.fillText(subEl.textContent || "", cx, cy);
+
+    let pixels = null;
+    try {
+      pixels = octx.getImageData(0, 0, off.width, off.height).data;
+    } catch (err) {
+      pixels = null; // tainted/unreadable canvas: fall back to plain swap
+    }
+
+    if (pixels) {
+      const step = 3; // sample stride (device px) — balances density vs count
+      const ox = 0, oy = 0;
+      for (let y = 0; y < off.height; y += step) {
+        for (let x = 0; x < off.width; x += step) {
+          const a = pixels[(y * off.width + x) * 4 + 3];
+          if (a > 110 && Math.random() < 0.75) {
+            motes.push({
+              x: x + ox,
+              y: y + oy,
+              vx: (Math.random() - 0.5) * 0.9,
+              vy: 0.25 + Math.random() * 0.7,
+              life: 46 + Math.floor(Math.random() * 34),
+              max: 80,
+              size: (1 + Math.random() * 1.8) * dpr,
+              hue: Math.floor(Math.random() * 3) // 0 white, 1/2 lilac tones
+            });
+          }
+        }
+      }
+      // Safety cap so pathological glyphs can't flood the loop.
+      if (motes.length > 9000) motes.splice(0, motes.length - 9000);
+      kickFx();
+    }
+
+    subEl.textContent = nextText;
+  }
+
+  setInterval(() => {
+    subIdx = (subIdx + 1) % LINES.length;
+    dissolveCurrentText(LINES[subIdx]);
+  }, SUB_MS);
+})();
+</script>
+</body>
+</html>

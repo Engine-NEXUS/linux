@@ -1,0 +1,15 @@
+# Events with only one side (scripts/check-ipc-contract.mjs). One per line.
+# This list may only SHRINK: wire it (add a caller/listener) or delete it, then run --update.
+# Never add a line by hand to silence a new finding.
+emitted-never-listened agent_watch:done
+emitted-never-listened agent_watch:error
+emitted-never-listened agent_watch:login_required
+emitted-never-listened agent_watch:progress
+emitted-never-listened agent_watch:stopped
+emitted-never-listened architect:loading
+emitted-never-listened architect:phase1-ready
+emitted-never-listened directed:ignored
+emitted-never-listened ghost:action_receipts
+emitted-never-listened proactive:card
+emitted-never-listened proactive:nudge
+listened-never-emitted stage:annotation_mode

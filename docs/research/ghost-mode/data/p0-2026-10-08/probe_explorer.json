@@ -1,0 +1,103 @@
+{
+  "actionable": {
+    "count": 68,
+    "distinct_accelerator_strings": {
+      "Alt+Up": 1,
+      "F5": 1
+    },
+    "with_accelerator_key": 2,
+    "with_accelerator_pct": 2.9,
+    "with_access_key": 1,
+    "with_access_pct": 1.5,
+    "with_any_keyboard_or_pattern": 38,
+    "with_any_pct": 55.9,
+    "with_expand_collapse": 15,
+    "with_invoke": 35,
+    "with_invoke_pct": 51.5,
+    "with_selection_item": 10,
+    "with_shortcut_in_name": 2,
+    "with_shortcut_in_name_pct": 2.9,
+    "with_toggle": 0
+  },
+  "examples_shortcut_in_name": [
+    "Up to \"drivers\" (Alt + Up Arrow)",
+    "Refresh \"etc\" (F5)"
+  ],
+  "examples_with_shortcut": [
+    {
+      "accelerator": "Alt+Up",
+      "access": "",
+      "invoke": true,
+      "name": "Up to \"drivers\" (Alt + Up Arrow)",
+      "type": "Button"
+    },
+    {
+      "accelerator": "F5",
+      "access": "",
+      "invoke": true,
+      "name": "Refresh \"etc\" (F5)",
+      "type": "Button"
+    },
+    {
+      "accelerator": "",
+      "access": "Space",
+      "invoke": true,
+      "name": "System",
+      "type": "MenuItem"
+    }
+  ],
+  "label": "explorer",
+  "legacy_list_actionables": {
+    "count": 64,
+    "ms": 2455.7,
+    "recall_vs_window_rooted_pct": 97.1,
+    "rooted_at": {
+      "focused_children": 4,
+      "focused_control_type": "Window",
+      "focused_is_window": true
+    }
+  },
+  "process": {
+    "class": "CabinetWClass",
+    "exe": "explorer.exe",
+    "framework": "Win32",
+    "pid": 31724
+  },
+  "tree": {
+    "by_control_type": {
+      "AppBar": 3,
+      "Button": 24,
+      "Edit": 30,
+      "Group": 5,
+      "Header": 1,
+      "Image": 12,
+      "List": 2,
+      "ListItem": 7,
+      "MenuBar": 1,
+      "MenuItem": 1,
+      "Pane": 7,
+      "RadioButton": 2,
+      "SplitButton": 11,
+      "StatusBar": 1,
+      "Tab": 1,
+      "TabItem": 1,
+      "Text": 9,
+      "TitleBar": 1,
+      "Tree": 1,
+      "TreeItem": 17
+    },
+    "elements_total": 137
+  },
+  "window_rooted_cached": {
+    "cold_ms": 78.7,
+    "read_cached_props_ms": 3.6,
+    "warm_min_ms": 76.1,
+    "warm_runs_ms": [
+      78.4,
+      76.1,
+      78.6,
+      83.8,
+      79.2
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "nexus-agent-watch-sidecar",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Local-only sidecar: watches external coding-agent CLIs (Claude Code, Gemini CLI, Codex, Aider, Hermes, opencode) for task completion via pty-manager + coding-agent-adapters. No network calls, no API cost.",
+  "type": "commonjs",
+  "main": "server.cjs",
+  "dependencies": {
+    "coding-agent-adapters": "^0.18.0",
+    "pty-manager": "^1.12.1"
+  }
+}

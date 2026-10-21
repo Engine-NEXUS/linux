@@ -401,6 +401,8 @@ Uses existing Worker infrastructure:
 
 ## New Tauri Window: `architect`
 
+> **Superseded (2026-10-02):** the standalone `architect` window / `architect.html` page were removed — Architect now renders as a view inside the unified `sidebar` window (see `docs/changes/66-implementation-patterns-quick-reference.md` Pattern 2). The table below is the historical record.
+
 Added to `tauri.conf.json` and `vite.config.ts`:
 
 | Property | Value |
@@ -488,7 +490,8 @@ pub struct ImpactResult {
 
 ```toml
 # src-tauri/Cargo.toml additions
-walkdir  = "2.5"   # recursive file walking
+# NOTE (2026-10-02): `walkdir` was removed — dead dep, file walking uses
+# `ignore::WalkBuilder` (respects .gitignore during walk).
 ignore   = "0.4"   # respects .gitignore during walk
 rayon    = "1.10"  # parallel per-file processing
 petgraph = "0.6"   # DFS, BFS, cycle detection, centrality

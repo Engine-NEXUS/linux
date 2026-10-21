@@ -37,3 +37,23 @@
 {"text": "Order Biryani from Paradise", "intent": "order_food", "slots": {"food_item": "Order Biryani", "restaurant": "Paradise"}}
 {"text": "Order Pizza from Domino's", "intent": "order_food", "slots": {"food_item": "Order Pizza", "restaurant": "Domino's"}}
 {"text": "fetch pasta from oven storey", "intent": "order_food", "slots": {"food_item": "pasta", "restaurant": "oven storey"}}
+{"text": "Say hi to mummy in WhatsApp.", "intent": "nlu_result", "slots": {}}
+{"text": "new tab.", "intent": "nlu_result", "slots": {}}
+{"text": "Ghost, Control,", "intent": "ghost_mode_enter", "slots": {}}
+{"text": "Release Control", "intent": "ghost_mode_exit", "slots": {}}
+{"text": "track this email.", "intent": "watch_screen_email", "slots": {}}
+{"text": "Switch to Tab 2", "intent": "browser_tab", "slots": {}}
+{"text": "Start dictating", "intent": "start_dictation", "slots": {}}
+{"text": "Exit the ghost mode", "intent": "ghost_mode_exit", "slots": {}}
+{"text": "Next tab", "intent": "browser_tab", "slots": {}}
+{"text": "Ghost mode please", "intent": "ghost_mode_enter", "slots": {}}
+{"text": "Go into ghost mode", "intent": "ghost_mode_enter", "slots": {}}
+{"text": "Go to first tab", "intent": "browser_tab", "slots": {}}
+{"text": "exit the ghost mode.", "intent": "ghost_mode_exit", "slots": {}}
+{"text": "track deadline in this email.", "intent": "watch_screen_email", "slots": {}}
+{"text": "Close, Tab", "intent": "browser_close_tab", "slots": {}}
+{"text": "Start dictation", "intent": "start_dictation", "slots": {}}
+{"text": "Activate Ghost Mode", "intent": "ghost_mode_enter", "slots": {}}
+{"text": "Stop Dictation", "intent": "stop_dictation", "slots": {}}
+{"text": "Focus Search Bar", "intent": "browser_search_focus", "slots": {}}
+{"text": "Ghost control.", "intent": "ghost_mode_enter", "slots": {}}

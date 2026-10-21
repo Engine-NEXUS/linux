@@ -55,14 +55,17 @@ html, body {
   isolation: isolate;
 }
 
-/* Blurred backdrop layer */
+/* Blurred desktop backdrop — ADR-05 screenshot capture (restored to the
+   verified GitHub rule; the 2026-10-01 solid-black directive is removed).
+   Stronger gradient overlay ensures text behind is frosted but readable
+   (Start Menu style). */
 .settings-container::after {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: 18px;
   background-image:
-    linear-gradient(180deg, rgba(8, 8, 10, 0.50) 0%, rgba(8, 8, 10, 0.30) 100%),
+    linear-gradient(180deg, rgba(8, 8, 10, 0.65) 0%, rgba(8, 8, 10, 0.45) 100%),
     var(--sidebar-backdrop-image, none);
   background-size: cover;
   background-position: center;
@@ -101,7 +104,7 @@ html, body {
 
 /* Content above backdrop and sheen */
 .settings-header,
-settings-tabs,
+.settings-tabs,
 .settings-scroll,
 .settings-footer {
   position: relative;
@@ -129,12 +132,29 @@ settings-tabs,
   color: rgba(255, 255, 255, 0.4);
 }
 
+/* ─── Merged Header Row: tabs left, dock right, full-width drag region ─── */
+.settings-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 0 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.settings-header-row .settings-tabs {
+  padding: 0;
+  border-bottom: none;
+}
+
 /* ─── Tab Bar ─── */
 .settings-tabs {
   display: flex;
   gap: 4px;
   padding: 2px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: none;
   flex-shrink: 0;
 }
 
@@ -199,7 +219,7 @@ settings-tabs,
   text-transform: uppercase;
   letter-spacing: 0.06em;
   padding-bottom: 4px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: none;
 }
 
 /* ─── Setting row ─── */
@@ -367,6 +387,52 @@ settings-tabs,
   cursor: not-allowed;
 }
 
+/* Liquid glass highlight button (Display tab: animation placement) */
+.settings-btn--liquid-glass {
+  background: rgba(37, 158, 214, 0.22) !important;
+  border: 1.5px solid rgba(255, 255, 255, 0.35) !important;
+  border-radius: 10px !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  font-size: 13px !important;
+  padding: 10px 16px !important;
+  letter-spacing: -0.01em;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6), 0 0 12px rgba(255, 255, 255, 0.25) !important;
+  box-shadow:
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.5),
+    0 8px 24px rgba(0, 0, 0, 0.35) !important;
+  backdrop-filter: blur(16px);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+.settings-btn--liquid-glass:hover {
+  background: rgba(37, 158, 214, 0.35) !important;
+  border-color: rgba(255, 255, 255, 0.60) !important;
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 0.7),
+    0 12px 28px rgba(37, 158, 214, 0.35) !important;
+}
+
+.settings-btn--liquid-glass:active {
+  transform: scale(0.98);
+}
+
+.settings-btn--glass {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.22) !important;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.25) !important;
+  color: #ffffff !important;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6) !important;
+  backdrop-filter: blur(12px);
+}
+
+.settings-btn--glass:hover {
+  background: rgba(255, 255, 255, 0.16) !important;
+  border-color: rgba(255, 255, 255, 0.38) !important;
+}
+
 /* ─── Status badge ─── */
 .status-badge {
   font-size: 11px;
@@ -385,18 +451,13 @@ settings-tabs,
   color: rgba(255, 255, 255, 0.4);
 }
 
-.status-badge--error {
-  background: rgba(255, 80, 80, 0.15);
-  color: rgba(255, 150, 150, 0.9);
-}
-
 /* ─── Footer ─── */
 .settings-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: none;
   flex-shrink: 0;
 }
 
@@ -445,7 +506,156 @@ settings-tabs,
   50% { transform: translate(-50%, -50%) scale(1.08); }
 }
 
-/* ─── Voice list ─── */
+/* ── Transport indicator (Feature 83 P4 — cloud vs local engine) ── */
+.transport-dot {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.transport-dot--cloud {
+  color: #7ee2a8;
+}
+
+.transport-dot--local {
+  color: #ffd479;
+}
+
+/* ─── Persona grid (Feature 83 — 2×5 iconic voice cards) ─── */
+.persona-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.persona-grid::-webkit-scrollbar { width: 4px; }
+.persona-grid::-webkit-scrollbar-track { background: transparent; }
+.persona-grid::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+}
+
+.persona-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  cursor: pointer;
+  transition: border-color 0.18s ease, background 0.18s ease, transform 0.12s ease;
+}
+
+.persona-card:hover {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.persona-card--active {
+  border-color: rgba(100, 210, 255, 0.65);
+  background: rgba(100, 210, 255, 0.08);
+  box-shadow:
+    0 0 0 1px rgba(100, 210, 255, 0.30),
+    0 8px 24px rgba(37, 158, 214, 0.22);
+}
+
+.persona-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.persona-avatar {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.persona-check {
+  color: #64d2ff;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.persona-name {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #ffffff;
+}
+
+.persona-accent {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.persona-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.65);
+  min-height: 32px;
+}
+
+.persona-sync {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  align-self: flex-start;
+}
+
+.persona-sync--ready {
+  color: #7ee2a8;
+  background: rgba(126, 226, 168, 0.12);
+  border: 1px solid rgba(126, 226, 168, 0.35);
+}
+
+.persona-sync--pending {
+  color: #ffd479;
+  background: rgba(255, 212, 121, 0.10);
+  border: 1px solid rgba(255, 212, 121, 0.35);
+}
+
+.persona-sync--busy {
+  color: #7ec8ff;
+  background: rgba(126, 200, 255, 0.12);
+  border: 1px solid rgba(126, 200, 255, 0.40);
+  animation: persona-sync-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes persona-sync-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.persona-play-btn {
+  margin-top: 2px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.07);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.persona-play-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.persona-play-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ─── Voice list (legacy rows — kept for other pickers) ─── */
 .voice-list {
   display: flex;
   flex-direction: column;
@@ -605,4 +815,184 @@ settings-tabs,
 .auth-card-actions {
   display: flex;
   gap: 6px;
+}
+
+/* Calibration round-trip toast (task §5 save/cancel confirmation). */
+.settings-toast {
+  position: absolute;
+  top: 54px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(126, 226, 168, 0.35);
+  color: #7ee2a8;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.4);
+  animation: settings-toast-in 180ms ease-out;
+}
+@keyframes settings-toast-in {
+  from { opacity: 0; transform: translate(-50%, -6px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ── Command Hub Accounts carbon copy (opaque light/dark, no transparency).
+   iOS grouped-list language: 18px cards, full-bleed rows with 1px
+   dividers, blue link actions, chevron affordances. All surfaces use
+   --hub-* vars so both themes stay solid and readable. */
+.hub-card {
+  background: var(--hub-card);
+  border: 1px solid var(--hub-border);
+  border-radius: 18px;
+  padding: 16px;
+  margin-bottom: 12px;
+  color: var(--hub-text);
+}
+
+.hub-profile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+}
+
+.hub-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.hub-avatar--lg {
+  width: 56px;
+  height: 56px;
+  font-size: 22px;
+}
+
+.hub-avatar--fallback {
+  background: var(--hub-card-2);
+  color: var(--hub-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.hub-profile-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--hub-text);
+  margin-top: 6px;
+}
+
+.hub-profile-email {
+  font-size: 12px;
+  color: var(--hub-text-dim);
+}
+
+.hub-profile--empty .hub-profile-name {
+  margin-top: 0;
+}
+
+.hub-link {
+  background: none;
+  border: none;
+  padding: 8px 4px 0;
+  color: var(--hub-accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.hub-link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hub-link--sm {
+  padding: 2px 0 0;
+  font-size: 11px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.hub-account-contact {
+  font-size: 11px;
+  color: var(--hub-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-accounts {
+  padding: 4px 0 4px 16px;
+}
+
+.hub-account-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 10px 0;
+  border-bottom: 1px solid var(--hub-border);
+  cursor: pointer;
+}
+
+.hub-account-row:last-child {
+  border-bottom: none;
+}
+
+.hub-account-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.hub-account-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--hub-text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hub-account-email {
+  font-size: 11px;
+  color: var(--hub-text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hub-primary-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--hub-accent);
+  border: 1px solid var(--hub-accent);
+  border-radius: 8px;
+  padding: 1px 6px;
+}
+
+.hub-chevron {
+  color: var(--hub-text-faint);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.hub-remove {
+  background: none;
+  border: none;
+  color: var(--hub-danger);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 0 4px 4px;
 }

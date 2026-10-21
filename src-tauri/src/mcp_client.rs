@@ -57,9 +57,43 @@ pub enum McpServer {
     Amazon,
 }
 
+/// Test hook: point the WhatsApp bridge at a local mock server.
+#[cfg(test)]
+pub static TEST_WHATSAPP_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 impl McpServer {
+    /// WhatsApp tools NEXUS must NEVER call, from any code path.
+    ///
+    /// `mark_read` / `mark_chat_read` send read receipts (the other person
+    /// sees blue ticks), `send_presence` flips the user's "online" state and
+    /// `send_typing` shows "typing…" to the other person. Reading a chat for
+    /// the user must leave no trace on the other side, so these are refused
+    /// centrally in `call_tool` (covering the confirm path, the compound
+    /// planner, the inbox watcher — everything). Sending a message stays a
+    /// separate, confirmation-gated tool.
+    pub fn blocked_reason(&self, tool: &str) -> Option<&'static str> {
+        match self {
+            McpServer::WhatsApp => match tool {
+                "mark_read" | "mark_chat_read" => {
+                    Some("NEXUS never marks WhatsApp chats as read — that would show blue ticks to the sender")
+                }
+                "send_presence" | "send_typing" => {
+                    Some("NEXUS never changes your WhatsApp online/typing status")
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// The HTTP endpoint for this MCP server.
     pub fn url(&self) -> &str {
+        #[cfg(test)]
+        if matches!(self, McpServer::WhatsApp) {
+            if let Some(u) = TEST_WHATSAPP_URL.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                return Box::leak(u.into_boxed_str());
+            }
+        }
         match self {
             McpServer::SwiggyFood => "https://mcp.swiggy.com/food",
             McpServer::SwiggyInstamart => "https://mcp.swiggy.com/im",
@@ -271,6 +305,18 @@ fn audit_line(server: McpServer, tool: &str, ok: bool, latency_ms: u64) -> serde
 /// "100% surety" — what ran, and what the user approved, is on disk, not
 /// in memory.
 fn audit_call(server: McpServer, tool: &str, ok: bool, latency_ms: u64) {
+    // Tests must not append to the user's real audit trail.
+    #[cfg(test)]
+    {
+        let _ = (server, tool, ok, latency_ms);
+        return;
+    }
+    #[cfg(not(test))]
+    audit_call_inner(server, tool, ok, latency_ms);
+}
+
+#[cfg(not(test))]
+fn audit_call_inner(server: McpServer, tool: &str, ok: bool, latency_ms: u64) {
     let line = audit_line(server, tool, ok, latency_ms);
     let path = match dirs_next::data_dir() {
         Some(d) => d.join("com.nexus.assistant").join("mcp_audit.jsonl"),
@@ -314,6 +360,19 @@ pub async fn call_tool(
     client: &reqwest::Client,
     auth_token: Option<&str>,
 ) -> McpCallResult {
+    // Hard stop before anything else — not even the breaker or the network.
+    if let Some(reason) = server.blocked_reason(tool) {
+        tracing::warn!("mcp: refused {}::{tool} — {reason}", server.name());
+        audit_call(server, &format!("BLOCKED:{tool}"), false, 0);
+        return McpCallResult {
+            ok: false,
+            data: serde_json::Value::Null,
+            error: Some(reason.to_string()),
+            server,
+            tool: tool.to_string(),
+            latency_ms: 0,
+        };
+    }
     if let Some(blocked) = breaker_check(server) {
         return McpCallResult {
             ok: false,
@@ -371,10 +430,15 @@ async fn call_tool_inner(
         req_builder = req_builder.header("Authorization", format!("Bearer {}", token));
     }
 
+    crate::usage_counter::bump("mcp");
     let resp = match req_builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("mcp: {} request failed: {}", server_name, e);
+            if tool == "pairing_status" || (server == McpServer::WhatsApp && e.is_connect()) {
+                tracing::debug!("mcp: {} probe unavailable (bridge offline): {}", server_name, e);
+            } else {
+                tracing::warn!("mcp: {} request failed: {}", server_name, e);
+            }
             return McpCallResult {
                 ok: false,
                 data: serde_json::Value::Null,
@@ -617,6 +681,22 @@ pub async fn query_pairing_status(
 /// shapes vary by bridge version, so match case-insensitively and accept
 /// data-URI, raw-base64, or plain-code payloads.
 pub fn parse_pairing_state(data: &serde_json::Value) -> PairingState {
+    // MCP wraps tool output: either `structuredContent`, or a JSON document
+    // inside a text content block. Unwrap to the envelope first.
+    if let Some(inner) = data.get("structuredContent").filter(|v| v.is_object()) {
+        return parse_pairing_state(inner);
+    }
+    if let Some(blocks) = data.get("content").and_then(|c| c.as_array()) {
+        for b in blocks {
+            if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                if let Ok(inner) = serde_json::from_str::<serde_json::Value>(t) {
+                    if inner.is_object() {
+                        return parse_pairing_state(&inner);
+                    }
+                }
+            }
+        }
+    }
     let lower = data.to_string().to_lowercase();
     // Find a state-ish string value first.
     let mut state_hint: Option<String> = None;
@@ -1063,6 +1143,15 @@ pub fn extract_text(result: &McpCallResult) -> String {
     clean
 }
 
+/// Full tool text for machine parsing (JSON lists): control characters are
+/// stripped like `extract_text`, but there is no 4000-char cap — a truncated
+/// JSON array would be unparseable. Never speak this directly.
+pub fn extract_text_full(result: &McpCallResult) -> String {
+    const MAX_CHARS: usize = 400_000;
+    let clean = sanitize_tool_text(&extract_text_raw(result));
+    clean.chars().take(MAX_CHARS).collect()
+}
+
 /// Raw extraction (uncapped, unsanitized) — internal.
 fn extract_text_raw(result: &McpCallResult) -> String {
     // Try the standard MCP content array format
@@ -1098,7 +1187,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn read_receipt_and_presence_tools_are_blocked_for_whatsapp_only() {
+        for t in ["mark_read", "mark_chat_read", "send_presence", "send_typing"] {
+            assert!(McpServer::WhatsApp.blocked_reason(t).is_some(), "{t} must be blocked");
+        }
+        // Reading and (confirmation-gated) sending are not blocked here.
+        for t in ["list_chats", "list_messages", "get_chat", "search_contacts", "send_message", "pairing_status"] {
+            assert!(McpServer::WhatsApp.blocked_reason(t).is_none(), "{t} must stay allowed");
+        }
+        // The block is WhatsApp-specific.
+        assert!(McpServer::Amazon.blocked_reason("mark_read").is_none());
+    }
+
+    #[tokio::test]
+    async fn call_tool_refuses_blocked_tools_without_touching_the_network() {
+        // Port 1 is never listening: if the guard failed this would be a connect error, not the policy text.
+        *TEST_WHATSAPP_URL.lock().unwrap() = Some("http://127.0.0.1:1/mcp".into());
+        let client = reqwest::Client::new();
+        for t in ["mark_read", "mark_chat_read", "send_presence", "send_typing"] {
+            let r = call_tool(McpServer::WhatsApp, t, serde_json::json!({"chat_jid": "x"}), &client, None).await;
+            assert!(!r.ok);
+            let err = r.error.unwrap_or_default();
+            assert!(err.contains("NEXUS never"), "{t}: {err}");
+            assert_eq!(r.latency_ms, 0);
+        }
+        *TEST_WHATSAPP_URL.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn full_text_is_not_capped_like_spoken_text() {
+        let big = "x".repeat(9000);
+        let r = McpCallResult {
+            ok: true,
+            data: serde_json::json!({"content": [{"type": "text", "text": big}]}),
+            error: None,
+            server: McpServer::WhatsApp,
+            tool: "list_chats".into(),
+            latency_ms: 1,
+        };
+        assert!(extract_text(&r).ends_with("[truncated]"));
+        assert_eq!(extract_text_full(&r).chars().count(), 9000);
+    }
+
+    #[test]
     fn test_mcp_server_urls() {
+        *TEST_WHATSAPP_URL.lock().unwrap() = None;
         assert_eq!(McpServer::SwiggyFood.url(), "https://mcp.swiggy.com/food");
         assert_eq!(McpServer::SwiggyInstamart.url(), "https://mcp.swiggy.com/im");
         assert_eq!(McpServer::SwiggyDineout.url(), "https://mcp.swiggy.com/dineout");
@@ -1304,6 +1437,19 @@ mod tests {
     fn test_parse_pairing_state_ready() {
         let data = serde_json::json!({"setup_state": "ready"});
         assert_eq!(parse_pairing_state(&data), PairingState::Ready);
+    }
+
+    #[test]
+    fn pairing_state_is_read_through_mcp_content_wrappers() {
+        // JSON document inside a text content block.
+        let text = serde_json::json!({"content":[{"type":"text","text":"{\"setup_state\":\"ready\"}"}]});
+        assert_eq!(parse_pairing_state(&text), PairingState::Ready);
+        // structuredContent envelope.
+        let structured = serde_json::json!({"content":[],"structuredContent":{"setup_state":"awaiting_qr","qr":"abc"}});
+        assert!(matches!(parse_pairing_state(&structured), PairingState::AwaitingQr { .. }));
+        // Plain prose in a text block is still never "ready".
+        let prose = serde_json::json!({"content":[{"type":"text","text":"All good!"}]});
+        assert!(matches!(parse_pairing_state(&prose), PairingState::Error(_)));
     }
 
     #[test]

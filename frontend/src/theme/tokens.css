@@ -1,41 +1,103 @@
 /* ═══════════════════════════════════════════════════════════════
-   NEXUS Design Tokens — White Theme
-   Single source of truth for colors, spacing, shadows, radii.
-   Import once in each window's entry point.
+   NEXUS Design Tokens — Pitch Black (#000000) & Pure White (#ffffff)
+   Strictly opaque themes with 10px radii, 1px borders, zero transparency.
    ═══════════════════════════════════════════════════════════════ */
 
 :root {
-  /* ── Colors ─────────────────────────────────────────────────── */
-  --nx-bg:           #FFFFFF;
-  --nx-bg-card:     #F8F9FA;
-  --nx-bg-hover:    #F0F1F3;
-  --nx-bg-elevated: #FFFFFF;
+  /* ── Dark Mode: Frosted Liquid Glass & Pitch Tint ───────────────── */
+  --nx-bg:             rgba(12, 12, 16, 0.72);
+  --nx-bg-card:        rgba(26, 26, 32, 0.62);
+  --nx-bg-hover:       rgba(255, 255, 255, 0.08);
+  --nx-bg-elevated:    rgba(34, 34, 42, 0.75);
 
-  --nx-text-primary:   #1F2937;   /* 12:1 on white */
-  --nx-text-secondary: #6B7280;   /* 4.6:1 on white */
-  --nx-text-tertiary:  #9CA3AF;   /* labels, hints */
-  --nx-text-inverse:   #FFFFFF;
+  --nx-glass-blur:     blur(26px) saturate(190%);
+  --nx-glass-border:   1px solid rgba(255, 255, 255, 0.14);
+  --nx-glass-shadow:   0 20px 50px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.12);
 
-  --nx-border:        #E5E7EB;
-  --nx-border-focus:  #6aa8ff;
+  --nx-text-primary:   #ffffff;
+  --nx-text-secondary: rgba(255, 255, 255, 0.72);
+  --nx-text-tertiary:  rgba(255, 255, 255, 0.45);
+  --nx-text-inverse:   #000000;
 
-  /* Accent: Blue → Purple gradient */
-  --nx-accent-blue:   #6aa8ff;
-  --nx-accent-purple: #a855f7;
-  --nx-accent-grad:   linear-gradient(135deg, #6aa8ff, #a855f7);
-  --nx-accent-soft:   rgba(106, 168, 255, 0.10);
+  --nx-border:           rgba(255, 255, 255, 0.14);
+  --nx-border-focus:     #ffffff;
+  --nx-border-glow:      0 0 16px rgba(255, 255, 255, 0.12);
+
+  /* Accents */
+  --nx-accent-blue:   #ffffff;
+  --nx-accent-purple: #f4f4f5;
+  --nx-accent-grad:   linear-gradient(135deg, #ffffff, #d4d4d8);
+  --nx-accent-soft:   rgba(255, 255, 255, 0.10);
 
   /* State colors */
-  --nx-listening:  #6aa8ff;
-  --nx-thinking:   #a855f7;
+  --nx-listening:  #ffffff;
+  --nx-thinking:   #d4d4d8;
   --nx-speaking:   #22c55e;
-  --nx-error:      #DC2626;
+  --nx-error:      #ef4444;
+  --nx-error-bg:   rgba(239, 68, 68, 0.12);
+  --nx-success:    #10b981;
+  --nx-success-bg: rgba(16, 185, 129, 0.12);
+  --nx-warning:    #f59e0b;
+  --nx-warning-bg: rgba(245, 158, 11, 0.12);
+}
+
+:root[data-theme="light"] {
+  /* ── Light Mode: Frosted Liquid Glass & Pure Frosted White ───────── */
+  --nx-bg:             rgba(244, 244, 248, 0.75);
+  --nx-bg-card:        rgba(255, 255, 255, 0.68);
+  --nx-bg-hover:       rgba(0, 0, 0, 0.05);
+  --nx-bg-elevated:    rgba(255, 255, 255, 0.88);
+
+  --nx-glass-blur:     blur(26px) saturate(190%);
+  --nx-glass-border:   1px solid rgba(0, 0, 0, 0.08);
+  --nx-glass-shadow:   0 16px 40px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+
+  --nx-text-primary:   #111827;
+  --nx-text-secondary: rgba(0, 0, 0, 0.68);
+  --nx-text-tertiary:  rgba(0, 0, 0, 0.45);
+  --nx-text-inverse:   #ffffff;
+
+  --nx-border:           rgba(0, 0, 0, 0.10);
+  --nx-border-focus:     #111827;
+  --nx-border-glow:      0 2px 12px rgba(0, 0, 0, 0.08);
+
+  --nx-accent-blue:   #111827;
+  --nx-accent-purple: #27272a;
+  --nx-accent-grad:   linear-gradient(135deg, #111827, #3f3f46);
+  --nx-accent-soft:   rgba(0, 0, 0, 0.06);
+
+  --nx-listening:  #111827;
+  --nx-thinking:   #3f3f46;
+  --nx-speaking:   #16a34a;
+  --nx-error:      #dc2626;
   --nx-error-bg:   rgba(220, 38, 38, 0.08);
   --nx-success:    #059669;
-  --nx-success-bg: rgba(5, 150, 105, 0.10);
-  --nx-warning:    #D97706;
-  --nx-warning-bg: rgba(217, 119, 6, 0.10);
+  --nx-success-bg: rgba(5, 150, 105, 0.08);
+  --nx-warning:    #d97706;
+  --nx-warning-bg: rgba(217, 119, 6, 0.08);
+}
 
+/* ── Linux (WebKitGTK) ───────────────────────────────────────────────
+   The Linux build has no native window blur and no backdrop capture,
+   and WebKitGTK's backdrop-filter cannot composite against a
+   transparent window. The translucent "liquid glass" surfaces would
+   therefore show the desktop straight through the window, so paint them
+   opaque on Linux instead (the Linux branch used opaque tokens for the
+   same reason). body[data-platform] is set by platform.ts in each
+   window's entry point. */
+body[data-platform="linux"] {
+  --nx-bg:          #0c0c10;
+  --nx-bg-card:     #1a1a20;
+  --nx-bg-elevated: #22222a;
+}
+:root[data-theme="light"] body[data-platform="linux"] {
+  --nx-bg:          #f4f4f8;
+  --nx-bg-card:     #ffffff;
+  --nx-bg-elevated: #ffffff;
+}
+
+/* Theme-independent tokens (shared by dark and light) */
+:root {
   /* ── Typography ─────────────────────────────────────────────── */
   --nx-font: -apple-system, "Segoe UI", "Inter", Roboto, sans-serif;
   --nx-font-mono: "SF Mono", "Cascadia Code", Consolas, monospace;
@@ -65,9 +127,9 @@
 
   /* ── Radii ──────────────────────────────────────────────────── */
   --nx-radius-sm:   6px;
-  --nx-radius:      8px;
-  --nx-radius-md:   12px;
-  --nx-radius-lg:   16px;
+  --nx-radius:      10px;
+  --nx-radius-md:   10px;
+  --nx-radius-lg:   12px;
   --nx-radius-full: 9999px;
 
   /* ── Shadows (3 elevation levels) ───────────────────────────── */

@@ -98,10 +98,14 @@ fn test_whatsapp_chat_with_lakshya_on_whatsapp() {
 
 #[test]
 fn test_whatsapp_send_message_to_lakshya() {
+    // "send message to lakshya" has no message body — the MCP send parser
+    // (Pattern 3 partial-send) asks what to say instead of opening the chat.
+    // Handled downstream: orchestrator speaks the prompt, command_executor
+    // returns it, and the reply completes SendWhatsAppMessage.
     let result = parse_deterministic("send message to lakshya");
     assert!(result.is_some());
     assert!(matches!(
         &result.unwrap().intent,
-        ParsedIntent::WhatsappChat { contact } if contact == "lakshya"
+        ParsedIntent::NeedMoreInfo { prompt } if prompt == "What should I say to lakshya?"
     ));
 }

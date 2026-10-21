@@ -144,6 +144,17 @@ INTENTS = [
     "order_food",
     "search_product",
     "send_whatsapp_message",
+    # Ghost mode & voice control (8) — NEW
+    "ghost_mode_enter",
+    "ghost_mode_exit",
+    "start_dictation",
+    "stop_dictation",
+    "watch_screen_email",
+    "browser_tab",
+    "browser_close_tab",
+    "browser_search_focus",
+    # Spatial screen analysis (Feature 86) — NEW
+    "screen_analysis",
     # Fallback (1)
     "unknown",
 ]

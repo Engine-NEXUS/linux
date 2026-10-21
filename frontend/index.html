@@ -2,11 +2,429 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>NEXUS</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NEXUS Voice Orb — Local Playground</title>
+    <style>
+      :root {
+        --bg: #07070a;
+        --card-bg: rgba(18, 18, 24, 0.75);
+        --border: rgba(255, 255, 255, 0.1);
+        --text: #ececf1;
+        --text-dim: #8e8ea0;
+        --accent-idle: #b4a7d6;
+        --accent-listen: #e28743;
+        --accent-think: #d946ef;
+        --accent-speak: #ec4899;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: var(--bg);
+        background-image: 
+          radial-gradient(circle at 50% 30%, rgba(217, 70, 239, 0.08) 0%, transparent 60%),
+          radial-gradient(circle at 20% 80%, rgba(226, 135, 67, 0.05) 0%, transparent 50%);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        overflow-x: hidden;
+      }
+      header {
+        padding: 24px 20px 10px;
+        text-align: center;
+      }
+      header h1 {
+        margin: 0 0 6px;
+        font-size: 24px;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        background: linear-gradient(135deg, #ffffff 30%, #c084fc 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      header p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--text-dim);
+      }
+      .stage-viewport {
+        position: relative;
+        width: 100%;
+        max-width: 640px;
+        height: 380px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 10px 0;
+      }
+      .orb-container {
+        position: relative;
+        width: 240px;
+        height: 240px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: width 0.2s ease, height 0.2s ease;
+      }
+      voice-orb {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      .controls-grid {
+        width: 100%;
+        max-width: 640px;
+        padding: 0 16px 40px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .card {
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+        backdrop-filter: blur(16px);
+      }
+      .card-title {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        color: var(--text-dim);
+        margin-bottom: 12px;
+        font-weight: 600;
+        display: flex;
+        justify-content: space-between;
+      }
+      .btn-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      button {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 8px 16px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      button:hover {
+        background: rgba(255, 255, 255, 0.12);
+        border-color: rgba(255, 255, 255, 0.25);
+        transform: translateY(-1px);
+      }
+      button.active {
+        border-color: #a855f7;
+        background: rgba(168, 85, 247, 0.2);
+        box-shadow: 0 0 12px rgba(168, 85, 247, 0.3);
+      }
+      button.btn-idle.active { border-color: var(--accent-idle); background: rgba(180, 167, 214, 0.2); }
+      button.btn-listen.active { border-color: var(--accent-listen); background: rgba(226, 135, 67, 0.2); }
+      button.btn-think.active { border-color: var(--accent-think); background: rgba(217, 70, 239, 0.2); }
+      button.btn-speak.active { border-color: var(--accent-speak); background: rgba(236, 72, 153, 0.2); }
+
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 10px;
+      }
+      .slider-row label {
+        font-size: 13px;
+        min-width: 120px;
+        color: var(--text-dim);
+      }
+      .slider-row input[type="range"] {
+        flex: 1;
+        accent-color: #a855f7;
+        cursor: pointer;
+      }
+      .slider-row span {
+        font-size: 12px;
+        min-width: 48px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .input-row {
+        display: flex;
+        gap: 8px;
+      }
+      .input-row input[type="text"] {
+        flex: 1;
+        background: rgba(0, 0, 0, 0.3);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 12px;
+        color: var(--text);
+        font-size: 13px;
+        outline: none;
+      }
+      .input-row input[type="text"]:focus {
+        border-color: #a855f7;
+      }
+      .status-badge {
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.08);
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <header>
+      <h1>NEXUS Voice Orb Playground</h1>
+      <p>Interactive local preview for WebGL particle states & audio reactivity</p>
+    </header>
+
+    <div class="stage-viewport">
+      <div class="orb-container" id="orbWrapper">
+        <voice-orb id="orb" state="idle" particles="5200"></voice-orb>
+      </div>
+    </div>
+
+    <div class="controls-grid">
+      <!-- State Switching Card -->
+      <div class="card">
+        <div class="card-title">
+          <span>Assistant State</span>
+          <span class="status-badge" id="stateBadge">Current: idle</span>
+        </div>
+        <div class="btn-row">
+          <button id="btnIdle" class="btn-idle active" onclick="setState('idle')">
+            🟣 Idle (Breathing)
+          </button>
+          <button id="btnListen" class="btn-listen" onclick="setState('listening')">
+            🟠 Listening (Suction)
+          </button>
+          <button id="btnThink" class="btn-think" onclick="setState('thinking')">
+            🔮 Thinking (3D Starburst)
+          </button>
+          <button id="btnSpeak" class="btn-speak" onclick="setState('speaking')">
+            💖 Speaking (Voice Beats)
+          </button>
+        </div>
+      </div>
+
+      <!-- Orb Color Theme Card -->
+      <div class="card">
+        <div class="card-title">
+          <span>Orb Color Theme</span>
+          <span id="colorHexBadge" style="font-family: monospace; color: #f2b859;">#f2b859</span>
+        </div>
+        <div class="btn-row" style="margin-bottom: 10px;">
+          <button style="border-left: 3px solid #f2b859;" onclick="setOrbColor('#f2b859')">Amber (Default)</button>
+          <button style="border-left: 3px solid #00e5ff;" onclick="setOrbColor('#00e5ff')">Cyan</button>
+          <button style="border-left: 3px solid #10b981;" onclick="setOrbColor('#10b981')">Emerald</button>
+          <button style="border-left: 3px solid #ef4444;" onclick="setOrbColor('#ef4444')">Ruby</button>
+          <button style="border-left: 3px solid #3b82f6;" onclick="setOrbColor('#3b82f6')">Azure</button>
+          <button style="border-left: 3px solid #a855f7;" onclick="setOrbColor('#a855f7')">Violet</button>
+        </div>
+        <div class="slider-row">
+          <label for="colorPicker">Custom Color:</label>
+          <input type="color" id="colorPicker" value="#f2b859" oninput="setOrbColor(this.value)" style="background: transparent; border: 1px solid var(--border); border-radius: 4px; height: 32px; width: 48px; cursor: pointer;">
+        </div>
+      </div>
+
+      <!-- Audio Reactivity & Mic Card -->
+      <div class="card">
+        <div class="card-title">
+          <span>Audio Reactivity</span>
+          <span id="levelVal">0.00</span>
+        </div>
+        <div class="slider-row">
+          <label for="levelSlider">Simulated Volume:</label>
+          <input type="range" id="levelSlider" min="0" max="1" step="0.01" value="0" oninput="setLevel(this.value)">
+        </div>
+        <div class="btn-row" style="margin-top: 12px;">
+          <button id="btnMic" onclick="toggleMicrophone()">
+            🎤 Enable Live Microphone
+          </button>
+          <button onclick="simulateSpeechBurst()">
+            ⚡ Pulse Beat Burst
+          </button>
+        </div>
+      </div>
+
+      <!-- Particle Text Card -->
+      <div class="card">
+        <div class="card-title">
+          <span>Particle Text Morph (Feature 88 / Change 80)</span>
+        </div>
+        <div class="input-row">
+          <input type="text" id="textInput" value="NEXUS" placeholder="Enter word to morph (up to 16 chars)..." maxlength="16" />
+          <button onclick="triggerText()">✨ Morph Text</button>
+        </div>
+        <div class="slider-row" style="margin-top: 12px;">
+          <label for="holdSlider">Flash Hold Time:</label>
+          <input type="range" id="holdSlider" min="200" max="2000" step="100" value="400" oninput="document.getElementById('holdVal').textContent = this.value + 'ms'">
+          <span id="holdVal">400ms</span>
+        </div>
+      </div>
+
+      <!-- Geometry & Calibration Card -->
+      <div class="card">
+        <div class="card-title">
+          <span>Scale & Animations</span>
+        </div>
+        <div class="slider-row">
+          <label for="sizeSlider">Orb Container Size:</label>
+          <input type="range" id="sizeSlider" min="120" max="360" step="10" value="240" oninput="resizeOrb(this.value)">
+          <span id="sizeVal">240px</span>
+        </div>
+        <div class="btn-row" style="margin-top: 14px;">
+          <button onclick="assembleOrb()">
+            🌟 Screen Entrance Burst (assemble)
+          </button>
+          <button onclick="disperseOrb()">
+            💥 Particle Scatter (disperse)
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module">
+      import "./src/avatar/voice-orb.js";
+
+      const orb = document.getElementById("orb");
+      const orbWrapper = document.getElementById("orbWrapper");
+      const stateBadge = document.getElementById("stateBadge");
+      const levelSlider = document.getElementById("levelSlider");
+      const levelVal = document.getElementById("levelVal");
+      const btnMic = document.getElementById("btnMic");
+
+      const stateBtns = {
+        idle: document.getElementById("btnIdle"),
+        listening: document.getElementById("btnListen"),
+        thinking: document.getElementById("btnThink"),
+        speaking: document.getElementById("btnSpeak"),
+      };
+
+      window.setState = function(state) {
+        orb.setAttribute("state", state);
+        stateBadge.textContent = "Current: " + state;
+        Object.keys(stateBtns).forEach(k => {
+          if (stateBtns[k]) stateBtns[k].classList.toggle("active", k === state);
+        });
+      };
+
+      window.setOrbColor = function(color) {
+        orb.setAttribute("color", color);
+        const badge = document.getElementById("colorHexBadge");
+        if (badge) {
+          badge.textContent = color;
+          badge.style.color = color;
+        }
+        const picker = document.getElementById("colorPicker");
+        if (picker) {
+          picker.value = color.startsWith("#") ? color : "#" + color;
+        }
+      };
+
+      window.setLevel = function(val) {
+        const num = parseFloat(val);
+        levelVal.textContent = num.toFixed(2);
+        if (orb && typeof orb.setLevel === "function") {
+          orb.setLevel(num);
+        }
+      };
+
+      window.triggerText = function() {
+        const text = document.getElementById("textInput").value || "NEXUS";
+        const hold = parseInt(document.getElementById("holdSlider").value, 10) || 400;
+        if (orb && typeof orb.setText === "function") {
+          orb.setText(text, hold);
+        }
+      };
+
+      window.resizeOrb = function(size) {
+        orbWrapper.style.width = size + "px";
+        orbWrapper.style.height = size + "px";
+        document.getElementById("sizeVal").textContent = size + "px";
+      };
+
+      window.assembleOrb = function() {
+        if (orb && typeof orb.assemble === "function") {
+          orb.assemble();
+        }
+      };
+
+      window.disperseOrb = function() {
+        if (orb && typeof orb.disperse === "function") {
+          orb.disperse();
+        }
+      };
+
+      window.simulateSpeechBurst = function() {
+        let step = 0;
+        const interval = setInterval(() => {
+          step++;
+          const val = Math.sin(step * 0.4) * 0.5 + 0.5;
+          levelSlider.value = val;
+          window.setLevel(val);
+          if (step > 25) {
+            clearInterval(interval);
+            levelSlider.value = 0;
+            window.setLevel(0);
+          }
+        }, 50);
+      };
+
+      // Live Microphone support
+      let micStream = null;
+      let audioCtx = null;
+      let analyser = null;
+      let micRaf = 0;
+
+      window.toggleMicrophone = async function() {
+        if (micStream) {
+          // Stop mic
+          micStream.getTracks().forEach(t => t.stop());
+          micStream = null;
+          if (audioCtx) audioCtx.close();
+          cancelAnimationFrame(micRaf);
+          btnMic.textContent = "🎤 Enable Live Microphone";
+          btnMic.classList.remove("active");
+          window.setLevel(0);
+          return;
+        }
+
+        try {
+          micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const source = audioCtx.createMediaStreamSource(micStream);
+          analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 256;
+          source.connect(analyser);
+
+          const data = new Uint8Array(analyser.frequencyBinCount);
+          btnMic.textContent = "🛑 Stop Microphone";
+          btnMic.classList.add("active");
+
+          function poll() {
+            analyser.getByteFrequencyData(data);
+            let sum = 0;
+            for (let i = 0; i < data.length; i++) sum += data[i];
+            const avg = sum / data.length / 255;
+            const boosted = Math.min(1, avg * 2.5);
+            levelSlider.value = boosted;
+            window.setLevel(boosted);
+            micRaf = requestAnimationFrame(poll);
+          }
+          poll();
+        } catch (e) {
+          alert("Microphone access denied or unavailable: " + e.message);
+        }
+      };
+    </script>
   </body>
 </html>

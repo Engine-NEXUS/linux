@@ -9,21 +9,23 @@
    ═══════════════════════════════════════════════════════════════ */
 
 @import "../theme/tokens.css";
+@import "../theme/liquid-glass.css";
 
-:root {
-  /* ── Apple Music Web Design Tokens ──────────────────────────── */
+:root,
+[data-theme="dark"] {
+  /* ── Dark Tokens ──────────────────────────── */
   --apple-text-primary:    #ffffff;
   --apple-text-secondary:  #8e8e93;
   --apple-text-tertiary:   #636366;
   --apple-text-accent:     #fa586a;
   --apple-text-accent-dark:#d60017;
 
-  --apple-surface-base:    #000000;
-  --apple-surface-sidebar: rgba(18, 18, 18, 0.45);
-  --apple-surface-muted:   rgba(28, 28, 30, 0.72);
-  --apple-surface-raised:  rgba(44, 44, 46, 0.75);
-  --apple-surface-strong:  rgba(58, 58, 60, 0.90);
-  --apple-surface-bar:     rgba(22, 22, 24, 0.88);
+  --apple-surface-base:    rgba(12, 12, 16, 0.72);
+  --apple-surface-sidebar: rgba(18, 18, 24, 0.55);
+  --apple-surface-muted:   rgba(28, 28, 34, 0.65);
+  --apple-surface-raised:  rgba(44, 44, 52, 0.75);
+  --apple-surface-strong:  rgba(58, 58, 68, 0.85);
+  --apple-surface-bar:     rgba(22, 22, 28, 0.75);
 
   --apple-diff-easy:       #30d158;
   --apple-diff-medium:     #ff9f0a;
@@ -36,9 +38,36 @@
   --apple-border-strong:   rgba(255, 255, 255, 0.16);
   --apple-focus-ring:      #fa586a;
 
-  /* ── Liquid Glass Parameters (retired) ───────────────────────── */
-  /* The specular sheen + gradient chrome was removed for a flat minimal
-     look (2026-09-18). Params kept as no-ops so old rules don't break. */
+  --lg-sheen-opacity: 0;
+  --lg-rim-width: 0px;
+}
+
+[data-theme="light"] {
+  /* ── Light Tokens ──────────────────────────── */
+  --apple-text-primary:    #111827;
+  --apple-text-secondary:  rgba(0, 0, 0, 0.65);
+  --apple-text-tertiary:   rgba(0, 0, 0, 0.45);
+  --apple-text-accent:     #fa586a;
+  --apple-text-accent-dark:#d60017;
+
+  --apple-surface-base:    rgba(244, 244, 248, 0.75);
+  --apple-surface-sidebar: rgba(255, 255, 255, 0.65);
+  --apple-surface-muted:   rgba(235, 235, 240, 0.70);
+  --apple-surface-raised:  rgba(255, 255, 255, 0.85);
+  --apple-surface-strong:  rgba(255, 255, 255, 0.95);
+  --apple-surface-bar:     rgba(248, 248, 252, 0.80);
+
+  --apple-diff-easy:       #30d158;
+  --apple-diff-medium:     #ff9f0a;
+  --apple-diff-hard:       #ff453a;
+  --apple-accent-blue:     #007aff;
+  --apple-accent-purple:   #af52de;
+  --apple-accent-cyan:     #5ac8fa;
+
+  --apple-border-default:  rgba(0, 0, 0, 0.08);
+  --apple-border-strong:   rgba(0, 0, 0, 0.16);
+  --apple-focus-ring:      #fa586a;
+
   --lg-sheen-opacity: 0;
   --lg-rim-width: 0px;
 }
@@ -126,14 +155,69 @@ html, body, #root {
      occurred when background-image was set directly on .sidebar-card.
      --sidebar-backdrop-image is set on <html> from JS (SidebarApp.tsx)
      when the "sidebar:backdrop" event arrives from Rust. */
-  background-color: rgba(20, 20, 22, 0.60);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background-color: var(--apple-surface-base);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid var(--apple-border-strong);
   border-radius: 18px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.4);
   padding: 16px 18px 12px 18px;
   gap: 12px;
   overflow: hidden;
   isolation: isolate;
+  color: var(--apple-text-primary);
+  transition:
+    background-color 0.3s ease,
+    border 0.3s ease,
+    box-shadow 0.3s ease;
+}
+
+/* ── Header row (drag region + dock controls) ─────────────────────── */
+.sidebar-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 14px 4px 14px;
+  margin: -16px -18px 0 -18px;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  pointer-events: auto; /* buttons inside are clickable */
+  z-index: 10;
+}
+
+.sidebar-header-row:active {
+  cursor: grabbing;
+}
+
+.sidebar-header-spacer {
+  flex: 1;
+  min-height: 28px;
+}
+
+.sidebar-dock-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+/* The shared .sidebar-dock-btn from unified.css is used here */
+
+/* Settings view — SettingsSidebarApp rendered inside sidebar-card */
+.sidebar-card--settings {
+  padding: 0;
+  overflow: hidden;
+}
+
+.sidebar-settings-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
 }
 
 /* ── Minimal Confirmation Mode Sizing ───────────────────────────── */
@@ -152,18 +236,24 @@ html, body, #root {
   padding: 0;
 }
 
-/* Blurred backdrop layer — renders the live-capture JPEG behind all
-   content with a smooth opacity crossfade. When Rust emits a new frame,
-   the JS sets --sidebar-backdrop-image on <html>; the transition on
-   opacity makes the swap look like a gentle dissolve rather than a
-   hard frame cut. z-index: 0 puts it behind content (z-index: 2+). */
+/* Blurred backdrop layer — ADR-05 screenshot-capture blur (docs/architecture/06).
+   Rust captures the desktop region behind this window (sidebar_backdrop.rs),
+   blurs it in-process, and streams JPEG frames via `sidebar:backdrop`
+   (spawn_sidebar_live_blur, 1 FPS change-gated) → JS sets
+   --sidebar-backdrop-image on <html> (SidebarApp.tsx). This is the real
+   transparency: the live desktop shows through blurred — a blue flower
+   wallpaper reads as sapphire bokeh (feature 84 §4). The gradient overlay
+   ensures text behind is frosted but readable (Start Menu style).
+   Solid-black mode (2026-10-01): background-image:none + #060608 — REMOVED
+   per user instruction to restore real transparency. */
 .sidebar-card::after {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: 18px;
-  background-color: rgba(8, 8, 10, 0.45);
-  background-image: var(--sidebar-backdrop-image, none);
+  background-image:
+    linear-gradient(180deg, rgba(8, 8, 10, 0.65) 0%, rgba(8, 8, 10, 0.45) 100%),
+    var(--sidebar-backdrop-image, none);
   background-size: cover;
   background-position: center;
   /* Crossfade: when a new image arrives, the browser can't transition
@@ -176,6 +266,12 @@ html, body, #root {
   transition: opacity 0.3s ease-out;
   pointer-events: none;
   z-index: 0;
+}
+
+/* Over bright captured backdrops, keep white text readable (luminance
+   probe sets data-glass-luminance live — SidebarApp.tsx, 1.5s cadence). */
+html[data-glass-luminance="light"] .sidebar-card {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
 }
 
 /* ── Fallback ──────────────────────────────────────────────────── */
@@ -191,10 +287,13 @@ html, body, #root {
   }
 }
 
-/* Linux (Wayland compositor-centered, no native blur, no backdrop
-   capture): always render the card as a solid floating panel, even
-   where backdrop-filter claims support. body[data-platform] is set
-   in main.tsx. */
+/* ── Linux (WebKitGTK) ──────────────────────────────────────────────
+   Wayland ignores set_position: the window lands compositor-centered
+   with no native blur and no backdrop capture, and WebKitGTK's
+   backdrop-filter claims support where it cannot composite against a
+   transparent window. Always render the card as a solid floating panel
+   on Linux, even where backdrop-filter "works".
+   body[data-platform] is set by platform.ts (sidebar/main.tsx). */
 body[data-platform="linux"] #sidebar-app {
   align-items: flex-end;
   justify-content: flex-start;
@@ -207,9 +306,439 @@ body[data-platform="linux"] .sidebar-card {
   border-radius: 14px;
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7);
 }
+/* No backdrop capture on Linux — the live-capture layer would only add a
+   dark gradient over nothing. */
 body[data-platform="linux"] .sidebar-card::before,
 body[data-platform="linux"] .sidebar-card::after {
   display: none;
+}
+/* Keep the light theme readable on Linux (the card above is dark). */
+html[data-theme="light"] body[data-platform="linux"] .sidebar-card {
+  background: #f2f2f6;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+/* ── Topic title (research/analyse responses only) ─────────────── */
+.sidebar-topic-title {
+  position: relative;
+  z-index: 2;
+  flex-shrink: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: #ffffff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  padding: 2px 0 0 0;
+  line-height: 1.35;
+  max-height: 4.1em;
+  overflow: hidden;
+}
+
+/* ── Last heard (editable last command) ─────────────────────────
+   The sidebar is the only window that can take keyboard focus (the
+   stage is a click-through overlay), so the correction field lives
+   here, above the scroll area, always one click from a fix. */
+.sidebar-last-heard {
+  position: relative;
+  z-index: 3;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px 10px;
+  border: 1px solid var(--apple-border-default);
+  border-radius: 12px;
+  background: var(--apple-surface-muted);
+  text-shadow: none;
+}
+
+.sidebar-last-heard__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sidebar-last-heard__label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--apple-text-secondary);
+}
+
+.sidebar-last-heard__hint {
+  font-size: 10.5px;
+  color: var(--apple-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-last-heard__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-last-heard__input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--apple-border-default);
+  background: var(--apple-surface-base);
+  color: var(--apple-text-primary);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.sidebar-last-heard__input::placeholder {
+  color: var(--apple-text-tertiary);
+}
+
+.sidebar-last-heard__input:focus {
+  border-color: var(--apple-focus-ring);
+  box-shadow: 0 0 0 3px rgba(250, 88, 106, 0.18);
+}
+
+.sidebar-last-heard__send {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--apple-border-strong);
+  background: var(--apple-surface-raised);
+  color: var(--apple-text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.sidebar-last-heard__send:hover:not(:disabled) {
+  background: var(--apple-surface-strong);
+  border-color: var(--apple-focus-ring);
+}
+
+.sidebar-last-heard__send:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Feature 86 — Spatial Dashboard (cards matching stage pins)
+   Liquid-glass cards on the translucent dark panel.
+   ═══════════════════════════════════════════════════════════════ */
+.spatial-dashboard {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px;
+  height: 100%;
+  user-select: text;
+}
+
+.spatial-dashboard--empty {
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+}
+
+.spatial-topic {
+  font-size: 16px;
+  font-weight: 700;
+  color: #ffffff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  line-height: 1.35;
+}
+
+.spatial-overview {
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.spatial-cards {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.spatial-cards::-webkit-scrollbar { width: 4px; }
+.spatial-cards::-webkit-scrollbar-track { background: transparent; }
+.spatial-cards::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 2px;
+}
+
+.spatial-card {
+  background: rgba(28, 28, 34, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.spatial-card:hover,
+.spatial-card--active {
+  border-color: rgba(100, 210, 255, 0.65);
+  box-shadow:
+    0 0 0 1px rgba(100, 210, 255, 0.30),
+    0 8px 28px rgba(37, 158, 214, 0.25);
+}
+
+.spatial-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spatial-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 11px;
+  background: linear-gradient(135deg, #5a9eff, #259ed6);
+  color: #ffffff;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  box-shadow: 0 2px 8px rgba(37, 158, 214, 0.5);
+  flex-shrink: 0;
+}
+
+.spatial-label {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #ffffff;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spatial-category {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(100, 210, 255, 0.85);
+  background: rgba(100, 210, 255, 0.10);
+  padding: 3px 8px;
+  border-radius: 9999px;
+  flex-shrink: 0;
+}
+
+.spatial-summary {
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+.spatial-detail-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 2px;
+}
+
+.spatial-detail-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.spatial-detail-row:last-child {
+  border-bottom: none;
+}
+
+.spatial-detail-title {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.spatial-detail-value {
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 11.5px;
+  text-align: right;
+  word-break: break-word;
+}
+
+.spatial-provider {
+  font-size: 9.5px;
+  color: rgba(255, 255, 255, 0.3);
+  text-align: center;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ── Feature 87: annotate palette (liquid glass, theme-agnostic) ── */
+.annotate-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px 16px;
+  overflow-y: auto;
+}
+
+.annotate-title {
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+.annotate-count {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(37, 158, 214, 0.25);
+  border: 1px solid rgba(37, 158, 214, 0.5);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.annotate-tools {
+  display: flex;
+  gap: 6px;
+}
+
+.annotate-tool {
+  flex: 1;
+  height: 38px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+  font-size: 17px;
+  font-weight: 700;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.annotate-tool--active {
+  background: rgba(37, 158, 214, 0.35);
+  border-color: rgba(37, 158, 214, 0.8);
+  box-shadow: 0 0 12px rgba(37, 158, 214, 0.45);
+}
+
+.annotate-colors {
+  display: flex;
+  gap: 8px;
+}
+
+.annotate-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+
+.annotate-swatch--active {
+  border-color: #ffffff;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
+}
+
+.annotate-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.annotate-btn {
+  flex: 1;
+  padding: 8px 4px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.annotate-btn--primary {
+  background: rgba(37, 158, 214, 0.35);
+  border-color: rgba(37, 158, 214, 0.8);
+}
+
+.annotate-diagram {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.annotate-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.annotate-tab {
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.annotate-tab--active {
+  background: rgba(37, 158, 214, 0.3);
+  color: #ffffff;
+  border-color: rgba(37, 158, 214, 0.7);
+}
+
+.annotate-code {
+  margin: 0;
+  padding: 10px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #d7f3ff;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow-y: auto;
 }
 
 /* ── Sizing Scales ─────────────────────────────────────────────── */
@@ -254,42 +783,6 @@ body[data-platform="linux"] .sidebar-card::after {
   z-index: 2;
 }
 
-.sidebar-brand-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 4px 10px;
-  background: var(--apple-surface-muted);
-  border: 1px solid var(--apple-border-default);
-  border-radius: 9999px;
-}
-
-.sidebar-brand-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--apple-text-accent);
-}
-
-.sidebar-brand-name {
-  font-size: 11.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--apple-text-primary);
-  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
-}
-
-.sidebar-tag {
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  color: var(--apple-text-accent);
-  background: rgba(250, 88, 106, 0.14);
-  border: 1px solid rgba(250, 88, 106, 0.28);
-  padding: 1px 6px;
-  border-radius: 4px;
-}
-
 .sidebar-header-actions {
   display: flex;
   align-items: center;
@@ -327,86 +820,8 @@ body[data-platform="linux"] .sidebar-card::after {
   color: var(--apple-text-accent) !important;
 }
 
-.sidebar-action-btn--success {
-  background: rgba(48, 209, 88, 0.2) !important;
-  border-color: var(--apple-diff-easy) !important;
-  color: var(--apple-diff-easy) !important;
-}
-
-.sidebar-close-btn {
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border-radius: 50%;
-  margin-left: 2px;
-}
-
-.sidebar-close-btn:hover {
-  background: var(--apple-surface-raised);
-  border-color: var(--apple-border-strong);
-  color: var(--apple-text-primary);
-}
-
-.sidebar-font-size-icon {
-  font-weight: 700;
-  font-size: 11px;
-}
-.sidebar-font-size-label {
-  font-size: 9.5px;
-  opacity: 0.85;
-}
-
-/* ── User Query Banner ─────────────────────────────────────────── */
-.sidebar-query-card {
-  background: var(--apple-surface-muted);
-  border: 1px solid var(--apple-border-default);
-  border-left: 3px solid var(--apple-text-accent);
-  border-radius: 8px;
-  padding: 8px 12px;
-  flex-shrink: 0;
-  transition: all 0.2s ease;
-}
-
-.sidebar-query-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  cursor: pointer;
-  user-select: none;
-}
-
-.sidebar-query-title {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--apple-text-accent);
-}
-
-.sidebar-query-toggle {
-  background: transparent;
-  border: none;
-  color: var(--apple-text-tertiary);
-  cursor: pointer;
-  padding: 2px;
-  display: flex;
-  align-items: center;
-}
-
-.sidebar-query-text {
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--apple-text-primary);
-  margin-top: 5px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  user-select: text;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.8);
-}
-
 /* ── Response Scroll Area ── */
+/* (sidebar-query-* rules were here — deleted, audit L1: zero markup refs) */
 .sidebar-response {
   flex: 1;
   overflow-y: auto;
@@ -441,41 +856,60 @@ body[data-platform="linux"] .sidebar-card::after {
   user-select: text;
   -webkit-user-select: text;
   word-wrap: break-word;
+  overflow-wrap: break-word;
   text-shadow:
     0 1px 2px rgba(0, 0, 0, 0.95),
     0 2px 8px rgba(0, 0, 0, 0.7);
 }
 
-/* Headings */
-.nexus-h1, .nexus-h2, .nexus-h3, .nexus-h4, .nexus-h5, .nexus-h6 {
-  color: var(--apple-text-primary);
-  font-weight: 700;
-  margin-top: 18px;
-  margin-bottom: 10px;
-  line-height: 1.35;
-  letter-spacing: -0.015em;
-}
-.nexus-h1:first-child, .nexus-h2:first-child, .nexus-h3:first-child {
-  margin-top: 0;
+.nexus-markdown-body > :first-child {
+  margin-top: 0 !important;
 }
 
-.nexus-h1 {
-  font-size: var(--sidebar-h1-font);
-  border-bottom: 1px solid var(--apple-border-default);
-  padding-bottom: 6px;
+/* Headings — SF Pro typography hierarchy */
+.nexus-markdown-body h1,
+.nexus-markdown-body .nexus-h1 {
+  font-size: var(--sidebar-h1-font, 20px);
+  font-weight: 700;
+  line-height: 1.3;
   color: #ffffff;
+  margin: 18px 0 8px 0;
+  letter-spacing: -0.015em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
 }
-.nexus-h2 {
-  font-size: var(--sidebar-h2-font);
-  border-bottom: 1px solid var(--apple-border-default);
-  padding-bottom: 4px;
+
+.nexus-markdown-body h2,
+.nexus-markdown-body .nexus-h2 {
+  font-size: 16.5px;
+  font-weight: 650;
+  line-height: 1.35;
+  color: #ffffff;
+  margin: 16px 0 6px 0;
+  letter-spacing: -0.01em;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
 }
-.nexus-h3 {
-  font-size: var(--sidebar-h3-font);
-  color: #f2f2f7;
+
+.nexus-markdown-body h3,
+.nexus-markdown-body .nexus-h3 {
+  font-size: 14.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.95);
+  margin: 14px 0 5px 0;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
 }
-.nexus-h4, .nexus-h5, .nexus-h6 {
-  font-size: var(--sidebar-base-font);
+
+.nexus-markdown-body h4,
+.nexus-markdown-body .nexus-h4,
+.nexus-markdown-body h5,
+.nexus-markdown-body .nexus-h5,
+.nexus-markdown-body h6,
+.nexus-markdown-body .nexus-h6 {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.9);
+  margin: 12px 0 4px 0;
 }
 
 /* Paragraphs & Spacing */
@@ -599,6 +1033,11 @@ body[data-platform="linux"] .sidebar-card::after {
   font-size: 10.5px;
   font-weight: 500;
   transition: all 0.2s ease;
+}
+/* Copy affordances only apply to PR analyse / explain / find / research
+   responses — SidebarApp sets html[data-copy-enabled] from the query. */
+html[data-copy-enabled="false"] .nexus-copy-code-btn {
+  display: none !important;
 }
 .nexus-copy-code-btn:hover {
   background: var(--apple-surface-strong);
@@ -902,8 +1341,10 @@ body[data-platform="linux"] .sidebar-card::after {
 }
 
 .analysis-card {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--apple-surface-muted);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--apple-border-default);
   border-radius: 10px;
   padding: 12px 14px;
 }
@@ -938,7 +1379,7 @@ body[data-platform="linux"] .sidebar-card::after {
   font-size: 11px;
   padding: 3px 8px;
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--apple-surface-raised);
   color: var(--apple-text-secondary, #aaa);
   white-space: nowrap;
 }
@@ -955,186 +1396,14 @@ body[data-platform="linux"] .sidebar-card::after {
   margin: 0;
 }
 
-/* ── Language Chart ───────────────────────────────────────────── */
-.language-chart-container {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.language-chart-visual {
-  width: 140px;
-  height: 80px;
-  flex-shrink: 0;
-}
-
-.language-chart-legend {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  flex: 1;
-  min-width: 0;
-}
-
-.language-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-}
-
-.language-legend-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.language-legend-name {
-  color: var(--apple-text-primary, #e8e8e8);
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.language-legend-pct {
-  color: var(--apple-text-secondary, #999);
-  font-variant-numeric: tabular-nums;
-}
-
-/* ── Framework Chart ──────────────────────────────────────────── */
-.framework-chart-container {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.framework-chart-visual {
-  width: 80px;
-  height: 80px;
-  flex-shrink: 0;
-}
-
-.framework-chart-legend {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  flex: 1;
-  min-width: 0;
-}
-
-.framework-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-}
-
-.framework-legend-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.framework-legend-name {
-  color: var(--apple-text-primary, #e8e8e8);
-  white-space: nowrap;
-}
-
-.framework-legend-cat {
-  color: var(--apple-text-secondary, #777);
-  font-size: 10px;
-  text-transform: capitalize;
-}
-
-/* ── Databases ────────────────────────────────────────────────── */
-.analysis-databases {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.analysis-database-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.analysis-database-name {
-  font-weight: 600;
-  color: var(--apple-text-primary, #e8e8e8);
-}
-
-.analysis-database-evidence {
-  color: var(--apple-text-secondary, #777);
-  font-size: 10px;
-  font-style: italic;
-}
-
-/* ── Features ─────────────────────────────────────────────────── */
-.analysis-features {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.analysis-feature-item {
-  font-size: 12px;
-  color: var(--apple-text-primary, #e8e8e8);
-  padding-left: 14px;
-  position: relative;
-  line-height: 1.4;
-}
-
-.analysis-feature-item::before {
-  content: "•";
-  position: absolute;
-  left: 0;
-  color: rgba(100, 160, 255, 0.7);
-}
-
+/* Dead chart/activity/database/feature rules deleted (audit L1):
+   components render minimal-list* + *-minimal classes instead. */
 /* ── Architecture ─────────────────────────────────────────────── */
 .analysis-architecture {
   font-size: 12px;
   color: var(--apple-text-primary, #e8e8e8);
   line-height: 1.5;
   margin: 0;
-}
-
-/* ── Activity / Quality ───────────────────────────────────────── */
-.analysis-activity-grid {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.analysis-activity-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-}
-
-.analysis-activity-item.yes {
-  color: #6bdc6b;
-}
-
-.analysis-activity-item.no {
-  color: #dc6b6b;
-}
-
-.analysis-activity-icon {
-  font-size: 14px;
-}
-
-.analysis-activity-label {
-  white-space: nowrap;
 }
 
 .analysis-no-data {

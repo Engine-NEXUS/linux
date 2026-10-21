@@ -53,6 +53,28 @@ export interface ConfirmationData {
   command: any;
 }
 
+// ─── Feature 86: Spatial analysis data ──────────────────────────────
+
+export interface SpatialDetailRow {
+  title: string;
+  value: string;
+}
+
+export interface SpatialItemCard {
+  id: number;
+  label: string;
+  category: string;
+  summary: string;
+  details: SpatialDetailRow[];
+}
+
+export interface SpatialData {
+  title: string;
+  overview: string;
+  items: SpatialItemCard[];
+  provider_used: string;
+}
+
 interface SidebarState {
   visible: boolean;
   response: string;
@@ -65,11 +87,13 @@ interface SidebarState {
   analysisData: RepoAnalysis | null;
   conflictData: ConflictData | null;
   confirmationData: ConfirmationData | null;
+  spatialData: SpatialData | null;
 
   show: (query: string, text: string) => void;
   showAnalysis: (query: string, text: string, analysis: RepoAnalysis) => void;
   showConflict: (data: ConflictData) => void;
   showConfirmation: (data: ConfirmationData) => void;
+  showSpatial: (data: SpatialData) => void;
   hide: () => void;
   setFontSize: (size: SidebarFontSize) => void;
   setSpeaking: (speaking: boolean) => void;
@@ -91,6 +115,7 @@ export const useSidebar = create<SidebarState>((set) => ({
   analysisData: null,
   conflictData: null,
   confirmationData: null,
+  spatialData: null,
 
   show: (query: string, text: string) => {
     console.log("[sidebarStore] show called: query=", query?.substring(0, 50), "text=", text?.substring(0, 50));
@@ -148,6 +173,23 @@ export const useSidebar = create<SidebarState>((set) => ({
       analysisData: null,
       conflictData: null,
       confirmationData: data,
+      spatialData: null,
+    });
+  },
+
+  showSpatial: (data: SpatialData) => {
+    console.log("[sidebarStore] showSpatial called:", data.title, `${data.items?.length ?? 0} items`);
+    set({
+      visible: true,
+      query: data.title,
+      response: "",
+      timestamp: Date.now(),
+      speaking: false,
+      activeImage: null,
+      analysisData: null,
+      conflictData: null,
+      confirmationData: null,
+      spatialData: data,
     });
   },
 
@@ -159,6 +201,7 @@ export const useSidebar = create<SidebarState>((set) => ({
       analysisData: null,
       conflictData: null,
       confirmationData: null,
+      spatialData: null,
     }),
 
   setFontSize: (size: SidebarFontSize) => {
@@ -172,3 +215,16 @@ export const useSidebar = create<SidebarState>((set) => ({
 
   setCollapsedQuery: (collapsedQuery) => set({ collapsedQuery }),
 }));
+
+/**
+ * Escape-key dismissal hierarchy for NEXUS overlay windows (plan C3).
+ * An open in-window overlay (image lightbox, and by extension any future
+ * modal) always closes FIRST; only with nothing overlaying does Escape
+ * close the window itself. Pure function so the hierarchy is unit-tested
+ * and can't be silently reordered by a future edit.
+ */
+export type EscDismiss = "close-overlay" | "close-window";
+
+export function resolveEscDismiss(hasOverlayOpen: boolean): EscDismiss {
+  return hasOverlayOpen ? "close-overlay" : "close-window";
+}

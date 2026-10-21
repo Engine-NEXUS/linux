@@ -82,6 +82,7 @@ impl LiveResult {
 /// actions that only make sense in live mode (type, press, send).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "action")]
+#[allow(dead_code)]
 pub enum LiveIntent {
     #[serde(rename = "type_text")]
     TypeText { text: String },
@@ -401,8 +402,12 @@ pub async fn live_focus_app(target: String) -> Result<LiveResult, String> {
 }
 
 /// Cancel the current live-mode action and reset state.
+/// Also stops any running ghost task (voice "stop" path) and disarms
+/// the ghost session — safe to call when no ghost is active.
 #[tauri::command]
-pub async fn live_cancel() -> Result<LiveResult, String> {
+pub async fn live_cancel<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<LiveResult, String> {
+    crate::ghost::request_stop();
+    let _ = crate::ghost::ghost_abort(app).await;
     let ctx = state::context();
     ctx.reset();
     Ok(LiveResult::ok("Cancelled, sir."))
@@ -418,4 +423,113 @@ pub async fn live_get_state() -> Result<serde_json::Value, String> {
         "expired": ctx.is_expired(),
         "seconds_since_last_action": ctx.time_since_last_action().as_secs(),
     }))
+}
+
+/// Ghost WhatsApp drill (Phase 1 keyboard ghost): enter ghost session,
+/// Win-search open WhatsApp, search contact, type message, exit with a
+/// ready draft. Send is NOT included — `live_whatsapp_send`
+/// (confirm-gated) owns it. Stop word / mouse grab / Esc aborts cleanly.
+#[tauri::command]
+pub async fn live_ghost_whatsapp<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    contact: String,
+    message: String,
+) -> Result<LiveResult, String> {
+    for (tool, target) in [
+        ("open_app", "whatsapp"),
+        ("whatsapp_search", contact.as_str()),
+        ("type_text", message.as_str()),
+    ] {
+        if let safety::SafetyVerdict::Blocked(msg) = safety::safety_check(tool, Some(target)) {
+            return Ok(LiveResult::err(msg));
+        }
+    }
+    match commands::ghost_drill::whatsapp_drill(app, &contact, &message).await {
+        Ok(msg) => Ok(LiveResult::ok(msg)),
+        Err(e) => Ok(LiveResult::err(e)),
+    }
+}
+
+/// Ghost click (Phase 2 mouse ghost): enter ghost session, focus the app,
+/// resolve the element via UIA bounds, eased glide, click, verify the app
+/// is still foreground, glide home, exit. Stop word / mouse grab / Esc
+/// aborts cleanly at any step boundary.
+#[tauri::command]
+pub async fn live_ghost_click<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    app_title: String,
+    element: String,
+) -> Result<LiveResult, String> {
+    for (tool, target) in [
+        ("mouse_move", app_title.as_str()),
+        ("mouse_click", element.as_str()),
+    ] {
+        if let safety::SafetyVerdict::Blocked(msg) = safety::safety_check(tool, Some(target)) {
+            return Ok(LiveResult::err(msg));
+        }
+    }
+    if app_title.trim().is_empty() || element.trim().is_empty() {
+        return Ok(LiveResult::err("ghost click: app and element required"));
+    }
+    match commands::mouse::ghost_click(app, &app_title, &element).await {
+        Ok(msg) => Ok(LiveResult::ok(msg)),
+        Err(e) => Ok(LiveResult::err(e)),
+    }
+}
+
+/// Ghost calibration (Phase 4 hardening): enter ghost session, glide a
+/// 5-point grid, read back landing error per point, report max/mean
+/// deviation. The number the DPI math lives or dies by — run on each
+/// machine once, re-run after display changes. Aborts cleanly like
+/// any drill.
+#[tauri::command]
+pub async fn live_ghost_calibrate<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<LiveResult, String> {
+    if let safety::SafetyVerdict::Blocked(msg) = safety::safety_check("ghost_calibrate", None) {
+        return Ok(LiveResult::err(msg));
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        return Ok(LiveResult::err("ghost calibration is Windows-only for now"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use commands::mouse;
+        let wry = crate::ghost::ghost_wry::g_wry_ref(&app);
+        crate::ghost::ghost_enter(wry.clone()).await?;
+        crate::ghost::drill_begin();
+        crate::ghost::announce(wry, "Calibrating, sir. Don't touch the mouse.");
+        let stop = || crate::ghost::stop_requested() || !crate::ghost::session_active();
+        let run = mouse::calibration_probe(stop);
+        crate::ghost::drill_end();
+        let _ = crate::ghost::ghost_exit(wry.clone()).await;
+        match run {
+            Ok(rep) => {
+                let verdict = if rep.max_deviation_px <= 5 {
+                    "excellent"
+                } else if rep.max_deviation_px <= 15 {
+                    "acceptable"
+                } else {
+                    "poor — check display scaling"
+                };
+                let msg = format!(
+                    "Calibration: max {}px, mean {}px over {} points on {}x{}. {}",
+                    rep.max_deviation_px,
+                    rep.mean_deviation_px,
+                    rep.points,
+                    rep.monitor_w,
+                    rep.monitor_h,
+                    verdict
+                );
+                crate::ghost::announce(wry, &msg);
+                Ok(LiveResult::ok(msg))
+            }
+            Err(e) => {
+                crate::ghost::announce(wry, &e);
+                Ok(LiveResult::err(e))
+            }
+        }
+    }
 }

@@ -140,6 +140,22 @@ CATEGORIES = [
         ],
     },
     {
+        "id": "ghost",
+        "name": "Ghost Mode & Desktop Control",
+        "desc": "Ghost session takeover/exit, browser tab navigation, omnibox focus, dictation, screen email watch",
+        "intents": [
+            "ghost_mode_enter",
+            "ghost_mode_exit",
+            "browser_tab",
+            "browser_close_tab",
+            "browser_new_tab",
+            "browser_search_focus",
+            "start_dictation",
+            "stop_dictation",
+            "watch_screen_email",
+        ],
+    },
+    {
         "id": "media",
         "name": "Media & Audio Controls",
         "desc": "Play, pause, skip tracks, volume and media stopping",

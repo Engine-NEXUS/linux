@@ -1,8 +1,8 @@
 //! Real integration tests for Phase 2 TTS/STT engines.
 //!
-//! These tests make actual network calls (edge-tts, Groq) and real local
-//! synthesis (Piper). They are marked `#[ignore]` by default so they don't
-//! run in CI without network access. Run with:
+//! These tests make actual network calls (edge-tts, Groq). They are marked
+//! `#[ignore]` by default so they don't run in CI without network access.
+//! (The Piper tests were removed with the Piper engine in change 81.) Run with:
 //!
 //!   cargo test --test phase2_integration -- --ignored --nocapture
 
@@ -150,116 +150,6 @@ async fn test_edge_tts_multiple_voices() {
 }
 
 #[tokio::test]
-#[ignore = "requires Piper model in resources/piper/"]
-async fn test_piper_real_synthesis() {
-    println!("\n=== Testing Piper real synthesis ===");
-
-    // Set espeak-ng data path for test environment
-    // (test binary runs from target/debug/deps/, so go up to project root)
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let resources_dir = std::path::Path::new(manifest_dir).join("resources");
-    if resources_dir.join("espeak-ng-data").exists() {
-        std::env::set_var("PIPER_ESPEAKNG_DATA_DIRECTORY", &resources_dir);
-        println!("  Set espeak-ng data path: {}", resources_dir.display());
-    }
-
-    // Also set the piper model path by copying to expected location
-    // Or better: modify the test to pass the path directly
-    let piper_model = std::path::Path::new(manifest_dir)
-        .join("resources")
-        .join("piper")
-        .join("en_US-amy-medium.onnx");
-    let piper_config = std::path::Path::new(manifest_dir)
-        .join("resources")
-        .join("piper")
-        .join("en_US-amy-medium.onnx.json");
-
-    if !piper_model.exists() {
-        println!("⚠ Piper model not found at: {}", piper_model.display());
-        println!("  Download with:");
-        println!("    curl -L -o resources/piper/en_US-amy-medium.onnx \\");
-        println!("      https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx");
-        return;
-    }
-
-    println!("  Model: {}", piper_model.display());
-
-    // Load Piper directly (bypass the path-finding logic)
-    let start = std::time::Instant::now();
-    let mut piper = piper_rs::Piper::new(&piper_model, &piper_config)
-        .expect("failed to load Piper model");
-    let load_time = start.elapsed();
-    println!("  Model load time: {}ms", load_time.as_millis());
-
-    let text = "On it sir";
-    let synth_start = std::time::Instant::now();
-    let (samples, sample_rate) = piper
-        .create(text, false, None, None, None, None)
-        .expect("Piper synthesis failed");
-    let synth_time = synth_start.elapsed();
-
-    println!("✓ Piper synthesis succeeded");
-    println!("  Text: '{}'", text);
-    println!("  Sample rate: {}Hz", sample_rate);
-    println!("  Samples: {}", samples.len());
-    println!("  Duration: {}ms", samples.len() as u64 * 1000 / sample_rate as u64);
-    println!("  Synthesis latency: {}ms", synth_time.as_millis());
-
-    // Verify samples are valid (not all zeros, not empty)
-    assert!(!samples.is_empty(), "No samples returned");
-    let max_sample = samples.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
-    assert!(max_sample > 0.01, "Audio is silent (max sample = {})", max_sample);
-    println!("  Max sample amplitude: {:.4}", max_sample);
-    println!("  Audio validation: PASS (non-silent)");
-}
-
-#[tokio::test]
-#[ignore = "requires Piper model in resources/piper/"]
-async fn test_piper_all_cached_phrases() {
-    println!("\n=== Testing Piper with all cached phrases ===");
-
-    let engine = nexus_lib::tts_piper::new_engine();
-    let phrases = [
-        "On it sir",
-        "Didn't understand that sir",
-        "Didn't catch that sir",
-        "Here is the analysis, sir",
-        "Ok sir",
-    ];
-
-    let mut all_ok = true;
-
-    for phrase in &phrases {
-        let start = std::time::Instant::now();
-        let result = nexus_lib::tts_piper::synthesize(&engine, phrase).await;
-        let elapsed = start.elapsed();
-
-        match result {
-            Ok((samples, sr)) => {
-                let duration_ms = samples.len() as u64 * 1000 / sr as u64;
-                println!(
-                    "  ✓ '{}' → {} samples, {}ms audio, {}ms latency",
-                    phrase,
-                    samples.len(),
-                    duration_ms,
-                    elapsed.as_millis()
-                );
-            }
-            Err(e) => {
-                println!("  ✗ '{}' FAILED: {}", phrase, e);
-                all_ok = false;
-            }
-        }
-    }
-
-    if all_ok {
-        println!("\n✓ All Piper phrases synthesized successfully");
-    } else {
-        println!("\n⚠ Some Piper phrases failed (model may not be installed)");
-    }
-}
-
-#[tokio::test]
 #[ignore = "requires network access + GROQ_API_KEY env var"]
 async fn test_groq_stt_real_transcription() {
     println!("\n=== Testing Groq STT real transcription ===");
@@ -292,7 +182,7 @@ async fn test_groq_stt_real_transcription() {
     let client = reqwest::Client::new();
 
     let start = std::time::Instant::now();
-    let result = nexus_lib::stt_groq::transcribe_with_groq(&samples, &api_key, &client).await;
+    let result = nexus_lib::stt_groq::transcribe_with_groq(&samples, &api_key, &client, None).await;
     let elapsed = start.elapsed();
 
     match result {

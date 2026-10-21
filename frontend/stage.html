@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NEXUS Stage</title>
+    <style>
+      /* Fullscreen overlay: no margins, no scrollbars, see-through base.
+         Without this the browser-default 8px body margin grows both
+         scrollbars on the fullscreen window (live bug, doc 44). */
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        background: transparent;
+        background-color: rgba(0, 0, 0, 0);
+      }
+      #root {
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        background: transparent;
+        background-color: rgba(0, 0, 0, 0);
+      }
+      /* Force WebView2 to use alpha channel for fullscreen transparent windows */
+      @supports (-webkit-backdrop-filter: none) {
+        html { background-color: rgba(0, 0, 0, 0) !important; }
+        body { background-color: rgba(0, 0, 0, 0) !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/stage/main.tsx"></script>
+  </body>
+</html>

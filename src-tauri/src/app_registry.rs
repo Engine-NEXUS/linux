@@ -24,6 +24,16 @@ use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Linux platform layer: `.desktop` discovery, EWMH focus and the process
+/// table. Split out so the shared registry stays platform neutral.
+///
+/// `#[path]` is needed because a child of a non-`mod.rs` module is looked up
+/// under `src/app_registry/` — the same idiom `screen.rs` uses for
+/// `screen_linux.rs`.
+#[cfg(target_os = "linux")]
+#[path = "app_registry_linux.rs"]
+pub(crate) mod app_registry_linux;
+
 // ─── Types ─────────────────────────────────────────────────────────────────
 
 /// How to launch an app on each platform.
@@ -87,7 +97,7 @@ const REFRESH_CHECK_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 
 /// A resolved app mapping — remembers which app was chosen for a spoken phrase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResolutionEntry {
+pub(crate) struct ResolutionEntry {
     /// The display name of the matched app
     display_name: String,
     /// The search name that was matched
@@ -214,6 +224,31 @@ pub fn init() {
         tracing::info!("app registry: loaded {} resolution cache entries", res.len());
     }
 
+    // Self-heal data poisoned by the old fuzzy launches (inflated installer
+    // use_counts, unrelated phrases pinned to an installer). Idempotent: a
+    // clean registry changes nothing. The resolution file is backed up once
+    // before anything is dropped.
+    {
+        let mut cache = registry.cache.write();
+        let mut res = registry.resolution.write();
+        let (reset, dropped) = heal_poisoned_entries(&mut cache, &mut res);
+        if reset > 0 || dropped > 0 {
+            tracing::warn!(
+                "app registry: healed {reset} inflated installer usage count(s) and dropped {dropped} poisoned resolution entr{}",
+                if dropped == 1 { "y" } else { "ies" }
+            );
+            if dropped > 0 {
+                let src = resolution_cache_path();
+                let bak = src.with_file_name("app_resolution_cache.pre-heal.json");
+                if src.exists() && !bak.exists() {
+                    let _ = std::fs::copy(&src, &bak);
+                }
+                let snapshot: HashMap<String, ResolutionEntry> = res.clone();
+                std::thread::spawn(move || save_resolution_cache(&snapshot));
+            }
+        }
+    }
+
     // Background thread: scan if needed, then check hourly for new day
     std::thread::Builder::new()
         .name("app-registry-refresh".into())
@@ -240,6 +275,11 @@ pub fn init() {
     init_window_cache();
 }
 
+/// Returns the number of cached app entries.
+pub fn cached_app_count() -> usize {
+    REGISTRY.cache.read().len()
+}
+
 /// Look up an app by name. Returns the best match or None.
 /// This is the hot path — must be <1ms.
 ///
@@ -248,6 +288,53 @@ pub fn init() {
 ///   2. Exact match in app cache — O(1)
 ///   3. Prefix/contains/fuzzy match — O(n) but only on cache miss
 pub fn lookup(query: &str) -> Option<AppEntry> {
+    lookup_with_key(query).map(|(entry, _)| entry)
+}
+
+/// How a registry hit was found. Only `Resolved`, `Exact` and a well-covered
+/// `Prefix` may launch without asking; `Contains` and `Fuzzy` are guesses
+/// ("Did you mean …?"). Live misfire 2026-10-12: guesses launched an Intel
+/// installer and Google Chat from garbled WhatsApp phrases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchKind {
+    /// A phrase the user (or a confirmation) previously mapped to this app.
+    Resolved,
+    /// The query IS a registry key.
+    Exact,
+    /// The query is a prefix of a key ("calc" -> "calculator"), or a key plus
+    /// generic filler ("brave browser" -> "brave").
+    Prefix,
+    /// The query contains a key, or a key contains the query ("mummy chat" -> "chat").
+    Contains,
+    /// Within two edits of a key ("chroem" -> "chrome").
+    Fuzzy,
+}
+
+/// Words that may trail an app key without changing which app is meant.
+const GENERIC_SUFFIX_WORDS: &[&str] = &[
+    "app", "application", "browser", "program", "software", "desktop", "client", "window", "windows",
+];
+
+/// True when `rest` (what follows a key inside a query) is only filler words.
+fn only_generic_suffix(rest: &str) -> bool {
+    let mut any = false;
+    for w in rest.split_whitespace() {
+        if !GENERIC_SUFFIX_WORDS.contains(&w) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Same as [`lookup`], but also returns the registry key that matched,
+/// so callers can measure match confidence (see [`assess_open_target`]).
+pub fn lookup_with_key(query: &str) -> Option<(AppEntry, String)> {
+    lookup_with_kind(query).map(|(entry, key, _)| (entry, key))
+}
+
+/// Tiered lookup that also reports HOW the app was found ([`MatchKind`]).
+pub fn lookup_with_kind(query: &str) -> Option<(AppEntry, String, MatchKind)> {
     let registry = &*REGISTRY;
     let q = query.to_lowercase();
 
@@ -262,12 +349,12 @@ pub fn lookup(query: &str) -> Option<AppEntry> {
             // Try exact match on the resolved display name first
             for entry in cache.values() {
                 if entry.display_name.to_lowercase() == resolved.display_name.to_lowercase() {
-                    return Some(entry.clone());
+                    return Some((entry.clone(), resolved.matched_name.clone(), MatchKind::Resolved));
                 }
             }
             // Fallback: try the matched_name
             if let Some(entry) = cache.get(&resolved.matched_name) {
-                return Some(entry.clone());
+                return Some((entry.clone(), resolved.matched_name.clone(), MatchKind::Resolved));
             }
             // Resolution cache is stale (app may have been uninstalled) — fall through
             tracing::debug!(
@@ -279,55 +366,305 @@ pub fn lookup(query: &str) -> Option<AppEntry> {
     }
 
     let cache = registry.cache.read();
+    lookup_in(&cache, &q)
+}
 
+/// Strict lookup for callers that REWRITE the spoken text (the intent parser):
+/// only hits that are safe to treat as "the user named this app" — a
+/// previously resolved phrase, an exact key, or a well-covered prefix.
+/// Guesses return None so the spoken words survive to the launch gate, which
+/// asks instead of launching.
+pub fn lookup_strict(query: &str) -> Option<AppEntry> {
+    let (entry, key, kind) = lookup_with_kind(query)?;
+    match kind {
+        MatchKind::Resolved | MatchKind::Exact => Some(entry),
+        MatchKind::Prefix if match_confidence(query, &key) >= 0.5 => Some(entry),
+        _ => None,
+    }
+}
+
+/// Pure tiered lookup over an app cache (unit-tested). The resolution cache
+/// is consulted by the caller first.
+fn lookup_in(
+    cache: &HashMap<String, AppEntry>,
+    q: &str,
+) -> Option<(AppEntry, String, MatchKind)> {
     // 2. Exact match (O(1) HashMap lookup)
-    if let Some(entry) = cache.get(&q) {
-        return Some(entry.clone());
+    if let Some(entry) = cache.get(q) {
+        return Some((entry.clone(), q.to_string(), MatchKind::Exact));
     }
+    let qlen = q.chars().count();
 
-    // 3. Prefix match — "calc" matches "calculator"
-    let mut best: Option<(&AppEntry, usize)> = None;
+    // 3. Prefix match — "calc" matches "calculator"; "brave browser" matches
+    // "brave" (key + generic filler only).
+    let mut best: Option<(&AppEntry, String, usize)> = None;
     for (name, entry) in cache.iter() {
-        if name.starts_with(&q) || q.starts_with(name.as_str()) {
-            let score = score_match(&q, name, entry);
-            if best.is_none() || score > best.unwrap().1 {
-                best = Some((entry, score));
+        let query_is_prefix = qlen >= 3 && name.starts_with(q);
+        let key_plus_filler = name.chars().count() >= 4
+            && q.starts_with(name.as_str())
+            && only_generic_suffix(&q[name.len()..]);
+        if query_is_prefix || key_plus_filler {
+            let score = score_match(q, name, entry);
+            if best.is_none() || score > best.as_ref().unwrap().2 {
+                best = Some((entry, name.clone(), score));
             }
         }
     }
+    if let Some((e, k, _)) = best {
+        return Some((e.clone(), k, MatchKind::Prefix));
+    }
 
-    // 4. Contains match — "chrome" in "google chrome".
-    // Guard: keys shorter than 4 chars never participate — a 3-letter key
-    // like "the"/"top" would otherwise match almost any query via
-    // q.contains(name) and hijack it (last-write-wins key ownership).
-    if best.is_none() {
-        for (name, entry) in cache.iter() {
-            if name.len() < 4 {
-                continue;
+    // 4. Contains match — "chrome" in "google chrome", or a key inside a longer
+    // phrase. This tier is a GUESS. Keys shorter than 4 chars never take part:
+    // a 3-letter key like "the"/"top" would otherwise match almost any query
+    // (last-write-wins key ownership).
+    for (name, entry) in cache.iter() {
+        if name.chars().count() < 4 {
+            continue;
+        }
+        if (qlen >= 3 && name.contains(q)) || q.contains(name.as_str()) {
+            let score = score_match(q, name, entry);
+            if best.is_none() || score > best.as_ref().unwrap().2 {
+                best = Some((entry, name.clone(), score));
             }
-            if name.contains(&q) || q.contains(name.as_str()) {
-                let score = score_match(&q, name, entry);
-                if best.is_none() || score > best.unwrap().1 {
-                    best = Some((entry, score));
+        }
+    }
+    if let Some((e, k, _)) = best {
+        return Some((e.clone(), k, MatchKind::Contains));
+    }
+
+    // 5. Levenshtein fuzzy match (typos: "chroem" -> "chrome"). A GUESS.
+    if qlen >= 4 {
+        for (name, entry) in cache.iter() {
+            let dist = levenshtein(q, name);
+            if dist <= 2 && dist < qlen / 2 {
+                let score = score_match(q, name, entry);
+                if best.is_none() || score > best.as_ref().unwrap().2 {
+                    best = Some((entry, name.clone(), score));
                 }
             }
         }
     }
+    best.map(|(e, k, _)| (e.clone(), k, MatchKind::Fuzzy))
+}
 
-    // 5. Levenshtein fuzzy match (for typos: "chroem" → "chrome")
-    if best.is_none() && q.len() >= 3 {
-        for (name, entry) in cache.iter() {
-            let dist = levenshtein(&q, name);
-            if dist <= 2 && dist < q.len() / 2 {
-                let score = score_match(&q, name, entry);
-                if best.is_none() || score > best.unwrap().1 {
-                    best = Some((entry, score));
-                }
+/// Stopwords ignored when measuring query coverage (a leading "the"
+/// must not dilute "the brave" → brave, nor rescue "the brief").
+const QUERY_STOPWORDS: &[&str] = &["the", "a", "an"];
+
+/// Words marking installer-class software. Matches against BOTH the query
+/// and the matched app name (see [`assess_open_target`]).
+const INSTALLER_WORDS: &[&str] = &[
+    "install",
+    "installer",
+    "setup",
+    "update",
+    "uninstall",
+    "patch",
+];
+
+/// Query-coverage confidence of a registry match: fraction of the query's
+/// content tokens covered by the matched key. 1.0 = the query names the
+/// app outright ("brave" → brave); 0.0 = no overlap ("the brief" →
+/// anything). Pure (unit-tested).
+pub fn match_confidence(query: &str, matched_name: &str) -> f32 {
+    // Owned buffers first: token slices borrow these, not temporaries.
+    let query_lower = query.to_lowercase();
+    let tokens: Vec<&str> = query_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty() && !QUERY_STOPWORDS.contains(s))
+        .collect();
+    if tokens.is_empty() {
+        return 0.0;
+    }
+    let name_lower = matched_name.to_lowercase();
+    let name_tokens: Vec<&str> = name_lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut hit = 0usize;
+    for t in tokens.iter() {
+        let t: &str = t;
+        for n in name_tokens.iter() {
+            let n: &str = n;
+            if t == n || t.contains(n) || n.contains(t) {
+                hit += 1;
+                break;
             }
         }
     }
+    hit as f32 / tokens.len() as f32
+}
 
-    best.map(|(e, _)| e.clone())
+/// True when an app name looks like installer-class software.
+/// Prefix-aware ("uninstaller" matches "uninstall") — installer words
+/// essentially never appear in everyday app names.
+pub fn is_installer_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    INSTALLER_WORDS.iter().any(|w| {
+        lower
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|tok| tok == *w || tok.starts_with(*w))
+    })
+}
+
+/// Verdict for opening an app by spoken phrase.
+pub enum OpenAssessment {
+    /// Confident match — execute normally.
+    Proceed(AppEntry),
+    /// No registry match at all — caller falls back to legacy resolvers.
+    ProceedLegacy,
+    /// A guess (contains / fuzzy / low coverage): speak `message` and arm an
+    /// "open this app?" offer for `entry`. Nothing is launched.
+    Confirm { entry: AppEntry, message: String },
+    /// Unconfirmed installer — caller must speak this message and execute
+    /// NOTHING (no launch, no Win-search drill).
+    Refuse { message: String },
+}
+
+/// True when an exe path looks like installer/setup software even though its
+/// Start-menu display name is friendly (the live "Intel® Driver & Support
+/// Assistant" entry launches `...\Package Cache\{..}\...-Installer.exe`).
+pub(crate) fn path_looks_like_installer(path: &str) -> bool {
+    let lower = path.to_lowercase().replace('\\', "/");
+    if lower.contains("/package cache/") || lower.contains("/$patchcache$/") || lower.contains("/installer/") {
+        return true;
+    }
+    let file = lower.rsplit('/').next().unwrap_or("");
+    let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+    is_installer_name(stem)
+}
+
+pub(crate) fn launch_looks_like_installer(entry: &AppEntry) -> bool {
+    match &entry.launch {
+        LaunchMethod::Exe { path } | LaunchMethod::AppPath { path } => path_looks_like_installer(path),
+        _ => false,
+    }
+}
+
+/// Gate every spoken app-open through match-kind, confidence and installer
+/// rules. Live ghost misfires: 2026-10-07 "open the brief" fuzzy-matched an
+/// Intel installer; 2026-10-12 garbled "open my chat with mummy in whatsapp"
+/// launched the Intel Driver & Support Assistant installer twice and Google
+/// Chat once, each followed by "Ok sir.". Rules:
+/// - only Resolved / Exact / well-covered Prefix matches proceed;
+/// - Contains / Fuzzy matches and low coverage are guesses: ask, never launch;
+/// - installer-class match (display name OR exe path) without installer words
+///   in the query itself ("open intel software installer" is explicit) → refuse;
+/// - registry miss → ProceedLegacy (legacy resolvers keep working).
+/// Pure decision apart from the registry read itself (unit-tested).
+pub fn assess_open_target(query: &str) -> OpenAssessment {
+    let Some((entry, matched, kind)) = lookup_with_kind(query) else {
+        return OpenAssessment::ProceedLegacy;
+    };
+    let query_has_installer_word = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|tok| INSTALLER_WORDS.contains(&tok));
+    if (is_installer_name(&entry.display_name) || launch_looks_like_installer(&entry))
+        && !query_has_installer_word
+    {
+        tracing::warn!(
+            "app-match: installer '{}' without explicit installer words in '{}', refusing",
+            entry.display_name,
+            query
+        );
+        return OpenAssessment::Refuse {
+            message: format!(
+                "That's '{}', which looks like an installer — say the full name to confirm.",
+                entry.display_name
+            ),
+        };
+    }
+    let confidence = match_confidence(query, &matched);
+    let confident = match kind {
+        MatchKind::Resolved | MatchKind::Exact => true,
+        MatchKind::Prefix => confidence >= 0.5,
+        MatchKind::Contains | MatchKind::Fuzzy => false,
+    };
+    if !confident {
+        tracing::warn!(
+            "app-match: guess ({:?}, coverage {:.2}) '{}' → '{}', asking first",
+            kind,
+            confidence,
+            query,
+            entry.display_name
+        );
+        let message = format!(
+            "I couldn't find '{}' exactly — did you mean {}?",
+            query.trim(),
+            entry.display_name
+        );
+        return OpenAssessment::Confirm { entry, message };
+    }
+    OpenAssessment::Proceed(entry)
+}
+
+/// Remember that the user confirmed `spoken` means `display_name`, so the
+/// next time it resolves directly (a `Resolved` hit). Only called after an
+/// explicit "yes" — never from an unconfirmed fuzzy match.
+pub fn confirm_resolution(spoken: &str, display_name: &str) {
+    let q = spoken.trim().to_lowercase();
+    if q.is_empty() {
+        return;
+    }
+    let registry = &*REGISTRY;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let snapshot = {
+        let mut res = registry.resolution.write();
+        let e = res.entry(q.clone()).or_insert_with(|| ResolutionEntry {
+            display_name: display_name.to_string(),
+            matched_name: q.clone(),
+            use_count: 0,
+            last_used: 0,
+        });
+        e.display_name = display_name.to_string();
+        e.use_count += 1;
+        e.last_used = now;
+        res.clone()
+    };
+    std::thread::spawn(move || save_resolution_cache(&snapshot));
+}
+
+/// One-time self-healing of data poisoned by the old fuzzy launches:
+/// - installer-class apps (by name or exe path) get `use_count` reset to 0
+///   (it had been inflated to 40 by wrong launches, which then won ties);
+/// - resolution entries that pin an unrelated phrase to an installer-class
+///   app are dropped (a phrase unrelated to the app by name and not one of
+///   its own keys).
+/// Legit user aliases for ordinary apps are never touched. Returns
+/// (usage counts reset, resolution entries dropped).
+pub(crate) fn heal_poisoned_entries(
+    cache: &mut HashMap<String, AppEntry>,
+    res: &mut HashMap<String, ResolutionEntry>,
+) -> (usize, usize) {
+    let mut reset = 0;
+    for e in cache.values_mut() {
+        if e.use_count > 0 && (is_installer_name(&e.display_name) || launch_looks_like_installer(e)) {
+            e.use_count = 0;
+            reset += 1;
+        }
+    }
+    let installer_displays: std::collections::HashSet<String> = cache
+        .values()
+        .filter(|e| is_installer_name(&e.display_name) || launch_looks_like_installer(e))
+        .map(|e| e.display_name.to_lowercase())
+        .collect();
+    let before = res.len();
+    res.retain(|phrase, r| {
+        let target = r.display_name.to_lowercase();
+        if !installer_displays.contains(&target) {
+            return true;
+        }
+        let is_own_key = cache.values().any(|e| {
+            e.display_name.to_lowercase() == target && e.search_names.iter().any(|n| n == phrase)
+        });
+        is_own_key || match_confidence(phrase, &target) >= 0.5
+    });
+    (reset, before - res.len())
 }
 
 /// Force a manual refresh of the app registry (e.g. "NEXUS, refresh apps").
@@ -479,99 +816,307 @@ pub fn init_window_cache() {
         .ok();
 }
 
+/// What happened when NEXUS tried to focus an already-running app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FocusOutcome {
+    /// A window was found and actually raised.
+    Focused,
+    /// The app's process is running, but its window is not mapped yet. The
+    /// caller should wait for the window — not start a second copy.
+    WindowNotReady,
+    /// The app IS running, but this session cannot raise its window. The
+    /// string is a speakable explanation for the user.
+    RunningCannotFocus(String),
+    /// Nothing matching is open.
+    NotRunning,
+}
+
 /// Check if an app is already running and focus its window.
-/// Returns true if an existing window was found and focused.
-/// This is the FIRST priority in the launch flow.
-pub fn try_focus_existing(entry: &AppEntry) -> bool {
-    let cache = WINDOW_CACHE.read();
-    if cache.is_empty() {
+///
+/// Returns what happened, so the caller can tell "focused" from "the process
+/// is up but its window is not mapped yet" from "running but this session
+/// cannot raise it" from "not running". This is the FIRST priority in the
+/// launch flow.
+///
+/// The distinction matters on Linux. A native Wayland session has no way to
+/// raise another app's window, but the app may still be running: reporting
+/// "not running" would make the caller launch a second copy of an app the
+/// user already has open, and reporting "focused" would be a lie the user
+/// sees as a window that never came up.
+pub fn focus_existing(entry: &AppEntry) -> FocusOutcome {
+    // The cached list is refreshed only periodically, so a window opened a moment ago was invisible
+    // here and every repeat of "open notepad" launched ANOTHER one (7 windows in a live test).
+    // A live scan costs a few ms and is the only honest answer to "is it already open?".
+    refresh_window_cache();
+
+    // Linux: the process table is read ONCE per call and every question
+    // below asks that one snapshot. A cached table would report "not
+    // running" for an app that started a moment ago, and the caller would
+    // launch a second copy of it. Only desktop entries have a process to
+    // look for, so a URL entry skips the scan entirely.
+    #[cfg(target_os = "linux")]
+    let snapshot = if linux_process_names(entry).is_empty() {
+        None
+    } else {
+        Some(app_registry_linux::ProcessSnapshot::capture())
+    };
+
+    // Linux first: the window that belongs to the app's running process is
+    // the exact match. The title rarely equals the `.desktop` name ("Text
+    // Editor" vs "gedit", "Firefox" vs "Mozilla Firefox"), so the PID is
+    // what identifies the window.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(outcome) = linux_focus_running_window(entry, snapshot.as_ref()) {
+            return outcome;
+        }
+    }
+
+    {
+        let cache = WINDOW_CACHE.read();
+        let own_pid = std::process::id();
+
+        // Process identity first (most reliable), then title identity. Both
+        // require a real name — a generic word like "chat"/"assistant" never
+        // identifies a window (it focused a ChatGPT window and NEXUS's own stage).
+        for pass_title in [false, true] {
+            for w in cache.iter() {
+                if !window_matches_entry(&w.title, &w.process_name, entry, w.pid == own_pid) {
+                    continue;
+                }
+                let by_process = process_identity_matches(&w.process_name, entry);
+                if by_process == pass_title {
+                    continue; // handled in the other pass
+                }
+                tracing::info!(
+                    "focus hit: '{}' matched window '{}' / process '{}' (pid={})",
+                    entry.display_name,
+                    w.title,
+                    w.process_name,
+                    w.pid
+                );
+                if focus_window(w.hwnd) {
+                    return FocusOutcome::Focused;
+                }
+                return FocusOutcome::RunningCannotFocus(cannot_focus_reason());
+            }
+        }
+    }
+
+    // The app's process is up, but no window of it could be raised.
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(outcome) = linux_window_not_ready(entry, snapshot.as_ref()) {
+            return outcome;
+        }
+    }
+
+    // Nothing matching is open: the caller launches the app.
+    #[cfg(target_os = "linux")]
+    let outcome = app_registry_linux::focus_outcome(
+        app_registry_linux::FocusFacts::NotRunning,
+        false,
+        None,
+    );
+    #[cfg(not(target_os = "linux"))]
+    let outcome = FocusOutcome::NotRunning;
+    outcome
+}
+
+/// Linux: the process names the app can run under.
+#[cfg(target_os = "linux")]
+fn linux_process_names(entry: &AppEntry) -> Vec<String> {
+    match entry_exec(entry) {
+        Some(exec) => app_registry_linux::exec_process_names(exec),
+        None => Vec::new(),
+    }
+}
+
+/// Linux: raise the window that belongs to the app's running process.
+///
+/// `None` when the app is not running, or when it runs without a window of
+/// its own — the caller then tries the name-based paths.
+#[cfg(target_os = "linux")]
+fn linux_focus_running_window(
+    entry: &AppEntry,
+    snapshot: Option<&app_registry_linux::ProcessSnapshot>,
+) -> Option<FocusOutcome> {
+    let names = linux_process_names(entry);
+    if names.is_empty() {
+        return None;
+    }
+    let snapshot = snapshot?;
+    // The SAME rule as "is it running?" — an app with no process of its own
+    // has no window to raise either.
+    let pids = app_registry_linux::app_pids(snapshot, &names)?;
+    let windows: Vec<(u64, u32)> = WINDOW_CACHE
+        .read()
+        .iter()
+        .map(|w| (w.hwnd.max(0) as u64, w.pid))
+        .collect();
+    let id = app_registry_linux::window_id_for_pids(&windows, &pids)?;
+    if focus_window(id as isize) {
+        return Some(FocusOutcome::Focused);
+    }
+    let blocked = app_registry_linux::focus_blocked_reason_now();
+    Some(app_registry_linux::focus_outcome(
+        app_registry_linux::FocusFacts::WindowFound,
+        false,
+        blocked.as_deref(),
+    ))
+}
+
+/// Linux: the app runs, but no window of it could be raised.
+///
+/// The window may simply not be mapped yet — the app is still starting — so
+/// the caller waits for it instead of starting a second copy.
+#[cfg(target_os = "linux")]
+fn linux_window_not_ready(
+    entry: &AppEntry,
+    snapshot: Option<&app_registry_linux::ProcessSnapshot>,
+) -> Option<FocusOutcome> {
+    let names = linux_process_names(entry);
+    if names.is_empty() {
+        return None;
+    }
+    let snapshot = snapshot?;
+    // The SAME rule as the window pick above: only the app's own process
+    // counts. A different product with a similar name ("code-insiders" for
+    // "code") must not make the app look like it is running — the caller
+    // would then wait for a window that will never come instead of
+    // launching the app the user asked for.
+    let _pids = app_registry_linux::app_pids(snapshot, &names)?;
+    // Last chance to raise it: the display-name regex.
+    if app_registry_linux::focus_by_title(&entry.display_name) {
+        return Some(FocusOutcome::Focused);
+    }
+    let blocked = app_registry_linux::focus_blocked_reason_now();
+    Some(app_registry_linux::focus_outcome(
+        app_registry_linux::FocusFacts::ProcessOnly,
+        false,
+        blocked.as_deref(),
+    ))
+}
+
+/// The command line of a desktop entry, if that is how the app is launched.
+#[cfg(target_os = "linux")]
+fn entry_exec(entry: &AppEntry) -> Option<&str> {
+    match &entry.launch {
+        LaunchMethod::DesktopExec { exec } => Some(exec.as_str()),
+        _ => None,
+    }
+}
+
+/// Speakable explanation for why an already-running app could not be raised.
+#[cfg(target_os = "linux")]
+fn cannot_focus_reason() -> String {
+    app_registry_linux::blocked_reason_message(
+        app_registry_linux::focus_blocked_reason_now().as_deref(),
+    )
+}
+
+/// Speakable explanation for why an already-running app could not be raised.
+#[cfg(not(target_os = "linux"))]
+fn cannot_focus_reason() -> String {
+    "I couldn't raise that window, sir.".to_string()
+}
+
+/// How long a launch is considered "still starting": a Store app or a slow exe can take seconds to
+/// show its first window, and a repeated command inside that time must not launch it again.
+pub const LAUNCH_SETTLE: std::time::Duration = std::time::Duration::from_secs(8);
+
+static RECENT_LAUNCH: Lazy<parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+    Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Remember that `entry` was just launched.
+pub fn note_launched(entry: &AppEntry) {
+    RECENT_LAUNCH.lock().insert(entry.display_name.to_lowercase(), std::time::Instant::now());
+}
+
+/// True when `entry` was launched less than `LAUNCH_SETTLE` ago.
+pub fn recently_launched(entry: &AppEntry) -> bool {
+    RECENT_LAUNCH
+        .lock()
+        .get(&entry.display_name.to_lowercase())
+        .map_or(false, |t| t.elapsed() < LAUNCH_SETTLE)
+}
+
+/// Single words too generic to identify a window or an app on their own.
+const GENERIC_IDENTITY_WORDS: &[&str] = &[
+    "chat", "support", "assistant", "driver", "drivers", "manager", "center", "centre", "studio",
+    "browser", "helper", "service", "services", "update", "updater", "settings", "setup", "tools",
+    "tool", "player", "viewer", "editor", "console", "terminal", "launcher", "client", "desktop",
+    "cloud", "online", "mobile", "messenger", "store", "music", "video", "photos", "camera",
+    "notes", "clock", "file", "files", "web", "mail", "security", "system", "device", "devices",
+    "free", "pro", "lite", "new", "code",
+];
+
+fn process_stem(process_name: &str) -> String {
+    let lower = process_name.to_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
+/// The window's process IS this app: its exe name equals one of the app's
+/// keys (spaces ignored: "vs code" ↔ "vscode"/"code" is NOT assumed, only equality).
+fn process_identity_matches(process_name: &str, entry: &AppEntry) -> bool {
+    let stem = process_stem(process_name);
+    if stem.is_empty() {
         return false;
     }
+    entry.search_names.iter().any(|t| {
+        let compact: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+        t == &stem || compact == stem
+    })
+}
 
-    // Build search terms from the entry
-    let search_terms: Vec<&str> = entry.search_names.iter().map(|s| s.as_str()).collect();
+/// Pure: does this window belong to `entry`? (`is_own_window` = it belongs to
+/// the NEXUS process itself and is never a candidate.)
+pub(crate) fn window_matches_entry(
+    title: &str,
+    process_name: &str,
+    entry: &AppEntry,
+    is_own_window: bool,
+) -> bool {
+    if is_own_window {
+        return false;
+    }
+    if process_identity_matches(process_name, entry) {
+        return true;
+    }
+    let title_lower = title.to_lowercase();
+    if title_lower.is_empty() {
+        return false;
+    }
+    // The full display name appears in the title.
     let display_lower = entry.display_name.to_lowercase();
-
-    // Priority 1: Match by window title (most reliable)
-    // e.g. "YouTube - Brave" matches "youtube"
-    for w in cache.iter() {
-        let title_lower = w.title.to_lowercase();
-        if search_terms.iter().any(|term| title_lower.contains(term)) {
-            tracing::info!(
-                "focus hit: '{}' matched window title '{}' (pid={})",
-                entry.display_name,
-                w.title,
-                w.pid
-            );
-            return focus_window(w.hwnd);
-        }
+    if display_lower.chars().count() >= 4 && title_lower.contains(&display_lower) {
+        return true;
     }
-
-    // Priority 2: Match by process name
-    // e.g. "notepad.exe" matches "notepad"
-    for w in cache.iter() {
-        let proc_lower = &w.process_name;
-        if search_terms.iter().any(|term| proc_lower.contains(term)) {
-            tracing::info!(
-                "focus hit: '{}' matched process '{}' (pid={})",
-                entry.display_name,
-                w.process_name,
-                w.pid
-            );
-            return focus_window(w.hwnd);
+    let words: Vec<&str> = title_lower
+        .split(|c: char| !(c.is_alphanumeric() || c == '®'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    entry.search_names.iter().any(|term| {
+        let term_words: Vec<&str> = term.split_whitespace().collect();
+        if term_words.len() >= 2 {
+            // A multi-word key ("google chat") is identity on its own.
+            return title_lower.contains(term.as_str());
         }
-    }
-
-    // Priority 3: Match by display name in title
-    for w in cache.iter() {
-        let title_lower = w.title.to_lowercase();
-        if title_lower.contains(&display_lower) {
-            tracing::info!(
-                "focus hit: '{}' matched display name in title '{}' (pid={})",
-                entry.display_name,
-                w.title,
-                w.pid
-            );
-            return focus_window(w.hwnd);
-        }
-    }
-
-    false
+        // A single word counts only if it is long, distinctive and whole-word.
+        term.chars().count() >= 6
+            && !GENERIC_IDENTITY_WORDS.contains(&term.as_str())
+            && words.iter().any(|w| w == &term.as_str())
+    })
 }
 
 /// Focus a window: restore if minimized, bring to foreground.
 /// Uses AttachThreadInput trick to bypass Windows' focus-stealing prevention
 /// (NEXUS is a background process, so SetForegroundWindow would normally be rejected).
-/// Focus a window by (partial) title on Linux/X11.
 ///
-/// Separate from [`focus_window`] because that one takes a native handle from
-/// the `wmctrl`-populated cache, whereas callers here only have a display name.
-/// Both go through EWMH; the title form is what `command_executor` needs when it
-/// has detected a running process but not its window id.
-#[cfg(target_os = "linux")]
-pub fn focus_by_title(partial_title: &str) -> bool {
-    if partial_title.trim().is_empty() || !crate::session::has_x11_input() {
-        return false;
-    }
-    match std::process::Command::new("wmctrl")
-        .args(["-a", partial_title])
-        .status()
-    {
-        Ok(st) => st.success(),
-        Err(e) => {
-            tracing::debug!("focus_by_title: wmctrl unavailable: {e}");
-            false
-        }
-    }
-}
-
-/// Focus a window, returning whether it actually happened.
-///
-/// Returns `bool` rather than `()` because the previous signature made
-/// "did nothing" indistinguishable from "succeeded": `try_focus_existing`
-/// returned `true` unconditionally on every platform, so on Linux the app told
-/// the user "Ok sir" after a no-op. `docs/features/research/22-…` §6 rates this
-/// defect #2 (correctness and trust).
+/// Returns whether the window was actually raised. The previous signature
+/// made "did nothing" indistinguishable from "succeeded": `try_focus_existing`
+/// returned `true` unconditionally on every platform, so on Linux the app
+/// told the user "Ok sir" after a no-op.
 fn focus_window(hwnd_val: isize) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -615,40 +1160,11 @@ fn focus_window(hwnd_val: isize) -> bool {
     }
 
     // Linux/X11 (including XWayland): EWMH lets any client raise and focus a
-    // window, so this genuinely works. `xdotool windowactivate` is preferred over
-    // `wmctrl -i -a` because it also restores a minimised window, matching the
-    // Windows arm's restore-if-minimised behaviour.
-    #[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
+    // window, so this genuinely works — as long as `wmctrl` is installed.
+    // Native Wayland has no EWMH at all, and the call fails honestly there.
+    #[cfg(target_os = "linux")]
     {
-        if !crate::session::has_x11_input() {
-            tracing::warn!(
-                "focus_window: {} — EWMH unavailable, not attempting",
-                crate::session::diagnostic_line()
-            );
-            return false;
-        }
-        let hwnd = hwnd_val.to_string();
-        for cmd in [vec!["windowactivate", "--sync", &hwnd], vec!["windowraise", &hwnd]] {
-            match std::process::Command::new("xdotool").args(&cmd).output() {
-                Ok(out) if out.status.success() => {
-                    tracing::debug!("focus_window: xdotool {} ok", cmd[0]);
-                    return true;
-                }
-                Ok(out) => tracing::debug!(
-                    "focus_window: xdotool {} failed ({})",
-                    cmd[0],
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-                Err(e) => tracing::debug!("focus_window: xdotool {} spawn failed: {e}", cmd[0]),
-            }
-        }
-        false
-    }
-
-    #[cfg(all(target_os = "linux", feature = "mock-wake"))]
-    {
-        let _ = hwnd_val;
-        false
+        app_registry_linux::focus_window_id(hwnd_val)
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -656,6 +1172,17 @@ fn focus_window(hwnd_val: isize) -> bool {
         let _ = hwnd_val;
         false
     }
+}
+
+/// Focus a window by (partial) title on Linux/X11.
+///
+/// Separate from [`focus_window`] because that one takes a native handle from
+/// the `wmctrl`-populated cache, whereas callers here only have a display name.
+/// Both go through EWMH; the title form is what `command_executor` needs when it
+/// has detected a running process but not its window id.
+#[cfg(target_os = "linux")]
+pub fn focus_by_title(partial_title: &str) -> bool {
+    app_registry_linux::focus_by_title(partial_title)
 }
 
 /// Refresh the window cache by enumerating all visible windows.
@@ -727,30 +1254,26 @@ fn refresh_window_cache() {
 
     #[cfg(target_os = "linux")]
     {
-        // Linux: `wmctrl -a` focuses by title. We could cache `wmctrl -l` output.
-        use std::process::Command;
-        let output = Command::new("wmctrl").args(["-l", "-p"]).output();
-        if let Ok(out) = output {
-            if out.status.success() {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let mut windows: Vec<CachedWindow> = Vec::new();
-                for line in stdout.lines() {
-                    // wmctrl -l -p format: <hwnd> <desktop> <pid> <host> <title>
-                    let parts: Vec<&str> = line.splitn(5, char::is_whitespace).collect();
-                    if parts.len() < 5 { continue; }
-                    let hwnd = parts[0].parse::<isize>().unwrap_or(0);
-                    let pid = parts[2].parse::<u32>().unwrap_or(0);
-                    let title = parts[4..].join(" ");
-                    windows.push(CachedWindow {
-                        hwnd,
-                        pid,
-                        title,
-                        process_name: String::new(),
-                    });
-                }
-                *WINDOW_CACHE.write() = windows;
-            }
-        }
+        // X11 only: `wmctrl -l -p` lists the X11 windows. On native Wayland
+        // there is no such list, so the cache stays empty and the focus path
+        // falls back to the process table (which does work on Wayland).
+        //
+        // The ids in that output are hexadecimal (`0x03e00006`) and the
+        // columns are padded with runs of spaces — reading them as decimal
+        // and splitting on single spaces is what made the cache empty and
+        // every focus attempt fail.
+        let windows: Vec<CachedWindow> = app_registry_linux::list_windows()
+            .into_iter()
+            .map(|w| CachedWindow {
+                hwnd: w.id as isize,
+                pid: w.pid,
+                title: w.title,
+                process_name: String::new(),
+            })
+            .collect();
+        let count = windows.len();
+        *WINDOW_CACHE.write() = windows;
+        tracing::trace!("window cache refreshed: {} windows", count);
     }
 }
 
@@ -805,6 +1328,11 @@ fn score_match(query: &str, name: &str, entry: &AppEntry) -> usize {
 }
 
 fn levenshtein(a: &str, b: &str) -> usize {
+    // Operate on chars throughout. The old version took `len()` (bytes) for
+    // the matrix width but iterated `chars()`, so a key containing `®` (2
+    // bytes) read an unwritten column and returned 0 for odd-length queries.
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
     let m = a.len();
     let n = b.len();
     if m == 0 { return n; }
@@ -813,9 +1341,9 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let mut prev: Vec<usize> = (0..=n).collect();
     let mut curr = vec![0; n + 1];
 
-    for (i, ca) in a.chars().enumerate() {
+    for (i, ca) in a.iter().enumerate() {
         curr[0] = i + 1;
-        for (j, cb) in b.chars().enumerate() {
+        for (j, cb) in b.iter().enumerate() {
             let cost = if ca == cb { 0 } else { 1 };
             curr[j + 1] = (prev[j + 1] + 1)
                 .min(curr[j] + 1)
@@ -1608,231 +2136,14 @@ fn read_macos_bundle_id(app_path: &std::path::Path) -> Option<String> {
 }
 
 // ─── Linux discovery ───────────────────────────────────────────────────────
+//
+// The Linux implementation lives in `app_registry_linux.rs`: XDG data dirs
+// plus the Flatpak and Snap exports, with the desktop-entry filters
+// (`Hidden`, `NoDisplay`, `OnlyShowIn`, `NotShowIn`, `TryExec`) honoured.
 
 #[cfg(target_os = "linux")]
 fn discover_linux(entries: &mut Vec<AppEntry>) {
-    let home = std::env::var("HOME").unwrap_or_default();
-
-    // XDG data directories
-    let xdg_dirs = std::env::var("XDG_DATA_DIRS")
-        .unwrap_or_else(|_| "/usr/share:/usr/local/share".to_string());
-
-    let mut dirs: Vec<String> = xdg_dirs
-        .split(':')
-        .map(|d| format!("{}/applications", d))
-        .collect();
-    dirs.push(format!("{}/.local/share/applications", home));
-    // Flatpak
-    dirs.push("/var/lib/flatpak/exports/share/applications".to_string());
-    dirs.push(format!("{}/.local/share/flatpak/exports/share/applications", home));
-    // Snap
-    dirs.push("/var/lib/snapd/desktop/applications".to_string());
-
-    for dir in &dirs {
-        let path = std::path::Path::new(dir);
-        if !path.exists() { continue; }
-        if let Ok(readdir) = std::fs::read_dir(path) {
-            for entry in readdir.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_string();
-                if !fname.ends_with(".desktop") { continue; }
-
-                if let Some(app_entry) = parse_desktop_file(&entry.path()) {
-                    entries.push(app_entry);
-                }
-            }
-        }
-    }
-
-    // Also try `flatpak list` for installed Flatpak apps
-    discover_flatpak_apps(entries);
-
-    // PWAs installed via Chrome/Brave/Edge
-    discover_linux_pwas(entries);
-
-    tracing::info!("discovered {} apps from Linux", entries.len());
-}
-
-/// Discover PWAs installed via Chrome, Brave, or Edge on Linux.
-/// These are stored as .desktop files in the browser's profile directory
-/// with Type=Application and WebApp=true.
-#[cfg(target_os = "linux")]
-fn discover_linux_pwas(entries: &mut Vec<AppEntry>) {
-    let home = std::env::var("HOME").unwrap_or_default();
-
-    // Chrome/Brave/Edge store PWAs in their profile directories
-    let pwa_dirs = [
-        // Chrome
-        format!("{}/.local/share/applications/chrome", home),
-        // Brave
-        format!("{}/.local/share/applications/brave", home),
-        // Edge
-        format!("{}/.local/share/applications/microsoft-edge", home),
-        // Generic — some browsers put PWAs directly in applications/
-        format!("{}/.local/share/applications", home),
-    ];
-
-    let existing: std::collections::HashSet<String> = entries
-        .iter()
-        .map(|e| e.display_name.to_lowercase())
-        .collect();
-
-    let mut count = 0;
-    for dir in &pwa_dirs {
-        let path = std::path::Path::new(dir);
-        if !path.exists() { continue; }
-        if let Ok(readdir) = std::fs::read_dir(path) {
-            for entry in readdir.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_string();
-                if !fname.ends_with(".desktop") { continue; }
-
-                // Check if this is a PWA (has WebApp=true or StartupWMClass)
-                if let Some(app_entry) = parse_pwa_desktop_file(&entry.path()) {
-                    if !existing.contains(&app_entry.display_name.to_lowercase()) {
-                        entries.push(app_entry);
-                        count += 1;
-                    }
-                }
-            }
-        }
-    }
-    if count > 0 {
-        tracing::debug!("discovered {} PWAs from Linux browsers", count);
-    }
-}
-
-/// Parse a .desktop file that might be a PWA.
-/// Returns Some(AppEntry) if the file has WebApp=true or is from a browser profile.
-#[cfg(target_os = "linux")]
-fn parse_pwa_desktop_file(path: &std::path::Path) -> Option<AppEntry> {
-    let content = std::fs::read_to_string(path).ok()?;
-    if !content.contains("[Desktop Entry]") { return None; }
-
-    let mut is_webapp = false;
-    let mut name = String::new();
-    let mut exec = String::new();
-    let mut icon = String::new();
-
-    for line in content.lines() {
-        if let Some(val) = line.strip_prefix("Name=") {
-            name = val.to_string();
-        } else if let Some(val) = line.strip_prefix("Exec=") {
-            exec = val.to_string();
-        } else if let Some(val) = line.strip_prefix("Icon=") {
-            icon = val.to_string();
-        } else if line.starts_with("Type=Application") {
-            // Check for WebApp indicator
-        } else if line.contains("WebApp=true") || line.contains("StartupWMClass=") {
-            is_webapp = true;
-        }
-    }
-
-    // Only include if it looks like a PWA
-    if !is_webapp || name.is_empty() || exec.is_empty() { return None; }
-
-    let _ = icon; // icon not used yet
-    let search_names = build_search_names(&name);
-    Some(AppEntry {
-        display_name: name,
-        search_names,
-        launch: LaunchMethod::DesktopExec { exec },
-        use_count: 0,
-        last_used: 0,
-    })
-}
-
-/// Use `flatpak list` to find installed Flatpak apps.
-/// These may not have .desktop files in the standard XDG directories.
-#[cfg(target_os = "linux")]
-fn discover_flatpak_apps(entries: &mut Vec<AppEntry>) {
-    use std::process::Command;
-
-    let output = Command::new("flatpak")
-        .args(["list", "--columns=application,name"])
-        .output();
-
-    let stdout = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return, // flatpak not installed
-    };
-
-    let existing: std::collections::HashSet<String> = entries
-        .iter()
-        .map(|e| e.display_name.to_lowercase())
-        .collect();
-
-    let mut count = 0;
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(2, '\t').collect();
-        if parts.len() < 2 { continue; }
-        let app_id = parts[0];
-        let name = parts[1];
-        if name.is_empty() || existing.contains(&name.to_lowercase()) { continue; }
-
-        // Launch via `flatpak run <app_id>`
-        let exec = format!("flatpak run {}", app_id);
-        let search_names = build_search_names(name);
-        entries.push(AppEntry {
-            display_name: name.to_string(),
-            search_names,
-            launch: LaunchMethod::DesktopExec { exec },
-            use_count: 0,
-            last_used: 0,
-        });
-        count += 1;
-    }
-    if count > 0 {
-        tracing::debug!("discovered {} additional apps from flatpak", count);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn parse_desktop_file(path: &std::path::Path) -> Option<AppEntry> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let mut name = String::new();
-    let mut exec = String::new();
-    let mut no_display = false;
-    let mut in_desktop_entry = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[Desktop Entry]" {
-            in_desktop_entry = true;
-            continue;
-        }
-        if trimmed.starts_with('[') {
-            in_desktop_entry = false;
-            continue;
-        }
-        if !in_desktop_entry { continue; }
-
-        if let Some(val) = trimmed.strip_prefix("Name=") {
-            if name.is_empty() { name = val.to_string(); }
-        } else if let Some(val) = trimmed.strip_prefix("Exec=") {
-            exec = val.to_string();
-        } else if trimmed.starts_with("NoDisplay=true") {
-            no_display = true;
-        }
-    }
-
-    if name.is_empty() || exec.is_empty() || no_display {
-        return None;
-    }
-
-    // Clean exec line: remove field codes like %u, %U, %f, %F
-    let clean_exec = exec
-        .split_whitespace()
-        .filter(|w| !w.starts_with('%'))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let search_names = build_search_names(&name);
-    Some(AppEntry {
-        display_name: name,
-        search_names,
-        launch: LaunchMethod::DesktopExec { exec: clean_exec },
-        use_count: 0,
-        last_used: 0,
-    })
+    app_registry_linux::discover(entries);
 }
 
 // ─── URL fallbacks (all platforms) ─────────────────────────────────────────
@@ -1943,6 +2254,39 @@ fn build_search_names(display_name: &str) -> Vec<String> {
     names
 }
 
+/// Test-only: install a known app list into the process-global registry.
+/// The registry is global state, so installs are serialised by a lock held
+/// for the lifetime of the returned guard (dropping it empties the registry).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct Installed(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    pub(crate) fn install(entries: Vec<AppEntry>) -> Installed {
+        let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = REGISTRY.cache.write();
+        cache.clear();
+        for e in entries {
+            for n in e.search_names.clone() {
+                cache.insert(n, e.clone());
+            }
+        }
+        REGISTRY.resolution.write().clear();
+        Installed(guard)
+    }
+
+    impl Drop for Installed {
+        fn drop(&mut self) {
+            REGISTRY.cache.write().clear();
+            REGISTRY.resolution.write().clear();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1977,5 +2321,281 @@ mod tests {
         assert!(is_stopword("app"));
         assert!(!is_stopword("chrome"));
         assert!(!is_stopword("creative"));
+    }
+
+    #[test]
+    fn test_match_confidence_tiers() {
+        // Exact and alias matches are full confidence.
+        assert_eq!(match_confidence("brave", "brave"), 1.0);
+        assert_eq!(match_confidence("vs code", "vs code"), 1.0);
+        // Leading stopwords don't dilute ("the brave" → brave).
+        assert_eq!(match_confidence("the brave", "brave"), 1.0);
+        // Partial coverage passes the 0.5 floor ("brave browser").
+        assert!(match_confidence("brave browser", "brave") >= 0.5);
+        // The live misfire: "the brief" covers nothing installer-like.
+        assert_eq!(match_confidence("the brief", "intel software installer"), 0.0);
+        assert_eq!(match_confidence("the brief", "brave"), 0.0);
+        // Empty-after-stopwords is zero, never NaN.
+        assert_eq!(match_confidence("the", "brave"), 0.0);
+        assert_eq!(match_confidence("", "brave"), 0.0);
+    }
+
+    #[test]
+    fn test_is_installer_name() {
+        for name in [
+            "Intel Software Installer",
+            "Node.js Setup",
+            "Windows Update Assistant",
+            "App Uninstaller",
+            "Security Patch",
+        ] {
+            assert!(is_installer_name(name), "{name} should be installer-class");
+        }
+        for name in ["Brave", "Brave Browser", "Visual Studio Code", "Spotify", "Notepad"] {
+            assert!(!is_installer_name(name), "{name} should not be installer-class");
+        }
+    }
+
+    #[test]
+    fn test_assess_gibberish_falls_to_legacy() {
+        // No registry key can match a 24-char random token (contains,
+        // prefix, and levenshtein gates all fail) — legacy chain keeps
+        // working for true misses on every machine.
+        match assess_open_target("zzzqqqxkcdnonexistentapp") {
+            OpenAssessment::ProceedLegacy => {}
+            _ => panic!("gibberish must fall through to legacy resolvers"),
+        }
+    }
+
+    // ── Live ghost misfires 2026-10-12 (docs/changes/126) ─────────────────
+
+    fn app(display: &str, names: &[&str], path: &str) -> AppEntry {
+        AppEntry {
+            display_name: display.to_string(),
+            search_names: names.iter().map(|s| s.to_string()).collect(),
+            launch: LaunchMethod::Exe { path: path.to_string() },
+            use_count: 0,
+            last_used: 0,
+        }
+    }
+
+    /// A registry shaped like the user's real one: five `®` keys (the Intel
+    /// installer family), a bare `chat` key (Google Chat), and normal apps.
+    fn live_like_cache() -> HashMap<String, AppEntry> {
+        let intel = app(
+            "Intel® Driver & Support Assistant",
+            &["intel® driver & support assistant", "intel® driver", "intel®"],
+            r"C:\ProgramData\Package Cache\{abc}\Intel-Driver-and-Support-Assistant-Installer.exe",
+        );
+        let apps = vec![
+            intel,
+            app("Intel® Software Installer", &["intel® software installer"], r"C:\x\setup.exe"),
+            app("Google Chat", &["google chat", "chat"], r"C:\x\chat.exe"),
+            app("WhatsApp", &["whatsapp"], r"C:\x\whatsapp.exe"),
+            app("Brave", &["brave", "brave browser"], r"C:\x\brave.exe"),
+            app("Calculator", &["calculator"], r"C:\x\calc.exe"),
+            app("Google Chrome", &["google chrome", "chrome"], r"C:\x\chrome.exe"),
+        ];
+        let mut m = HashMap::new();
+        for a in apps {
+            for n in &a.search_names {
+                m.insert(n.clone(), a.clone());
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn levenshtein_is_char_based_not_byte_based() {
+        // The bug: lengths were taken in BYTES but columns iterated in CHARS,
+        // so any key containing a multi-byte char (`®`) read garbage and a
+        // 0-distance "match" for odd-length queries.
+        assert_eq!(levenshtein("abc", "abc"), 0);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("intel®", "intel®"), 0);
+        assert_eq!(levenshtein("intel®", "intel"), 1);
+        assert_eq!(levenshtein("intel®", "intelx"), 1);
+        assert!(levenshtein("my chart with mommy and what so", "intel® driver & support assistant") > 10);
+    }
+
+    #[test]
+    fn garbled_whatsapp_chat_phrases_do_not_match_the_intel_installer() {
+        let c = live_like_cache();
+        for q in [
+            "my chart with mommy and what so", // 31 chars (odd)
+            "mommychart",                       // even; its space variant is odd
+            "m ommychart",
+        ] {
+            let hit = lookup_in(&c, q);
+            assert!(
+                hit.as_ref().map_or(true, |(e, _, _)| !e.display_name.contains('®')),
+                "{q:?} must never reach an Intel® entry, got {:?}",
+                hit.map(|(e, k, kind)| (e.display_name, k, kind))
+            );
+        }
+    }
+
+    #[test]
+    fn exact_and_filler_matches_may_launch() {
+        let c = live_like_cache();
+        let kind = |q: &str| lookup_in(&c, q).map(|(e, _, k)| (e.display_name, k));
+        assert_eq!(kind("brave"), Some(("Brave".into(), MatchKind::Exact)));
+        assert_eq!(kind("whatsapp"), Some(("WhatsApp".into(), MatchKind::Exact)));
+        // Key + generic filler word is still the same app.
+        assert_eq!(kind("whatsapp app"), Some(("WhatsApp".into(), MatchKind::Prefix)));
+        // Query is a prefix of the key ("calc" -> "calculator").
+        assert_eq!(kind("calc"), Some(("Calculator".into(), MatchKind::Prefix)));
+    }
+
+    #[test]
+    fn guesses_are_never_prefix_or_exact() {
+        let c = live_like_cache();
+        // "mummy chat" merely CONTAINS the generic key `chat`: a guess.
+        let (e, _, kind) = lookup_in(&c, "mummy chat").expect("contains tier still finds it");
+        assert_eq!(e.display_name, "Google Chat");
+        assert_eq!(kind, MatchKind::Contains);
+        // Key + non-generic words ("chat with mummy") is also only a guess.
+        let (_, _, kind) = lookup_in(&c, "chat with mummy").expect("found");
+        assert_ne!(kind, MatchKind::Prefix);
+        assert_ne!(kind, MatchKind::Exact);
+        // A typo is a guess too.
+        let (e, _, kind) = lookup_in(&c, "chroem").expect("fuzzy tier");
+        assert_eq!(e.display_name, "Google Chrome");
+        assert_eq!(kind, MatchKind::Fuzzy);
+    }
+
+    #[test]
+    fn exe_path_installers_are_detected_even_with_a_friendly_display_name() {
+        // Display name is "Intel® Driver & Support Assistant" (no installer
+        // word) but it launches ...\Package Cache\...-Installer.exe.
+        let c = live_like_cache();
+        let intel = c.get("intel®").unwrap();
+        assert!(!is_installer_name(&intel.display_name));
+        assert!(launch_looks_like_installer(intel));
+        assert!(!launch_looks_like_installer(c.get("brave").unwrap()));
+        assert!(path_looks_like_installer(r"C:\Users\x\AppData\Local\Temp\Node-Setup.exe"));
+        assert!(path_looks_like_installer(r"C:\ProgramData\Package Cache\{1}\a.exe"));
+        assert!(!path_looks_like_installer(r"C:\Program Files\Brave\brave.exe"));
+    }
+
+    #[test]
+    fn window_focus_needs_a_real_identity_not_a_generic_word() {
+        let chat = app("Google Chat", &["google chat", "chat"], r"C:\x\chat.exe");
+        // The live bug: "chat" matched a ChatGPT window.
+        assert!(!window_matches_entry("ChatGPT Classic", "chatgpt.exe", &chat, false));
+        // ...and our own window titled com.nexus.assistant-siw matched "assistant".
+        let intel = app("Intel® Driver & Support Assistant", &["intel®", "driver", "support", "assistant"], r"C:\x\i.exe");
+        assert!(!window_matches_entry("com.nexus.assistant-siw", "nexus.exe", &intel, true));
+        assert!(!window_matches_entry("Assistant", "other.exe", &intel, false));
+        // Real identities still focus.
+        assert!(window_matches_entry("Google Chat - Brave", "brave.exe", &chat, false));
+        let brave = app("Brave", &["brave", "brave browser"], r"C:\x\brave.exe");
+        assert!(window_matches_entry("New Tab", "brave.exe", &brave, false));
+        let yt = app("YouTube", &["youtube"], r"C:\x\yt.exe");
+        assert!(window_matches_entry("YouTube - Brave", "brave.exe", &yt, false));
+        let notepad = app("Notepad", &["notepad"], r"C:\x\notepad.exe");
+        assert!(window_matches_entry("Untitled - Notepad", "notepad.exe", &notepad, false));
+    }
+
+    fn live_like_entries() -> Vec<AppEntry> {
+        let mut seen = std::collections::HashSet::new();
+        live_like_cache()
+            .into_values()
+            .filter(|e| seen.insert(e.display_name.clone()))
+            .collect()
+    }
+
+    fn label(a: &OpenAssessment) -> &'static str {
+        match a {
+            OpenAssessment::Proceed(_) => "Proceed",
+            OpenAssessment::ProceedLegacy => "ProceedLegacy",
+            OpenAssessment::Confirm { .. } => "Confirm",
+            OpenAssessment::Refuse { .. } => "Refuse",
+        }
+    }
+
+    #[test]
+    fn gate_asks_instead_of_launching_guesses() {
+        let _g = test_support::install(live_like_entries());
+        // The live misfire: "open mummy chat" launched Google Chat (+ "Ok sir.").
+        match assess_open_target("mummy chat") {
+            OpenAssessment::Confirm { entry, message } => {
+                assert_eq!(entry.display_name, "Google Chat");
+                assert!(message.contains("did you mean Google Chat"), "{message}");
+            }
+            other => panic!("expected Confirm, got {}", label(&other)),
+        }
+        // A typo is a guess too.
+        assert!(matches!(assess_open_target("chroem"), OpenAssessment::Confirm { .. }));
+        // Named apps still open at once.
+        for q in ["whatsapp", "brave", "calculator", "calc", "brave browser"] {
+            let a = assess_open_target(q);
+            assert!(matches!(a, OpenAssessment::Proceed(_)), "{q} must proceed, got {}", label(&a));
+        }
+        // The Intel installer is refused by its exe path even for its friendly name,
+        // and a garble that used to reach it now matches nothing (legacy path).
+        assert!(matches!(assess_open_target("intel®"), OpenAssessment::Refuse { .. }));
+        assert!(matches!(
+            assess_open_target("my chart with mommy and what so"),
+            OpenAssessment::ProceedLegacy
+        ));
+    }
+
+    #[test]
+    fn confirmed_phrase_resolves_directly_next_time() {
+        let _g = test_support::install(live_like_entries());
+        assert!(matches!(assess_open_target("mummy chat"), OpenAssessment::Confirm { .. }));
+        confirm_resolution("mummy chat", "Google Chat");
+        match lookup_with_kind("mummy chat") {
+            Some((e, _, MatchKind::Resolved)) => assert_eq!(e.display_name, "Google Chat"),
+            other => panic!("expected a Resolved hit, got {:?}", other.map(|(e, _, k)| (e.display_name, k))),
+        }
+        assert!(matches!(assess_open_target("mummy chat"), OpenAssessment::Proceed(_)));
+    }
+
+    #[test]
+    fn heal_resets_installer_usage_and_drops_unrelated_resolutions() {
+        let mut cache = live_like_cache();
+        for e in cache.values_mut() {
+            if e.display_name.contains('®') {
+                e.use_count = 40;
+            }
+            if e.display_name == "Brave" {
+                e.use_count = 7;
+            }
+        }
+        let mk = |display: &str| ResolutionEntry {
+            display_name: display.to_string(),
+            matched_name: String::new(),
+            use_count: 1,
+            last_used: 1,
+        };
+        let mut res: HashMap<String, ResolutionEntry> = HashMap::new();
+        // Poisoned: an unrelated phrase pinned to the installer.
+        res.insert("my chart with mommy and what so".into(), mk("Intel® Driver & Support Assistant"));
+        // Legit: a key of that app.
+        res.insert("brave".into(), mk("Brave"));
+        // Legit alias the user taught ("my browser" -> Brave has no word overlap, but Brave is not installer-class).
+        res.insert("my browser".into(), mk("Brave"));
+        let (reset, dropped) = heal_poisoned_entries(&mut cache, &mut res);
+        assert!(reset >= 1, "installer usage counts reset");
+        assert_eq!(dropped, 1);
+        assert!(!res.contains_key("my chart with mommy and what so"));
+        assert!(res.contains_key("brave"));
+        assert!(res.contains_key("my browser"));
+        assert!(cache.values().filter(|e| e.display_name.contains('®')).all(|e| e.use_count == 0));
+        assert_eq!(cache.get("brave").unwrap().use_count, 7, "legit usage untouched");
+    }
+
+    #[test]
+    fn a_just_launched_app_is_not_launched_again() {
+        let e = app("ZzzDebounceProbe", &["zzzdebounceprobe"], "C:/x/a.exe");
+        assert!(!recently_launched(&e));
+        note_launched(&e);
+        assert!(recently_launched(&e));
+        let other = app("Other Thing", &["other thing"], "C:/x/b.exe");
+        assert!(!recently_launched(&other));
     }
 }

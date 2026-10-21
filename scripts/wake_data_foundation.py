@@ -32,6 +32,10 @@ REQUIRED_FIELDS = {
 LABELS = {"positive", "negative", "background"}
 SPLITS = {"train", "validation", "test"}
 VOLUMES = {"whisper", "quiet", "normal", "loud"}
+# Personal-model speakers: the wake model is tuned for its owner's voice, so the
+# owner (and the owner's room recordings) must appear in train AND test. For
+# these, separation is by session / source group, which are still enforced.
+PERSONAL_SPEAKERS = {"owner", "room"}
 
 
 def file_sha256(path):
@@ -55,13 +59,16 @@ def fingerprint_models():
         "sample_rate_hz": 16000,
         "classifier_input": [1, 16, 96],
         "classifier_output": [1, 1],
+        # Engine constants as implemented in src-tauri/src/wakeword_oww.rs. The
+        # threshold, high-pass, silence gate and pre-gain are NOT model properties:
+        # they come from acoustic_profile.json (AppData first, then resources).
         "runtime": {
-            "wake_threshold": 0.35,
-            "silence_rms_threshold": 0.002,
-            "target_rms": 0.03,
-            "max_gain": 20.0,
-            "restart_grace_seconds": 10,
-            "refractory_milliseconds": 3000
+            "threshold_source": "acoustic_profile.json kws_threshold",
+            "startup_grace_milliseconds": 1500,
+            "refractory_milliseconds": 3000,
+            "smoothing_frames": 12,
+            "agc_target_rms": 0.035,
+            "agc_max_gain": 30.0
         },
         "models": models,
     }
@@ -137,7 +144,7 @@ def validate_audio_manifest(require_data):
             counts[row["split"]] += 1
             counts[row["label"]] += 1
     for speaker, splits in speakers_by_split.items():
-        if len(splits) > 1:
+        if len(splits) > 1 and speaker not in PERSONAL_SPEAKERS:
             errors.append(f"speaker {speaker} spans splits: {sorted(splits)}")
     for group, splits in groups_by_split.items():
         if len(splits) > 1:

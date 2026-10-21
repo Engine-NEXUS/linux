@@ -1,0 +1,65 @@
+{
+  "actionable": {
+    "count": 35,
+    "distinct_accelerator_strings": {},
+    "with_accelerator_key": 0,
+    "with_accelerator_pct": 0.0,
+    "with_access_key": 0,
+    "with_access_pct": 0.0,
+    "with_any_keyboard_or_pattern": 35,
+    "with_any_pct": 100.0,
+    "with_expand_collapse": 1,
+    "with_invoke": 32,
+    "with_invoke_pct": 91.4,
+    "with_selection_item": 2,
+    "with_shortcut_in_name": 0,
+    "with_shortcut_in_name_pct": 0.0,
+    "with_toggle": 0
+  },
+  "examples_shortcut_in_name": [],
+  "examples_with_shortcut": [],
+  "label": "calculator",
+  "legacy_list_actionables": {
+    "count": 0,
+    "ms": 5068.6,
+    "recall_vs_window_rooted_pct": 0.0,
+    "rooted_at": {
+      "focused_children": 0,
+      "focused_control_type": "Text",
+      "focused_is_window": false
+    }
+  },
+  "process": {
+    "class": "ApplicationFrameWindow",
+    "exe": "ApplicationFrameHost.exe",
+    "framework": "Win32",
+    "pid": 13488
+  },
+  "tree": {
+    "by_control_type": {
+      "Button": 34,
+      "Custom": 1,
+      "Group": 7,
+      "MenuBar": 1,
+      "MenuItem": 1,
+      "Pane": 1,
+      "Tab": 1,
+      "TabItem": 2,
+      "Text": 6,
+      "Window": 2
+    },
+    "elements_total": 56
+  },
+  "window_rooted_cached": {
+    "cold_ms": 29.5,
+    "read_cached_props_ms": 2.5,
+    "warm_min_ms": 17.6,
+    "warm_runs_ms": [
+      18.1,
+      17.6,
+      17.8,
+      18.2,
+      17.7
+    ]
+  }
+}

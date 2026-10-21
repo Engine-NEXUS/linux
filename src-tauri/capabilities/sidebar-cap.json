@@ -1,13 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "sidebar-cap",
-  "description": "Capabilities for the NEXUS Response Sidebar window — event listening, TTS read-aloud, and sidebar:show/hide/backdrop.",
+  "description": "Capabilities for the unified NEXUS sidebar window (Assistant / Command Hub / Architect / PR List views) — event listening, TTS read-aloud, drag region, and dock IPC.",
   "windows": ["sidebar"],
   "permissions": [
     "core:default",
     "core:event:allow-emit",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
     "shell:allow-open"
   ]
 }

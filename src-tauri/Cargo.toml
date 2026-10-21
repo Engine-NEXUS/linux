@@ -10,6 +10,22 @@ rust-version = "1.77"
 name = "nexus_lib"
 crate-type = ["cdylib", "rlib"]
 
+# Read-only UIA measurement tool (docs/research/ghost-mode/11-p0-baseline-report-2026-10-08.md).
+# Lives outside src-tauri/examples/ because that directory is git-ignored.
+[[example]]
+name = "uia_probe"
+path = "dev_tools/uia_probe.rs"
+
+# Live harness for the shortcut brain: sends ONE action only if the foreground exe matches --expect-exe.
+[[example]]
+name = "shortcut_live"
+path = "dev_tools/shortcut_live.rs"
+
+# Offline wake-word replay harness: real engine over recordings (docs/changes/124).
+[[example]]
+name = "wake_replay"
+path = "dev_tools/wake_replay.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -23,18 +39,16 @@ tauri-plugin-store = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-positioner = "2"
 
-tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
-# Stream utilities (D-Bus portal signal wait in screen.rs) — version matches
-# the transitive futures-util already in Cargo.lock.
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "fs", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
 once_cell = "1"
 anyhow = "1"
-walkdir = "2.5"
+# NOTE: `walkdir` was removed (dead dep — file walking uses `ignore::WalkBuilder`).
 ignore = "0.4"
 rayon = "1.10"
 petgraph = "0.6"
@@ -52,6 +66,16 @@ cpal = "0.15"
 # Used for openWakeWord KWS pipeline: melspectrogram → embedding → classifier
 tract-onnx = "0.23"
 circular-buffer = "1.2"
+# In-process NLU tokenization (BERT-Mini WordPiece) — loads tokenizer.json
+# directly, no Python/HTTP. Pairs with tract-onnx above to run the NLU
+# classifier fully in-process (see nlu_local.rs).
+# default-features off: "esaxx_fast" (C++ suffix-array build, only needed
+# for training Unigram/SentencePiece tokenizers — we only load+encode a
+# pre-trained WordPiece tokenizer) statically links its CRT as /MT, which
+# conflicts with /MD-linked onnxruntime pulled in elsewhere (ort) —
+# LNK2038 RuntimeLibrary mismatch. "progressbar" is dev/training UX, unused
+# here. "onig" (pure encode/decode regex) is kept; it doesn't conflict.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 # HTTP client for diagnostics
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -59,12 +83,22 @@ chrono = { version = "0.4.45", features = ["serde"] }
 # TTS engines:
 # - edge-tts-rust: Microsoft Edge Neural TTS (cloud, free, no API key, 400+ voices)
 #   Primary TTS — 0 MB local RAM, ~200ms latency, broadcast-quality voices.
-# - piper-rs: Piper VITS ONNX (local fallback, 80 MB RAM, 60 MB model, 40ms latency)
-#   Fallback when internet is unavailable.
+# - Kokoro-82M (tts_kokoro.rs): local fallback when internet is unavailable. Runs on `ort` + misaki-rs
+#   (~260-370 MB RAM while loaded, ~real-time on CPU). Piper was removed: its espeak-ng is GPL-3.
 # - rodio: audio playback (shared by both engines)
-edge-tts-rust = "0.1"
-piper-rs = "0.2"
+edge-tts-rust = "0.1.6" # 0.1.3 was rejected with HTTP 403 on every request (stale client constants)
+# ONNX Runtime: Smart Turn, Silero VAD and Kokoro TTS (pinned; was previously shared with piper-rs)
+ort = "=2.0.0-rc.12"
+# English G2P for Kokoro TTS (MIT). default-features=false drops the espeak fallback => no GPL espeak-ng.
+misaki-rs = { version = "0.6", default-features = false }
 rodio = "0.19"
+
+# Live-caption WebSocket client (plan Phase 4) — connects to the local STT
+# server's /stream endpoint. Both are already locked transitive deps of
+# edge-tts-rust (its own WSS client to Microsoft's endpoint), so declaring
+# them directly adds zero new download/compile surface.
+tokio-tungstenite = "0.28"
+futures-util = "0.3"
 
 # Cross-platform app/URL launching (open::that, open::with)
 open = "5"
@@ -87,7 +121,6 @@ sysinfo = "0.32"
 # sidebar window (see AGENTS.md), so this replaces it.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
-uuid = { version = "1", features = ["v4"] }
 
 # AST-aware symbol extraction for the Architecture Mapper (tree-sitter)
 tree-sitter = "0.25"
@@ -112,31 +145,42 @@ async-trait = "0.1"
 enigo = "0.5"
 arboard = "3.4"
 
-# Auth vault: OS credential store (Windows Credential Manager / macOS
-# Keychain / Linux Secret Service) for MCP OAuth tokens. Used by
-# auth_vault.rs — one login per service group, auto-refresh on 401.
-keyring = "3"
-
 # Telegram remote (owner-only bridge, long-polling, no public IP needed).
 teloxide = { version = "0.17", default-features = false, features = ["macros", "native-tls"] }
-webrtc-vad = "0.4.0"
+rusqlite = { version = "0.40.2", features = ["bundled", "serialize"] }
+# AES-256-GCM + CSPRNG for the Memory Core encrypted snapshot (already in the tree via rustls).
+ring = "0.17"
 
 
 # Windows-specific: EnumWindows + SetForegroundWindow + ShellExecuteW
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.36", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse", # GetLastInputInfo: "is the user at the PC" for the activity recorder
     "Win32_System_Threading",
+    "Win32_System_LibraryLoader", # GetModuleHandleW for the session-end hook window
+    "Win32_System_Power", # SetSuspendState ("put my laptop to sleep")
+    "Win32_System_SystemInformation", # GetTickCount (with GetLastInputInfo)
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_ProcessStatus",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug", # MessageBeep: arm/disarm cue for hand mode
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Graphics_Gdi",
+    # Windows.Media.Ocr — zero-RAM local screen text extraction (Feature 86)
+    "Foundation",
+    "Foundation_Collections",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Media_SpeechSynthesis", # the Windows built-in voice: instant safety-net speech
+    "Storage_Streams",
+    "Globalization",
 ] }
 # Registry access for App Paths + Uninstall keys (app discovery)
 winreg = "0.55"
@@ -146,13 +190,28 @@ uiautomation = "0.25"
 # permission so the prompt never re-appears). Version pinned to match wry's.
 webview2-com = "0.38"
 windows-core = "0.61"
+# Auth vault: OS credential store for MCP OAuth tokens (auth_vault.rs).
+# keyring 3.x needs a platform feature per target, or it silently falls
+# back to an in-memory mock store; Linux and macOS have their own tables.
+keyring = { version = "3", features = ["windows-native"] }
 
 # Linux-specific: D-Bus / MPRIS media control & native notifications via zbus
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"
-# WebKitGTK permission handler (auto-approve mic so getUserMedia never
-# prompts/denies). Version follows wry's webkit2gtk pin.
+keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-rust"] }
+# WebKitGTK permission handler (auto-approve mic/camera for NEXUS's own
+# origins, so getUserMedia is never denied). Version follows wry's
+# webkit2gtk pin.
 webkit2gtk = { version = "2", features = ["v2_40"] }
+libloading = "0.8"
+gtk = "0.18"
+gdk = "0.18"
+cairo-rs = "0.18"
+glib = "0.18"
+
+# macOS-specific: Apple Keychain support for auth vault
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
 
 [features]
 default = ["wakeword-oww"]
@@ -184,10 +243,42 @@ mock-wake = []                   # CI: skip native lib, emit fake wake on hotkey
 # Build with: cargo build --features admin-brain
 admin-brain = []
 
+[dev-dependencies]
+# Only the wake-word tests use the WebRTC VAD now (the engine no longer runs it).
+webrtc-vad = "0.4.0"
+
 [profile.dev]
 opt-level = 0
 debug = true
 incremental = true   # fast recompile on small changes
+
+# The inference and DSP crates are optimised even in dev builds. The wake
+# word runs ONNX inference (tract) on every 80 ms microphone chunk; unoptimised
+# it took 88-113 ms per chunk (measured), so the engine fell behind real time
+# and pegged a core. Only these crates: optimising every dependency forces a
+# heavy rebuild of the whole tree.
+[profile.dev.package.tract-core]
+opt-level = 3
+[profile.dev.package.tract-linalg]
+opt-level = 3
+[profile.dev.package.tract-data]
+opt-level = 3
+[profile.dev.package.tract-hir]
+opt-level = 3
+[profile.dev.package.tract-onnx]
+opt-level = 3
+[profile.dev.package.tract-nnef]
+opt-level = 3
+[profile.dev.package.ndarray]
+opt-level = 3
+[profile.dev.package.matrixmultiply]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
+[profile.dev.package.num-complex]
+opt-level = 3
+[profile.dev.package.webrtc-vad]
+opt-level = 3
 
 [profile.release]
 # "s" = optimize for binary size (10-30% faster to compile than "z",
@@ -201,6 +292,32 @@ lto = "thin"
 codegen-units = 4
 strip = true
 panic = "abort"
+
+# The wake word runs ONNX inference on every 80 ms microphone chunk. For the
+# inference and DSP crates speed beats size: measured with the app's own
+# models (tract 0.23.4, mel -> embedding -> classifier), opt-level 3 was 6-10%
+# faster per chunk than "s" (best 12.0 vs 13.4 ms, median 14.5 vs 15.4 ms).
+# Everything else stays size-optimised.
+[profile.release.package.tract-core]
+opt-level = 3
+[profile.release.package.tract-linalg]
+opt-level = 3
+[profile.release.package.tract-data]
+opt-level = 3
+[profile.release.package.tract-hir]
+opt-level = 3
+[profile.release.package.tract-onnx]
+opt-level = 3
+[profile.release.package.tract-nnef]
+opt-level = 3
+[profile.release.package.ndarray]
+opt-level = 3
+[profile.release.package.matrixmultiply]
+opt-level = 3
+[profile.release.package.rustfft]
+opt-level = 3
+[profile.release.package.num-complex]
+opt-level = 3
 
 # [profile.dist] — use this ONLY when building the final installer
 # (pwsh ./scripts/build.ps1 already passes the right flags).

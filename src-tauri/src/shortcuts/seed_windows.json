@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "_comment": "Hand-written seed for the Shortcut Map (docs/features/102, 103). Every entry is a documented default of the named application, NOT harvested. A binding is only used when the foreground executable belongs to the family (or the '*' fallback applies). Families with no_global=true never inherit '*': in terminals Ctrl+C is an interrupt, Ctrl+Z suspends and Ctrl+S freezes output. Values: one chord, or an array of alternatives (first is sent). '{n}' is replaced by the tab number 1-9.",
+  "families": {
+    "browser": {
+      "exes": ["chrome.exe", "brave.exe", "msedge.exe", "firefox.exe", "opera.exe", "vivaldi.exe"]
+    },
+    "vscode": {
+      "exes": ["code.exe", "code - insiders.exe"]
+    },
+    "explorer": {
+      "exes": ["explorer.exe"]
+    },
+    "notepad": {
+      "exes": ["notepad.exe"]
+    },
+    "terminal": {
+      "exes": ["windowsterminal.exe"],
+      "no_global": true
+    },
+    "console": {
+      "exes": ["cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe", "openconsole.exe", "mintty.exe"],
+      "no_global": true
+    }
+  },
+  "bindings": {
+    "*": {
+      "copy": "Ctrl+C",
+      "cut": "Ctrl+X",
+      "paste": "Ctrl+V",
+      "undo": "Ctrl+Z",
+      "redo": "Ctrl+Y",
+      "select_all": "Ctrl+A",
+      "save": "Ctrl+S",
+      "find_in_page": "Ctrl+F",
+      "scroll_down": "PageDown",
+      "scroll_up": "PageUp",
+      "switch_window": "Alt+Tab"
+    },
+    "browser": {
+      "new_tab": "Ctrl+T",
+      "close_tab": "Ctrl+W",
+      "reopen_tab": "Ctrl+Shift+T",
+      "next_tab": "Ctrl+Tab",
+      "prev_tab": "Ctrl+Shift+Tab",
+      "goto_tab_n": "Ctrl+{n}",
+      "refresh": "F5",
+      "go_back": "Alt+Left",
+      "go_forward": "Alt+Right",
+      "address_bar": "Ctrl+L",
+      "zoom_in": "Ctrl+=",
+      "zoom_out": "Ctrl+-"
+    },
+    "vscode": {
+      "new_tab": "Ctrl+N",
+      "close_tab": "Ctrl+W",
+      "reopen_tab": "Ctrl+Shift+T",
+      "next_tab": "Ctrl+PageDown",
+      "prev_tab": "Ctrl+PageUp",
+      "goto_tab_n": "Alt+{n}",
+      "go_back": "Alt+Left",
+      "go_forward": "Alt+Right",
+      "zoom_in": "Ctrl+=",
+      "zoom_out": "Ctrl+-"
+    },
+    "explorer": {
+      "new_tab": "Ctrl+T",
+      "close_tab": "Ctrl+W",
+      "next_tab": "Ctrl+Tab",
+      "prev_tab": "Ctrl+Shift+Tab",
+      "refresh": "F5",
+      "go_back": "Alt+Left",
+      "go_forward": "Alt+Right",
+      "address_bar": "Ctrl+L"
+    },
+    "notepad": {
+      "new_tab": "Ctrl+N",
+      "close_tab": "Ctrl+W",
+      "next_tab": "Ctrl+Tab",
+      "prev_tab": "Ctrl+Shift+Tab",
+      "zoom_in": "Ctrl+=",
+      "zoom_out": "Ctrl+-"
+    },
+    "terminal": {
+      "new_tab": "Ctrl+Shift+T",
+      "close_tab": "Ctrl+Shift+W",
+      "next_tab": "Ctrl+Tab",
+      "prev_tab": "Ctrl+Shift+Tab",
+      "goto_tab_n": "Ctrl+Alt+{n}",
+      "copy": "Ctrl+Shift+C",
+      "paste": "Ctrl+Shift+V",
+      "find_in_page": "Ctrl+Shift+F",
+      "scroll_down": "Ctrl+Shift+PageDown",
+      "scroll_up": "Ctrl+Shift+PageUp",
+      "zoom_in": "Ctrl+=",
+      "zoom_out": "Ctrl+-"
+    }
+  }
+}

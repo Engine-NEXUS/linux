@@ -8,5 +8,9 @@
 
 pub mod keyboard;
 pub mod whatsapp;
+pub mod wa_open;
 pub mod browser;
 pub mod window;
+pub mod launcher;
+pub mod ghost_drill;
+pub mod mouse;

@@ -12,6 +12,21 @@
 //! This is the same pattern used by ghost-hands, nuphus-mcp, and many
 //! other Windows automation tools.
 
+/// Pure UIPI gate: Some(reason) when a click must not be attempted —
+/// target elevated, sender not. Returned verbatim as the spoken error
+/// (reroute, never a blind retry into the void). Shared by all platforms.
+pub fn elevated_block_reason(target_elevated: bool, self_elevated: bool) -> Option<String> {
+    if target_elevated && !self_elevated {
+        Some(
+            "that's an admin window, sir — Windows blocks my clicks there. \
+             Click it yourself, or restart NEXUS as admin."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub use windows_impl::*;
 
@@ -25,7 +40,8 @@ mod windows_impl {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
         BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowTextW,
-        GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        GetWindowThreadProcessId, IsIconic, SetForegroundWindow, ShowWindow, SW_MAXIMIZE,
+        SW_MINIMIZE, SW_RESTORE,
     };
 
     // Thread-local storage for the search target and result.
@@ -65,7 +81,7 @@ mod windows_impl {
         FOUND_HWND.lock().unwrap().take()
     }
 
-    /// Bring a window to the foreground using the AttachThreadInput trick.
+    /// Bring a window to the foreground using the AttachThreadInput trick and Alt-key tap.
     /// Returns true if the window is now in the foreground.
     pub fn focus_window(hwnd: HWND) -> bool {
         unsafe {
@@ -73,6 +89,12 @@ mod windows_impl {
             if IsIconic(hwnd).as_bool() {
                 let _ = ShowWindow(hwnd, SW_RESTORE);
             }
+
+            let _ = BringWindowToTop(hwnd);
+
+            // Synthesize an Alt key tap to unlock Windows OS foreground lock
+            // (classic Win32 OS input state unlock technique)
+            let _ = super::super::keyboard::press_key("alt");
 
             // AttachThreadInput trick: attach our input queue to the
             // foreground thread's so SetForegroundWindow succeeds.
@@ -106,10 +128,159 @@ mod windows_impl {
             false
         }
     }
+
+    /// Poll for an app window by partial title up to `timeout_ms`,
+    /// bringing it to the foreground once found (essential for slow-starting apps like WhatsApp).
+    pub fn wait_and_focus_app(partial_title: &str, timeout_ms: u64) -> bool {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let interval = std::time::Duration::from_millis(150);
+
+        while start.elapsed() < timeout {
+            if focus_app_by_title(partial_title) {
+                return true;
+            }
+            std::thread::sleep(interval);
+        }
+        false
+    }
+
+    /// Get the title of the current foreground window.
+    pub fn get_foreground_window_title() -> Option<String> {
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg.0 == 0 {
+                return None;
+            }
+            let mut title = [0u16; 512];
+            let len = GetWindowTextW(fg, &mut title);
+            if len <= 0 {
+                return None;
+            }
+            Some(String::from_utf16_lossy(&title[..len as usize]))
+        }
+    }
+
+    /// Check if the current foreground window belongs to the given app name (case-insensitive).
+    pub fn is_foreground_app(partial: &str) -> bool {
+        let want = partial.to_lowercase();
+        if let Some(title) = get_foreground_window_title() {
+            if title.to_lowercase().contains(&want) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Minimize the current foreground window. `ShowWindow`'s return value
+    /// reports the window's PRIOR visibility, not call success, so it's
+    /// discarded (same convention as the `SW_RESTORE` call above) — this
+    /// returns whether a foreground window existed to act on at all.
+    pub fn minimize_foreground_window() -> bool {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0 == 0 {
+                return false;
+            }
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            true
+        }
+    }
+
+    /// Maximize the current foreground window. Same fire-and-forget
+    /// convention as `minimize_foreground_window`.
+    pub fn maximize_foreground_window() -> bool {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0 == 0 {
+                return false;
+            }
+            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            true
+        }
+    }
+
+    /// True if OUR process runs elevated (admin). Clicks from a
+    /// non-elevated sender into an elevated window are silently eaten by
+    /// UIPI — detect first, reroute with speech instead.
+    pub fn our_process_elevated() -> bool {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        unsafe {
+            let mut token: HANDLE = HANDLE(0);
+            if !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).as_bool() {
+                return false;
+            }
+            let mut elev: TOKEN_ELEVATION = std::mem::zeroed();
+            let mut ret_len = 0u32;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut elev as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut ret_len,
+            )
+            .as_bool();
+            ok && elev.TokenIsElevated != 0
+        }
+    }
+
+    fn process_token_elevated(proc: windows::Win32::Foundation::HANDLE) -> bool {
+        use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+        use windows::Win32::System::Threading::OpenProcessToken;
+        unsafe {
+            let mut token: windows::Win32::Foundation::HANDLE =
+                windows::Win32::Foundation::HANDLE(0);
+            if !OpenProcessToken(proc, TOKEN_QUERY, &mut token).as_bool() {
+                return false;
+            }
+            let mut elev: TOKEN_ELEVATION = std::mem::zeroed();
+            let mut ret_len = 0u32;
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                &mut elev as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut ret_len,
+            )
+            .as_bool()
+                && elev.TokenIsElevated != 0
+        }
+    }
+
+    /// True if the process owning `hwnd` runs elevated (admin).
+    pub fn window_process_elevated(hwnd: HWND) -> bool {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid as *mut u32);
+            if pid == 0 {
+                return false;
+            }
+            let Ok(proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+                return false;
+            };
+            let elevated = process_token_elevated(proc);
+            let _ = CloseHandle(proc);
+            elevated
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
 mod unix_impl {
+    /// Why another app's window cannot be raised in this session, if it
+    /// cannot.
+    ///
+    /// `None` means focusing may work. The text is speakable: it names the
+    /// actual blocker instead of the vague "couldn't find it running" the
+    /// caller would otherwise say.
+    pub fn focus_unavailable_reason() -> Option<String> {
+        crate::app_registry::app_registry_linux::focus_blocked_reason_now()
+    }
+
     /// Focus a window by partial title match.
     ///
     /// Implemented for real on X11/XWayland via EWMH (`wmctrl -a`), which any
@@ -130,10 +301,11 @@ mod unix_impl {
         if partial_title.trim().is_empty() {
             return false;
         }
-        if !crate::session::has_x11_input() {
+        if let Some(reason) = focus_unavailable_reason() {
             tracing::warn!(
-                "live: cannot focus {:?} — {}",
+                "live: cannot focus {:?} — {} ({})",
                 partial_title,
+                reason,
                 crate::session::diagnostic_line()
             );
             return false;
@@ -159,6 +331,92 @@ mod unix_impl {
         tracing::warn!("live: no window matched {:?}", partial_title);
         false
     }
+
+    /// Minimize the current foreground window on Linux.
+    /// Not supported on native Wayland; attempts xdotool on X11 if available.
+    pub fn minimize_foreground_window() -> bool {
+        if !crate::session::has_x11_input() {
+            tracing::warn!("live: cannot minimize window on Wayland — not supported by compositor");
+            return false;
+        }
+        let out = std::process::Command::new("xdotool")
+            .args(["getactivewindow", "windowminimize"])
+            .status();
+        matches!(out, Ok(s) if s.success())
+    }
+
+    /// Maximize the current foreground window on Linux.
+    /// Not supported on native Wayland; attempts wmctrl on X11 if available.
+    pub fn maximize_foreground_window() -> bool {
+        if !crate::session::has_x11_input() {
+            tracing::warn!("live: cannot maximize window on Wayland — not supported by compositor");
+            return false;
+        }
+        let out = std::process::Command::new("wmctrl")
+            .args(["-r", ":ACTIVE:", "-b", "add,maximized_vert,maximized_horz"])
+            .status();
+        matches!(out, Ok(s) if s.success())
+    }
+
+    /// True if OUR process runs elevated (admin/root).
+    pub fn our_process_elevated() -> bool {
+        extern "C" {
+            fn geteuid() -> u32;
+        }
+        unsafe { geteuid() == 0 }
+    }
+
+    /// True if the process owning the window runs elevated (admin/root).
+    pub fn window_process_elevated<T>(_hwnd: T) -> bool {
+        false
+    }
+
+    /// Poll for an app window by partial title up to `timeout_ms`.
+    pub fn wait_and_focus_app(partial_title: &str, timeout_ms: u64) -> bool {
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let interval = std::time::Duration::from_millis(150);
+
+        while start.elapsed() < timeout {
+            if focus_app_by_title(partial_title) {
+                return true;
+            }
+            std::thread::sleep(interval);
+        }
+        false
+    }
+
+    /// Get the title of the current foreground window on Linux.
+    /// On Wayland returns None; on X11 attempts `xdotool`.
+    pub fn get_foreground_window_title() -> Option<String> {
+        if !crate::session::has_x11_input() {
+            return None;
+        }
+        let out = std::process::Command::new("xdotool")
+            .args(["getactivewindow", "getwindowname"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let title = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if title.is_empty() {
+            None
+        } else {
+            Some(title)
+        }
+    }
+
+    /// Check if current foreground window belongs to app (case-insensitive).
+    pub fn is_foreground_app(partial: &str) -> bool {
+        let want = partial.to_lowercase();
+        if let Some(title) = get_foreground_window_title() {
+            if title.to_lowercase().contains(&want) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -172,12 +430,63 @@ mod unix_impl {
         tracing::warn!("live: window focus not implemented on this platform");
         false
     }
+
+    /// Not implemented on this platform — always reports "nothing to act on".
+    pub fn minimize_foreground_window() -> bool {
+        false
+    }
+
+    /// Not implemented on this platform — always reports "nothing to act on".
+    pub fn maximize_foreground_window() -> bool {
+        false
+    }
+
+    /// No UAC/UIPI concept — never elevated-blocked.
+    pub fn our_process_elevated() -> bool {
+        false
+    }
+
+    /// No UAC/UIPI concept — never elevated-blocked.
+    pub fn window_process_elevated(_hwnd: ()) -> bool {
+        false
+    }
+
+    /// Unix stub: always succeeds.
+    pub fn wait_and_focus_app(_partial_title: &str, _timeout_ms: u64) -> bool {
+        true
+    }
+
+    /// Unix stub: returns None.
+    pub fn get_foreground_window_title() -> Option<String> {
+        None
+    }
+
+    /// Unix stub: returns false.
+    pub fn is_foreground_app(_partial: &str) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::elevated_block_reason;
+
     #[test]
-    fn test_module_loads() {
-        // Just verify the module compiles
+    fn test_elevated_gate_truth_table() {
+        // Unelevated sender vs elevated target: blocked with guidance.
+        let reason = elevated_block_reason(true, false);
+        assert!(reason.is_some());
+        let text = reason.unwrap().to_lowercase();
+        assert!(text.contains("admin"));
+        // All other combinations: no block.
+        assert!(elevated_block_reason(false, false).is_none());
+        assert!(elevated_block_reason(true, true).is_none());
+        assert!(elevated_block_reason(false, true).is_none());
+    }
+
+    #[test]
+    fn test_own_elevation_check_runs() {
+        // Must never panic; value depends on how the test runner launched.
+        let _ = super::our_process_elevated();
     }
 }

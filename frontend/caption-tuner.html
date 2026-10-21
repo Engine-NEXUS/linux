@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NEXUS Caption Tuner — size + position</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+      color: #f8fafc;
+      user-select: none;
+    }
+    /* Fake desktop so position reads like the real fullscreen stage */
+    #demo {
+      position: fixed; inset: 0;
+      background:
+        radial-gradient(1200px 700px at 70% 20%, rgba(64, 90, 160, 0.35), transparent 60%),
+        radial-gradient(900px 600px at 15% 85%, rgba(30, 120, 110, 0.25), transparent 60%),
+        linear-gradient(160deg, #1a2030 0%, #0b0e16 55%, #05070c 100%);
+    }
+    #demo::after {
+      content: "fake desktop — the caption floats on the transparent stage in production";
+      position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
+      font-size: 12px; color: rgba(255,255,255,0.35); letter-spacing: 0.3px;
+      white-space: nowrap;
+    }
+    /* Fake Windows 11 taskbar (48px) so bottom placement clears it like real life */
+    #taskbar {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 48px;
+      background: rgba(16, 22, 34, 0.92);
+      border-top: 1px solid rgba(255, 255, 255, 0.09);
+      backdrop-filter: blur(24px);
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    #taskbar .tb-icon {
+      width: 32px; height: 32px; border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; background: rgba(255,255,255,0.06);
+    }
+    #taskbar .tb-icon.start { background: rgba(56,189,248,0.25); }
+    #taskbar .tb-search {
+      width: 180px; height: 28px; border-radius: 14px;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.12);
+      font-size: 11px; color: rgba(255,255,255,0.5);
+      display: flex; align-items: center; padding: 0 12px; margin: 0 6px;
+    }
+    #taskbar .tb-tray {
+      position: absolute; right: 12px;
+      display: flex; align-items: center; gap: 10px;
+      font-size: 11px; color: rgba(255,255,255,0.65);
+      font-variant-numeric: tabular-nums;
+    }
+    /* Mock orb capsule at YOUR production size (301x105, top dock) for gap judgement */
+    #mock-orb {
+      position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+      width: 301px; height: 105px;
+      background: #000000;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 0 0 10px 10px;
+      border-top: none;
+      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.9);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; color: rgba(255,255,255,0.3); letter-spacing: 1px;
+    }
+    /* === Production caption style, copied 1:1 from ghost.css === */
+    #caption {
+      position: absolute;
+      left: 0; top: 0;
+      max-width: 680px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      pointer-events: auto; cursor: grab;
+      background: transparent;
+    }
+    #caption:active { cursor: grabbing; }
+    .caption-black-capsule {
+      background: #000000 !important;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 10px;
+      padding: 2px 24px;
+      max-width: 620px;
+      min-height: 30px;
+      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.95), 0 4px 14px rgba(0, 0, 0, 0.85);
+      display: inline-flex; align-items: center; justify-content: center;
+    }
+    .caption-black-text {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      font-size: 18.5px;
+      font-weight: 550;
+      letter-spacing: -0.2px;
+      line-height: 1.4;
+      color: #ffffff;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      white-space: nowrap;
+    }
+    /* === Control panel === */
+    #panel {
+      position: fixed; top: 16px; left: 16px; width: 300px; z-index: 10;
+      background: rgba(10, 12, 20, 0.88);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 12px;
+      padding: 16px 18px 14px;
+      backdrop-filter: blur(20px);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+    }
+    #panel h1 { font-size: 14px; font-weight: 800; letter-spacing: 0.2px; margin-bottom: 2px; }
+    #panel p.hint { font-size: 11.5px; color: rgba(255,255,255,0.55); margin-bottom: 12px; line-height: 1.5; }
+    .row { margin-bottom: 10px; }
+    .row label { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+    .row label output { color: #7dd3fc; font-variant-numeric: tabular-nums; }
+    .row input[type="range"] { width: 100%; accent-color: #38bdf8; }
+    #readout {
+      margin-top: 12px; padding: 10px 12px;
+      background: rgba(56, 189, 248, 0.08);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 8px;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 12px; line-height: 1.7; color: #bae6fd;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    #copy {
+      margin-top: 10px; width: 100%;
+      background: #38bdf8; color: #04121f; border: none; border-radius: 8px;
+      font-size: 13px; font-weight: 800; padding: 9px 0; cursor: pointer;
+    }
+    #copy:hover { background: #7dd3fc; }
+  </style>
+</head>
+<body>
+  <div id="demo">
+    <div id="taskbar">
+      <div class="tb-icon start">▦</div>
+      <div class="tb-search">⌕ &nbsp;Type here to search</div>
+      <div class="tb-icon">◉</div>
+      <div class="tb-icon">▲</div>
+      <div class="tb-icon">✉</div>
+      <div class="tb-tray"><span>∧</span><span>🔊</span><span>📶</span><span id="tb-clock">23:10</span></div>
+    </div>
+    <div id="mock-orb">ORB 301×105</div>
+    <div id="caption">
+      <div class="caption-black-capsule">
+        <span class="caption-black-text" id="caption-text"></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="panel">
+    <h1>Caption Tuner</h1>
+    <p class="hint">Drag the black caption anywhere, or use the sliders. Send me the values in the blue box.</p>
+    <div class="row">
+      <label>Font size <output id="o-size"></output></label>
+      <input type="range" id="s-size" min="12" max="40" step="0.5" value="16.5" />
+    </div>
+    <div class="row">
+      <label>Capsule height (padding Y) <output id="o-pad"></output></label>
+      <input type="range" id="s-pad" min="2" max="20" step="1" value="2" />
+    </div>
+    <div class="row">
+      <label>Center X <output id="o-x"></output></label>
+      <input type="range" id="s-x" min="0" max="100" step="0.5" value="51.5" />
+    </div>
+    <div class="row">
+      <label>Top Y <output id="o-y"></output></label>
+      <input type="range" id="s-y" min="0" max="100" step="0.5" value="89.5" />
+    </div>
+    <div id="readout"></div>
+    <button id="copy">Copy values</button>
+  </div>
+
+  <script>
+    const cap = document.getElementById("caption");
+    const pill = cap.querySelector(".caption-black-capsule");
+    const txt = document.getElementById("caption-text");
+    const sSize = document.getElementById("s-size");
+    const sPad = document.getElementById("s-pad");
+    const sX = document.getElementById("s-x");
+    const sY = document.getElementById("s-y");
+    const oSize = document.getElementById("o-size");
+    const oPad = document.getElementById("o-pad");
+    const oX = document.getElementById("o-x");
+    const oY = document.getElementById("o-y");
+    const readout = document.getElementById("readout");
+
+    // Live clock in the fake tray.
+    const clock = document.getElementById("tb-clock");
+    setInterval(() => {
+      const d = new Date();
+      clock.textContent =
+        String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+    }, 5000);
+
+    // Letter-by-letter streaming loop, like production captions.
+    const SAMPLE = "Hi Lakshya, I am NEXUS — how can I help you today?";
+    let ci = 0;
+    setInterval(() => {
+      ci += 1;
+      if (ci > SAMPLE.length + 40) ci = 0;
+      txt.textContent = SAMPLE.slice(0, Math.min(ci, SAMPLE.length)) || "\u00a0";
+    }, 45);
+
+    function apply() {
+      const fs = parseFloat(sSize.value);
+      const pad = parseInt(sPad.value, 10);
+      const xPct = parseFloat(sX.value);
+      const yPct = parseFloat(sY.value);
+      txt.style.fontSize = fs + "px";
+      pill.style.padding = pad + "px 24px";
+      // Production centers with translateX(-50%): position = center-x + top.
+      cap.style.transform =
+        `translate(${xPct}vw, ${yPct}vh) translateX(-50%)`;
+      const w = window.innerWidth, h = window.innerHeight;
+      const xPx = Math.round((xPct / 100) * w);
+      const yPx = Math.round((yPct / 100) * h);
+      oSize.textContent = fs.toFixed(1) + "px";
+      oPad.textContent = pad + "px";
+      oX.textContent = xPct.toFixed(1) + "% (" + xPx + "px)";
+      oY.textContent = yPct.toFixed(1) + "% (" + yPx + "px)";
+      readout.textContent =
+        `font-size: ${fs.toFixed(1)}px\npadding-y: ${pad}px\ncenter-x: ${xPct.toFixed(1)}% (${xPx}px @${w})\ntop: ${yPct.toFixed(1)}% (${yPx}px @${h})`;
+    }
+    [sSize, sPad, sX, sY].forEach((s) => s.addEventListener("input", apply));
+    window.addEventListener("resize", apply);
+
+    // Drag the caption: converts pointer position back into the sliders.
+    let dragging = false;
+    cap.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      cap.setPointerCapture(e.pointerId);
+    });
+    cap.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      // Keep the caption center under the cursor (matches translateX(-50%)).
+      const xPct = (e.clientX / window.innerWidth) * 100;
+      const yPct = Math.max(0, (e.clientY / window.innerHeight) * 100);
+      sX.value = xPct.toFixed(1);
+      sY.value = yPct.toFixed(1);
+      apply();
+    });
+    cap.addEventListener("pointerup", () => { dragging = false; });
+
+    document.getElementById("copy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(readout.textContent);
+        const b = document.getElementById("copy");
+        b.textContent = "Copied — paste it to me";
+        setTimeout(() => { b.textContent = "Copy values"; }, 2000);
+      } catch {}
+    });
+
+    apply();
+  </script>
+</body>
+</html>

@@ -83,6 +83,9 @@ async fn dispatch_text<R: Runtime>(app: &AppHandle<R>, text: &str) -> String {
                 None,
                 request_id,
                 cancel,
+                &crate::center::TurnContext::default(),
+                "telegram",
+                false,
             )
             .await
             {
@@ -112,12 +115,15 @@ async fn transcribe_voice_note<R: Runtime>(
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let settings_path = data_dir.join("settings.json");
     let content = std::fs::read_to_string(&settings_path).unwrap_or_default();
-    let json: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
-    let key = json
-        .get("groqApiKey")
-        .or_else(|| json.get("groq_api_key"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let _json: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+    let key = crate::auth_vault::get_api_key("groq").unwrap_or_else(|| {
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+        json.get("groqApiKey")
+            .or_else(|| json.get("groq_api_key"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    });
     if key.is_empty() {
         return Err("Groq key missing — voice notes need it".to_string());
     }
@@ -125,7 +131,7 @@ async fn transcribe_voice_note<R: Runtime>(
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    crate::stt_groq::transcribe_bytes_with_groq(&bytes, "voice.ogg", "audio/ogg", key, &client)
+    crate::stt_groq::transcribe_bytes_with_groq(&bytes, "voice.ogg", "audio/ogg", &key, &client, None)
         .await
 }
 

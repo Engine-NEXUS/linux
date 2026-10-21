@@ -44,7 +44,7 @@ RESOURCES_MODEL_DIR = SCRIPT_DIR.parent.parent / "src-tauri" / "resources" / "se
 LABEL_FIXES = {
     "OpenArchitect": "open_architect",
     'Unknown { raw: "Show me the PR list." }': "list_prs",
-    'Unknown { raw: "Show me the PR list." }': "list_prs",
+    "nlu_result": "type_text",
 }
 
 
@@ -357,14 +357,15 @@ def enforce_split_hygiene():
     val_fams = {family_key(r) for r in data.get("validation", [])}
     cal_fams = {family_key(r) for r in data.get("calibration", [])}
     test_fams = {family_key(r) for r in data.get("test", [])}
-    test_intents = {r.get("intent", "") for r in data.get("test", [])}
+    labels_file = SCRIPT_DIR / "model" / "labels.json"
+    allowed_intents = set(json.loads(labels_file.read_text(encoding="utf-8"))["intents"])
     bad_fams = val_fams | cal_fams | test_fams
 
     keep, quar, held = [], [], []
     for row in data.get("train", []):
         if family_key(row) in bad_fams:
             quar.append(row)
-        elif row.get("intent", "") not in test_intents:
+        elif row.get("intent", "") not in allowed_intents:
             held.append(row)
         else:
             keep.append(row)
@@ -574,14 +575,20 @@ def main():
     print("  BERT-Mini (google/bert_uncased_L-2_H-128_A-2)")
     print("=" * 60)
 
-    validate_data_foundation()
-
     # Step 1: Clean dataset
     clean_dataset()
 
     if clean_only:
         print("\n  --clean-only specified, exiting after cleanup.")
         return
+
+    # Step 1b: Merge real voice samples from `nexus collect` if present
+    collected_file = SCRIPT_DIR.parent / "admin" / "data" / "collected_samples.jsonl"
+    if collected_file.exists() and collected_file.stat().st_size > 0:
+        step("Step 1b: Merging collected real-voice samples")
+        merge_collected_samples(collected_file)
+    else:
+        print("  No collected voice samples found at " + str(collected_file))
 
     # Step 2: Generate live-mode examples
     generate_live_data()

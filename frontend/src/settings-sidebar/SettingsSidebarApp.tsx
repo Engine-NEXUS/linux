@@ -1,5 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
+import { HandModeSection } from "./HandModeSection";
+import { AgentWatchSection } from "./AgentWatchSection";
+import { ScreenPointerSection } from "./ScreenPointerSection";
 import { invoke } from "@tauri-apps/api/core";
+import { resolveThemeMode, type ThemeMode } from "../sidebar/theme";
+import { isPlausibleGeminiKey } from "./keyFormat";
+import { identityBanner, type IdentityBanner } from "../setup/identityBanner";
 import {
   setSidecarBaseUrl,
   getOAuthStatus,
@@ -7,6 +13,14 @@ import {
   disconnectOAuth,
   type OAuthStatus,
 } from "../setup/oauth";
+import { resolveCapsuleStyle, useAssistant, type OrbCapsuleStyle } from "../store/assistant";
+import { globalHotkeyLabel, isLinuxRuntime } from "../platform";
+import "./hub/hub.css";
+import { HubHome, type HubPage } from "./hub/HubHome";
+import { ApiKeysPage } from "./hub/ApiKeysPage";
+import { MemoryPage } from "./hub/MemoryPage";
+import { useAccounts, useInsights } from "./hub/useHubData";
+import { McpServersPanel } from "./McpServersPanel";
 
 /**
  * NEXUS Settings Sidebar
@@ -20,7 +34,6 @@ import {
  * Overwrites on each save (std::fs::write).
  */
 
-type Tab = "display" | "audio" | "auth" | "connections" | "screen";
 
 interface Settings {
   autostart: boolean;
@@ -42,6 +55,10 @@ interface Settings {
   ttsProvider: string;
   groqApiKey: string;
   edgeTtsVoice: string;
+  // Iconic voice persona key (Feature 83 catalog, e.g. "jarvis")
+  selectedVoice?: string;
+  // Local Kokoro voice name for the selected persona (e.g. "bm_george")
+  offlineVoiceModel?: string;
   // Orb position + size (Phase 2)
   orbHorizontalPct?: number;
   orbVerticalPct?: number;
@@ -52,18 +69,78 @@ interface Settings {
   cerebrasApiKey?: string;
   // Moonshine STT model (medium_streaming=6.65% WER, small_streaming=7.84%)
   moonshineModel?: string;
+  // TTS voice emotion (auto = heuristics per reply; prosody via rate/pitch)
+  ttsEmotion?: string;
+  // Personality tone (butler = formal "sir"; friend = name, casual, honest counsel)
+  personaMode?: string;
+  // Memory Core: hide known people's names from cloud models (Memory page toggles it)
+  memcoreRedactNames?: boolean;
+  // Memory Core: record the working window (where-you-left-off) / speak the boot briefing
+  memcoreActivity?: boolean;
+  memcoreBriefing?: boolean;
+  memcoreTimetable?: boolean;
+  memcoreMail?: boolean;
+  memcoreWhatsapp?: boolean;
+  memcoreWhatsappSpeak?: boolean;
+  memcoreLeaveBy?: boolean;
+  memcoreSession?: boolean;
+  memcoreHealth?: boolean;
+  powerCommands?: boolean;
+  // Command Hub theme (opaque "dark" default / "light"; no transparency)
+  themeMode?: string;
+  // Ghost vision provider order (auto = Groq → Gemini fallback)
+  visionProvider?: string;
+  // Ghost vision strategy (speed = race both providers in parallel)
+  visionRace?: string;
   // Telegram owner chat id (remote bridge; token lives in vault)
   telegramChatId?: string;
-  // Screen pointer (Phase 2 — locate marker overlay)
-  pointerEnabled?: boolean;
-  pointerDwellSeconds?: number;
-  pointerExcludedApps?: string;
-  pointerSuppressFullscreen?: boolean;
+  // Ghost FIFO queue: speak "Queued, sir." once per session at depth 2+ (D5/D6)
+  ghostDepthAck?: boolean;
+  // Ghost FIFO queue: per-step watchdog timeout, ms (D7)
+  ghostStepTimeoutMs?: number;
+  // Ghost FIFO queue: inter-command gap τ, ms (D4)
+  ghostTurnGapMs?: number;
+  ghostEngagementSecs?: number;
+  directedGate?: boolean;
+  handMode?: boolean;
+  handMousePreview?: boolean;
+  handShowCamera?: boolean;
+  handFrameSource?: string;
+  handTrace?: boolean;
+  handWithGhost?: boolean;
+  handSnap?: boolean;
+  handGestures?: boolean;
+  handGesturesDesktop?: boolean;
+  handSensitivity?: number;
+  // Ghost waves placement (ghost sessions reposition the orb window to this rect)
+  wavesHorizontalPct?: number;
+  wavesVerticalPct?: number;
+  wavesSize?: number;
+  // Loading indicator placement (center-anchored fractions + logical px)
+  loadingHorizontalPct?: number;
+  loadingVerticalPct?: number;
+  loadingSize?: number;
+  // Orb color theme (e.g. "#f2b859")
+  orbColor?: string;
+  // Orb fixed position ("top" | "bottom")
+  orbPosition?: "top" | "bottom";
+  // Orb background capsule style ("classic" | "pebble")
+  orbCapsuleStyle?: OrbCapsuleStyle;
+  // Orb wakeup animation mode (1..5) & genesis mode (0..3)
+  orbWakeupMode?: number;
+  orbInteriorGenesis?: number;
+  // Orb morphology choices
+  orbThinkMode?: number;
+  orbSpeakMode?: number;
+  orbListenMode?: number;
+  // TEMPORARY dev flag (remove before release): auto-open the calibrator
+  // on boot for live cross-checks. Never part of the save flow.
+  calibrationDevPersist?: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: true,
-  hotkey: "Ctrl+Space",
+  hotkey: globalHotkeyLabel(),
   autoHideDelay: 8,
   wakeWordEnabled: true,
   wakePhrase: "NEXUS",
@@ -75,52 +152,102 @@ const DEFAULT_SETTINGS: Settings = {
   serverUrl: "",
   userId: "",
   deviceId: "",
-  ttsVoice: "af_sky",
+  ttsVoice: "en-US-AvaNeural",
   speechRate: 1.15,
   ttsVolume: 75,
-  ttsProvider: "kokoro",
+  ttsProvider: "edge",
   groqApiKey: "",
   edgeTtsVoice: "en-US-AvaNeural",
   orbHorizontalPct: 0.5,
-  orbVerticalPct: 1.0,
+  orbVerticalPct: 0.0,
+  orbPosition: "top",
+  orbCapsuleStyle: "pebble",
+  orbWakeupMode: 1,
+  orbInteriorGenesis: 2,
   orbSize: 200,
+  orbThinkMode: 6,
+  orbSpeakMode: 2,
+  orbListenMode: 1,
   geminiApiKey: "",
   cerebrasApiKey: "",
   moonshineModel: "medium_streaming",
+  ttsEmotion: "auto",
+  personaMode: "butler",
+  themeMode: "dark",
+  visionProvider: "auto",
+  visionRace: "sequential",
   telegramChatId: "",
-  pointerEnabled: true,
-  pointerDwellSeconds: 6,
-  pointerExcludedApps: "",
-  pointerSuppressFullscreen: true,
+  ghostDepthAck: true,
+  ghostStepTimeoutMs: 15000,
+  ghostTurnGapMs: 1000,
+  ghostEngagementSecs: 0,
+  directedGate: true,
+  handMode: true,
+  handMousePreview: false,
+  handShowCamera: false,
+  handFrameSource: "auto",
+  handTrace: false,
+  handWithGhost: false,
+  handSnap: true,
+  handGestures: true,
+  handGesturesDesktop: false,
+  handSensitivity: 0,
+  wavesHorizontalPct: 0.5,
+  wavesVerticalPct: 1.0,
+  wavesSize: 200,
+  loadingHorizontalPct: 0.95,
+  loadingVerticalPct: 0.05,
+  loadingSize: 80,
+  orbColor: "#f2b859",
+  calibrationDevPersist: false,
 };
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "display", label: "Display" },
-  { id: "audio", label: "Audio" },
-  { id: "auth", label: "Accounts" },
-  { id: "connections", label: "Connections" },
-  { id: "screen", label: "Screen" },
-];
+const PAGE_TITLES: Record<HubPage, string> = {
+  home: "Command Hub",
+  keys: "API Keys",
+  memory: "Memory",
+  audio: "Audio",
+  display: "Display",
+  connections: "Connections",
+  advanced: "Advanced",
+};
 
-export function SettingsSidebarApp() {
-  const [tab, setTab] = useState<Tab>("display");
+export function SettingsSidebarApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
+  const [page, setPage] = useState<HubPage>("home");
+  const [insightsKey, setInsightsKey] = useState(0);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+
+  // Toast from the calibration round-trip (save/cancel re-open the hub).
+  useEffect(() => {
+    let un: (() => void) | null = null;
+    import("@tauri-apps/api/event").then(({ listen }) =>
+      listen<{ message?: string }>("settings:toast", (ev) => {
+        if (ev.payload?.message) setToast(ev.payload.message);
+      })
+    ).then((u) => {
+      un = u;
+    });
+    return () => {
+      un?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   // Load settings from Rust on mount
   useEffect(() => {
     invoke<Partial<Settings>>("get_settings").then((s) => {
-      if (s) setSettings({ ...DEFAULT_SETTINGS, ...s });
+      // API keys are managed on the API Keys page (keychain); the form never
+      // holds them, so a Save can neither resurrect nor wipe a key.
+      if (s) setSettings({ ...DEFAULT_SETTINGS, ...s, groqApiKey: "", geminiApiKey: "", cerebrasApiKey: "" });
     }).catch(() => {});
   }, []);
-
-  // Show the orb window when the Display tab is active so the user can
-  // see it move live while dragging the position sliders.
-  useEffect(() => {
-    if (tab === "display") {
-      invoke("show_overlay").catch(() => {});
-    }
-  }, [tab]);
 
   // Fetch pending backdrop on mount — handles the fresh-window case where
   // the backdrop was captured before the React app loaded (same pattern as
@@ -155,11 +282,12 @@ export function SettingsSidebarApp() {
     return () => { unlisten?.(); };
   }, []);
 
-  // Ctrl+Space to close (same as other sidebars)
+  // Escape closes the settings window. Ctrl+Space must NOT close it:
+  // Ctrl+Space is the global wake hotkey (D3) — it wakes NEXUS even with
+  // settings focused. Window-level listener only, no OS registration.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.code === "Space" && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
+      if (e.key === "Escape") {
         invoke("hide_settings_sidebar").catch(() => {});
       }
     };
@@ -187,259 +315,540 @@ export function SettingsSidebarApp() {
     setSaved(false);
   };
 
+  const acc = useAccounts(settings.serverUrl, settings.userId);
+  const insights = useInsights(insightsKey);
+  const themeMode: ThemeMode = resolveThemeMode(settings.themeMode);
+
+  const handleTheme = (m: ThemeMode) => {
+    update("themeMode", m);
+    void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
+    // Persist immediately: the Command Hub home has no Save button. Patch only the theme: re-saving the whole
+    // (possibly stale) form here used to revert anything another window or IPC had changed.
+    invoke("settings_patch", { patch: { themeMode: m } }).catch(() => {});
+  };
+
+  const isLegacyPage = page === "audio" || page === "display" || page === "advanced";
+
   return (
-    <div className="settings-container">
-      {/* Header */}
-      <div className="settings-header">
-        <span className="settings-title">NEXUS Settings</span>
-        <span className="settings-hint">Ctrl+Space to close</span>
-      </div>
-
-      {/* Tab bar */}
-      <div className="settings-tabs">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            className={`settings-tab ${tab === t.id ? "settings-tab--active" : ""}`}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Scrollable content */}
-      <div className="settings-scroll">
-        {tab === "display" && <DisplayTab settings={settings} update={update} />}
-        {tab === "audio" && <AudioTab settings={settings} update={update} />}
-        {tab === "auth" && <AuthTab settings={settings} update={update} />}
-        {tab === "connections" && <ConnectionsTab settings={settings} update={update} />}
-        {tab === "screen" && <ScreenTab settings={settings} update={update} />}
-      </div>
-
-      {/* Footer */}
-      <div className="settings-footer">
-        <span className={`settings-saved-indicator ${saved ? "settings-saved-indicator--visible" : ""}`}>
-          ✓ Saved
-        </span>
-        <div className="settings-footer-actions">
-          <button className="settings-btn" onClick={handleReset}>Reset</button>
-          <button className="settings-btn settings-btn--primary" onClick={handleSave}>
-            Save
-          </button>
+    <div className="hx">
+      <header className="hx-header" data-tauri-drag-region>
+        <div className="hx-header-left" data-tauri-drag-region>
+          {page === "home" ? (
+            <button type="button" className="hx-header-btn" onClick={() => invoke("hide_settings_sidebar").catch(() => {})}>
+              Close
+            </button>
+          ) : (
+            <button type="button" className="hx-header-btn" onClick={() => setPage("home")}>
+              ‹ Back
+            </button>
+          )}
         </div>
+        <div className="hx-title" data-tauri-drag-region>{PAGE_TITLES[page]}</div>
+        <div className="hx-header-dock" data-tauri-drag-region>
+          <button type="button" onClick={() => onDock("left")} title="Dock Left">◧</button>
+          <button type="button" onClick={() => onDock("right")} title="Dock Right">◨</button>
+        </div>
+      </header>
+
+      {toast && <div className="hx-toast">{toast}</div>}
+
+      <div className="hx-scroll">
+        {page === "home" && (
+          <HubHome acc={acc} insights={insights} themeMode={themeMode} onTheme={handleTheme} onOpen={setPage} />
+        )}
+        {page === "keys" && <ApiKeysPage onChanged={() => setInsightsKey((k) => k + 1)} />}
+        {page === "memory" && <MemoryPage onFlagChanged={(flag, on) => update(flag, on)} />}
+        {page === "connections" && (
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", gap: "16px", padding: "12px 14px 24px" }}>
+            <McpServersPanel style={{ flex: 1, minHeight: "560px" }} />
+            <ConnectionsTab settings={settings} update={update} />
+          </div>
+        )}
+        {isLegacyPage && (
+          <div className="hx-legacy">
+            {page === "display" && <DisplayTab settings={settings} update={update} />}
+            {page === "audio" && <AudioTab settings={settings} update={update} />}
+            {page === "advanced" && <AuthTab settings={settings} update={update} />}
+          </div>
+        )}
       </div>
+
+      {isLegacyPage && (
+        <div className="hx-footer">
+          <span className={`hx-saved ${saved ? "hx-saved--on" : ""}`}>✓ Saved</span>
+          <div className="hx-footer-actions">
+            <button className="hx-btn" onClick={handleReset}>Reset</button>
+            <button className="hx-btn hx-btn--primary" onClick={handleSave}>Save</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+const COLOR_PRESETS = [
+  { name: "Golden Amber (Default)", hex: "#f2b859" },
+  { name: "Electric Cyan", hex: "#00e5ff" },
+  { name: "Neon Emerald", hex: "#10b981" },
+  { name: "Crimson Ruby", hex: "#ef4444" },
+  { name: "Royal Azure", hex: "#3b82f6" },
+  { name: "Amethyst Violet", hex: "#a855f7" },
+  { name: "Silver Pearl", hex: "#e2e8f0" },
+];
 
 // ─── Display Tab (Phase 2 — orb position + size) ──────────────────────
 function DisplayTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
-  const hPct = settings.orbHorizontalPct ?? 0.5;
-  const vPct = settings.orbVerticalPct ?? 1.0;
-  const orbSize = settings.orbSize ?? 200;
+  const currentColor = settings.orbColor || "#f2b859";
 
-  // Live update — move orb immediately without saving
-  const liveUpdate = (h: number, v: number, size: number) => {
-    invoke("set_orb_position", {
-      horizontalPct: h,
-      verticalPct: v,
-      size,
+  const onColorSelect = (hex: string) => {
+    update("orbColor", hex);
+    try {
+      localStorage.setItem("nexus:orb_color", hex);
+    } catch {}
+    import("@tauri-apps/api/event").then(({ emit }) => {
+      emit("orb:color", { color: hex }).catch(() => {});
+    }).catch(() => {});
+  };
+
+  const currentPos = settings.orbPosition || "top";
+  const currentCapsuleStyle = resolveCapsuleStyle(settings.orbCapsuleStyle, isLinuxRuntime());
+  const currentWakeupMode = settings.orbWakeupMode ?? 1;
+  const currentInteriorGenesis = settings.orbInteriorGenesis ?? 2;
+
+  const onPositionSelect = (pos: "top" | "bottom") => {
+    update("orbPosition", pos);
+    try {
+      localStorage.setItem("nexus:orb_position", pos);
+    } catch {}
+    useAssistant.getState().setOrbPosition(pos);
+    import("@tauri-apps/api/core").then(({ invoke }) => {
+      const vPct = pos === "bottom" ? 1.0 : 0.0;
+      invoke("set_orb_position", {
+        horizontalPct: 0.5,
+        verticalPct: vPct,
+        size: settings.orbSize || 200,
+      }).catch(() => {});
+    }).catch(() => {});
+  };
+
+  const onCapsuleStyleSelect = (style: OrbCapsuleStyle, mode?: number, genesis?: number) => {
+    update("orbCapsuleStyle", style);
+    const m = mode ?? currentWakeupMode;
+    const g = genesis ?? currentInteriorGenesis;
+    if (mode !== undefined) update("orbWakeupMode", m);
+    if (genesis !== undefined) update("orbInteriorGenesis", g);
+    try {
+      localStorage.setItem("nexus:orb_capsule_style", style);
+      localStorage.setItem("nexus:orb_wakeup_mode", String(m));
+      localStorage.setItem("nexus:orb_interior_genesis", String(g));
+    } catch {}
+    useAssistant.getState().setOrbCapsuleStyle(style);
+    useAssistant.getState().setOrbWakeupMode(m);
+    useAssistant.getState().setOrbInteriorGenesis(g);
+    import("@tauri-apps/api/core").then(({ invoke }) => {
+      invoke("set_orb_capsule_style", { style, mode: m, genesis: g }).catch(() => {});
     }).catch(() => {});
   };
 
   return (
     <>
       <div className="settings-section">
-        <div className="settings-section-title">Orb Position</div>
-
-        {/* Live preview — shows the orb position and breathing animation */}
-        <div className="position-preview">
-          <div
-            className="position-preview-orb"
-            style={{
-              left: `${hPct * 100}%`,
-              top: `${vPct * 100}%`,
-              width: `${Math.min(orbSize / 200 * 40, 50)}px`,
-              height: `${Math.min(orbSize / 200 * 40, 50)}px`,
-            }}
-          />
+        <div className="settings-section-title">Orb Color Theme</div>
+        <div className="setting-desc" style={{ marginBottom: 10 }}>
+          Customize your visual aura for listening and idle states. Visual morphologies can be customized in the 3D Studio.
         </div>
-
-        <div className="setting-row">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 8, marginBottom: 12 }}>
+          {COLOR_PRESETS.map((p) => {
+            const isSelected = currentColor.toLowerCase() === p.hex.toLowerCase();
+            return (
+              <button
+                key={p.hex}
+                type="button"
+                className={`settings-btn ${isSelected ? "settings-btn--primary" : "settings-btn--glass"}`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: isSelected ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+                  background: isSelected ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+                  cursor: "pointer",
+                  color: "#fff",
+                  fontSize: 12,
+                  fontWeight: isSelected ? 600 : 400,
+                  transition: "all 0.15s ease",
+                }}
+                onClick={() => onColorSelect(p.hex)}
+                title={p.name}
+              >
+                <span
+                  style={{
+                    width: 14,
+                    height: 14,
+                    borderRadius: "50%",
+                    background: p.hex,
+                    boxShadow: `0 0 8px ${p.hex}99`,
+                    flexShrink: 0,
+                    display: "inline-block",
+                  }}
+                />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {p.name.split(" ")[0]}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="setting-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div>
-            <div className="setting-label">Horizontal</div>
-            <div className="setting-desc">Left ↔ Right</div>
+            <div className="setting-label">Custom Hex Color</div>
+            <div className="setting-desc">Enter or pick any bespoke color value</div>
           </div>
-          <div className="setting-control">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <input
-              type="range"
-              className="settings-slider"
-              min={0}
-              max={100}
-              value={Math.round(hPct * 100)}
-              onChange={(e) => {
-                const pct = parseInt(e.target.value) / 100;
-                update("orbHorizontalPct", pct);
-                liveUpdate(pct, vPct, orbSize);
+              type="color"
+              value={currentColor}
+              onChange={(e) => onColorSelect(e.target.value)}
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: 6,
+                border: "1px solid rgba(255,255,255,0.2)",
+                cursor: "pointer",
+                background: "transparent",
               }}
             />
-            <span className="slider-value">{Math.round(hPct * 100)}%</span>
-          </div>
-        </div>
-
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Vertical</div>
-            <div className="setting-desc">Top ↔ Bottom</div>
-          </div>
-          <div className="setting-control">
             <input
-              type="range"
-              className="settings-slider"
-              min={0}
-              max={100}
-              value={Math.round(vPct * 100)}
-              onChange={(e) => {
-                const pct = parseInt(e.target.value) / 100;
-                update("orbVerticalPct", pct);
-                liveUpdate(hPct, pct, orbSize);
-              }}
+              type="text"
+              className="settings-input"
+              style={{ width: 85, textAlign: "center", fontFamily: "monospace" }}
+              value={currentColor}
+              onChange={(e) => onColorSelect(e.target.value)}
             />
-            <span className="slider-value">{Math.round(vPct * 100)}%</span>
           </div>
         </div>
       </div>
 
       <div className="settings-section">
-        <div className="settings-section-title">Orb Size</div>
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Size</div>
-            <div className="setting-desc">100px ↔ 300px</div>
-          </div>
-          <div className="setting-control">
-            <input
-              type="range"
-              className="settings-slider"
-              min={100}
-              max={300}
-              step={10}
-              value={orbSize}
-              onChange={(e) => {
-                const size = parseInt(e.target.value);
-                update("orbSize", size);
-                liveUpdate(hPct, vPct, size);
-              }}
-            />
-            <span className="slider-value">{orbSize}px</span>
-          </div>
+        <div className="settings-section-title">Orb Screen Position</div>
+        <div className="setting-desc" style={{ marginBottom: 12 }}>
+          Choose where NEXUS appears. The sleek black slider smoothly glides into view from your chosen screen edge.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <button
+            type="button"
+            className={`settings-btn ${currentPos === "top" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentPos === "top" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentPos === "top" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onPositionSelect("top")}
+          >
+            <span style={{ fontSize: 18 }}>⬒</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Top (Default)</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>Slides down from top edge</span>
+          </button>
+          <button
+            type="button"
+            className={`settings-btn ${currentPos === "bottom" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentPos === "bottom" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentPos === "bottom" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onPositionSelect("bottom")}
+          >
+            <span style={{ fontSize: 18 }}>⬓</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Bottom</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>Slides up from taskbar</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Orb Capsule &amp; Scoop Style</div>
+        <div className="setting-desc" style={{ marginBottom: 12 }}>
+          Choose your container geometry. Aura is the bare orb ringed by a light that moves with your voice; Classic is a solid pitch-black 10px capsule box; Pebble Scoop is an organic catenary curve dropping smoothly from the screen bezel.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <button
+            type="button"
+            className={`settings-btn ${currentCapsuleStyle === "aura" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentCapsuleStyle === "aura" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentCapsuleStyle === "aura" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onCapsuleStyleSelect("aura")}
+          >
+            <span style={{ fontSize: 18 }}>◌</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Aura</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>Bare orb, voice-reactive glow</span>
+          </button>
+          <button
+            type="button"
+            className={`settings-btn ${currentCapsuleStyle === "classic" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentCapsuleStyle === "classic" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentCapsuleStyle === "classic" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onCapsuleStyleSelect("classic")}
+          >
+            <span style={{ fontSize: 18 }}>⬝</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Classic Capsule</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>10px pitch-black box</span>
+          </button>
+          <button
+            type="button"
+            className={`settings-btn ${currentCapsuleStyle === "pebble" ? "settings-btn--primary" : "settings-btn--glass"}`}
+            style={{
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 6,
+              borderRadius: 10,
+              cursor: "pointer",
+              border: currentCapsuleStyle === "pebble" ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.12)",
+              background: currentCapsuleStyle === "pebble" ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.05)",
+              color: "#fff",
+              transition: "all 0.15s ease",
+            }}
+            onClick={() => onCapsuleStyleSelect("pebble")}
+          >
+            <span style={{ fontSize: 18 }}>◗</span>
+            <span style={{ fontWeight: 600, fontSize: 13 }}>Fluid Pebble Scoop</span>
+            <span style={{ fontSize: 11, opacity: 0.7 }}>Catenary bezel scoop</span>
+          </button>
         </div>
 
-        <div className="setting-row">
-          <div className="setting-label">Reset to default</div>
-          <div className="setting-control">
+        {currentCapsuleStyle === "pebble" && (
+          <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "rgba(255,255,255,0.6)" }}>
+              Wakeup Thread Animation Mode
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
+              {[
+                { id: 1, name: "🧵 Elastic Thread Stretch & Snap", desc: "Catenary stretch, harmonic damping (User Choice)" },
+                { id: 2, name: "🏹 Bowstring Pluck & Rebound", desc: "Plunge, sharp overshoot and high-freq ring" },
+                { id: 3, name: "💧 Liquid Meniscus Extrusion", desc: "Critically damped fluid mercury extrusion" },
+                { id: 4, name: "🌅 Horizon Split & Wing Flare", desc: "Expands horizontally with wing specular gleam" },
+                { id: 5, name: "〰️ Acoustic Harmonic Ripple", desc: "Standing acoustic ripples on catenary curve" },
+              ].map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  className={`settings-btn ${currentWakeupMode === m.id ? "settings-btn--primary" : "settings-btn--glass"}`}
+                  style={{
+                    padding: "8px 12px",
+                    textAlign: "left",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 2,
+                    borderRadius: 8,
+                    cursor: "pointer",
+                    border: currentWakeupMode === m.id ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.1)",
+                    background: currentWakeupMode === m.id ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.04)",
+                  }}
+                  onClick={() => onCapsuleStyleSelect("pebble", m.id, currentInteriorGenesis)}
+                >
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#fff" }}>{m.name}</span>
+                  <span style={{ fontSize: 11, opacity: 0.65 }}>{m.desc}</span>
+                </button>
+              ))}
+            </div>
+
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, color: "rgba(255,255,255,0.6)", marginTop: 4 }}>
+              Orb Interior Genesis
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+              {[
+                { id: 2, name: "Spark Burst (Selected)" },
+                { id: 0, name: "Core Bloom" },
+                { id: 1, name: "Droplet Roll" },
+                { id: 3, name: "Helix Weave" },
+              ].map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  className={`settings-btn ${currentInteriorGenesis === g.id ? "settings-btn--primary" : "settings-btn--glass"}`}
+                  style={{
+                    padding: "7px 10px",
+                    textAlign: "center",
+                    borderRadius: 8,
+                    fontSize: 11.5,
+                    fontWeight: currentInteriorGenesis === g.id ? 700 : 500,
+                    cursor: "pointer",
+                    border: currentInteriorGenesis === g.id ? "1.5px solid rgba(255,255,255,0.8)" : "1px solid rgba(255,255,255,0.1)",
+                    background: currentInteriorGenesis === g.id ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.04)",
+                  }}
+                  onClick={() => onCapsuleStyleSelect("pebble", currentWakeupMode, g.id)}
+                >
+                  {g.name}
+                </button>
+              ))}
+            </div>
+
             <button
-              className="settings-btn"
+              type="button"
+              className="settings-btn settings-btn--glass"
+              style={{
+                marginTop: 6,
+                padding: "10px 14px",
+                borderRadius: 8,
+                fontSize: 12,
+                fontWeight: 600,
+                color: "#38bdf8",
+                borderColor: "rgba(56, 189, 248, 0.4)",
+                background: "rgba(56, 189, 248, 0.08)",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 6,
+              }}
               onClick={() => {
-                update("orbHorizontalPct", 0.5);
-                update("orbVerticalPct", 1.0);
-                update("orbSize", 200);
-                liveUpdate(0.5, 1.0, 200);
+                import("@tauri-apps/api/core").then(({ invoke }) => {
+                  invoke("test_wake_orb").catch(() => {});
+                }).catch(() => {});
               }}
             >
-              Center-bottom, 200px
+              <span>✦ Test Wakeup on Desktop</span>
             </button>
           </div>
-        </div>
+        )}
       </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Sidebar Docking</div>
+        <div className="setting-desc" style={{ marginBottom: 8 }}>
+          Choose where the NEXUS panel is pinned: right edge, left edge, or
+          floating as a centered modal. Works from any tab, any view.
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            className="settings-btn settings-btn--glass"
+            style={{ flex: 1 }}
+            onClick={() => {
+              invoke("set_sidebar_dock", { dock: "left" }).catch(() => {});
+            }}
+          >
+            ◧ Dock Left
+          </button>
+          <button
+            className="settings-btn settings-btn--glass"
+            style={{ flex: 1 }}
+            onClick={() => {
+              invoke("set_sidebar_dock", { dock: "right" }).catch(() => {});
+            }}
+          >
+            ◨ Dock Right
+          </button>
+        </div>
+        <button
+          className="settings-btn settings-btn--glass"
+          style={{ width: "100%", marginTop: 6 }}
+          onClick={() => {
+            invoke("set_sidebar_dock", { dock: "center" }).catch(() => {});
+          }}
+        >
+          ⧉ Center Floating
+        </button>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Orb 3D Morphology Studio</div>
+        <div className="setting-desc" style={{ marginBottom: 10 }}>
+          Configure 3D particle morphologies for Thinking, Speaking, and Listening.
+        </div>
+        <button
+          type="button"
+          className="settings-btn settings-btn--glass"
+          style={{
+            width: "100%",
+            padding: "10px 14px",
+            borderRadius: 10,
+            color: "#ffffff",
+            fontWeight: 600,
+            fontSize: 13,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+          }}
+          onClick={() => {
+            invoke("open_orb_studio_window").catch(() => {});
+          }}
+        >
+          ✦ Open Orb Customization Studio ›
+        </button>
+      </div>
+
+      {/* Linux only: the pointer marker and its pointer.json settings live in the Linux build. */}
+      {isLinuxRuntime() && <ScreenPointerSection />}
     </>
   );
 }
 
-// ─── Screen Tab (Phase 2 — locate marker overlay) ────────────────────
-function ScreenTab({ settings, update }: {
-  settings: Settings;
-  update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
-}) {
-  const dwell = Math.min(15, Math.max(3, settings.pointerDwellSeconds ?? 6));
-  return (
-    <>
-      <div className="settings-section">
-        <div className="settings-section-title">Locate Marker</div>
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Show pointer</div>
-            <div className="setting-desc">Marker appears only for locate answers</div>
-          </div>
-          <div className="setting-control">
-            <div
-              className={`settings-toggle ${(settings.pointerEnabled ?? true) ? "settings-toggle--on" : ""}`}
-              onClick={() => update("pointerEnabled", !(settings.pointerEnabled ?? true))}
-            />
-          </div>
-        </div>
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Dwell time</div>
-            <div className="setting-desc">Auto-hide after 3–15 seconds</div>
-          </div>
-          <div className="setting-control">
-            <input
-              type="range"
-              className="settings-slider"
-              min={3}
-              max={15}
-              value={dwell}
-              onChange={(e) => update("pointerDwellSeconds", parseInt(e.target.value))}
-            />
-            <span className="slider-value">{dwell}s</span>
-          </div>
-        </div>
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Suppress in fullscreen</div>
-            <div className="setting-desc">Hide marker over games and video</div>
-          </div>
-          <div className="setting-control">
-            <div
-              className={`settings-toggle ${(settings.pointerSuppressFullscreen ?? true) ? "settings-toggle--on" : ""}`}
-              onClick={() => update("pointerSuppressFullscreen", !(settings.pointerSuppressFullscreen ?? true))}
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="settings-section">
-        <div className="settings-section-title">Privacy</div>
-        <div className="setting-row">
-          <div>
-            <div className="setting-label">Excluded apps</div>
-            <div className="setting-desc">Comma-separated window titles NEXUS never looks at</div>
-          </div>
-        </div>
-        <input
-          type="text"
-          className="settings-input"
-          placeholder="bank, 1password, …"
-          value={settings.pointerExcludedApps ?? ""}
-          onChange={(e) => update("pointerExcludedApps", e.target.value)}
-        />
-      </div>
-    </>
-  );
-}
-
-// ─── Audio Tab (Phase 4 — TTS volume + voice picker) ──────────────────
-interface TtsVoice {
-  id: string;
+// ─── Audio Tab — iconic voice personas (Feature 83) ─────────────────
+// Persona catalog comes from Rust (list_voice_personas — single source
+// of truth). Cards: preview demo (non-destructive) + click to equip
+// (instant cloud switch + background offline-twin sync).
+interface VoicePersona {
+  key: string;
   name: string;
-  gender: string;
-  provider: string;
-  language: string;
+  persona: string;
+  accentTag: string;
+  avatar: string;
+  cloudId: string;
+  kokoroVoice: string;
+  previewPhrase: string;
+}
+
+interface VoiceStatus {
+  voice_key: string;
+  cloud_id: string;
+  twin: string;
+  sync_state: "ready" | "cloud_only" | "downloading";
 }
 
 function AudioTab({ settings, update }: {
@@ -447,63 +856,206 @@ function AudioTab({ settings, update }: {
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
   const volume = settings.ttsVolume ?? 75;
-  const [voices, setVoices] = useState<TtsVoice[]>([]);
+  const [personas, setPersonas] = useState<VoicePersona[]>([]);
   const [previewing, setPreviewing] = useState<string | null>(null);
+  const [equipping, setEquipping] = useState<string | null>(null);
+  const [sync, setSync] = useState<Record<string, { state: "ready" | "cloud_only" | "downloading"; progress?: number; phase?: string }>>({});
+  const [transport, setTransport] = useState<"cloud" | "local">("cloud");
 
-  // Fetch voice list on mount
+  // Fetch persona catalog + current sync state + transport on mount.
   useEffect(() => {
-    invoke<TtsVoice[]>("list_tts_voices")
-      .then(setVoices)
+    invoke<VoicePersona[]>("list_voice_personas")
+      .then(setPersonas)
+      .catch(() => {});
+    invoke<VoiceStatus>("get_voice_status")
+      .then((s) => {
+        if (s?.voice_key) {
+          setSync((m) => ({ ...m, [s.voice_key]: { state: s.sync_state } }));
+        }
+      })
+      .catch(() => {});
+    invoke<{ transport?: string }>("get_voice_transport")
+      .then((t) => {
+        if (t?.transport === "local" || t?.transport === "cloud") {
+          setTransport(t.transport);
+        }
+      })
       .catch(() => {});
   }, []);
 
-  const previewVoice = (voiceId: string) => {
+  // Live sync pill + transport updates from the swap worker /
+  // connectivity watchdog. Any voice:status event also re-reads the
+  // transport flag (cheap sync read) so the dot never lies.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const { invoke: inv } = await import("@tauri-apps/api/core");
+      unlisten = await listen<{ status?: string; voice_key?: string; progress?: number; phase?: string }>(
+        "voice:status",
+        (ev) => {
+          const key = ev.payload?.voice_key;
+          const status = ev.payload?.status;
+          if (status === "cloud-restored") {
+            setTransport("cloud");
+            return;
+          }
+          if (!key || (status !== "ready" && status !== "cloud_only" && status !== "downloading" && status !== "error")) return;
+          const state = status === "error" ? "cloud_only" : status;
+          setSync((m) => ({ ...m, [key]: { state, progress: ev.payload?.progress, phase: ev.payload?.phase } }));
+          inv<{ transport?: string }>("get_voice_transport")
+            .then((t) => {
+              if (t?.transport === "local" || t?.transport === "cloud") {
+                setTransport(t.transport);
+              }
+            })
+            .catch(() => {});
+        },
+      );
+    })().catch(() => {});
+    return () => { unlisten?.(); };
+  }, []);
+
+  const previewVoice = (p: VoicePersona) => {
     if (previewing) return;
-    setPreviewing(voiceId);
-    invoke("preview_voice", { voiceId })
+    setPreviewing(p.key);
+    invoke("preview_voice", { voiceId: p.cloudId, text: p.previewPhrase })
       .catch(() => {})
       .finally(() => setTimeout(() => setPreviewing(null), 500));
   };
 
-  const currentVoice = settings.edgeTtsVoice || "en-US-AvaNeural";
+  const equipVoice = (p: VoicePersona) => {
+    if (equipping) return;
+    setEquipping(p.key);
+    invoke<{ voiceKey: string; cloudId: string; syncState: string }>("set_voice_preference", {
+      voiceKey: p.key,
+    })
+      .then((res) => {
+        // Mirror into local settings state (persists on Save).
+        update("edgeTtsVoice", res.cloudId);
+        update("ttsVoice", res.cloudId);
+        update("ttsProvider", "edge");
+        update("selectedVoice", res.voiceKey);
+        update("offlineVoiceModel", p.kokoroVoice);
+        const st = res.syncState === "ready" ? "ready" : "cloud_only";
+        setSync((m) => ({ ...m, [res.voiceKey]: { state: st } }));
+      })
+      .catch(() => {})
+      .finally(() => setEquipping(null));
+  };
+
+  const activeKey =
+    personas.find((p) => p.cloudId === (settings.edgeTtsVoice || "en-US-AvaNeural"))?.key
+    ?? "nexus";
+
+  const syncPill = (key: string) => {
+    const s = sync[key];
+    if (!s) return null;
+    if (s.state === "ready") return <span className="persona-sync persona-sync--ready">✓ Cloud + Offline Ready</span>;
+    if (s.state === "downloading") {
+      const pct = typeof s.progress === "number" ? ` ${s.progress}%` : "…";
+      // phase "base" = the one-time shared offline engine (~88 MB); "voice" = the 0.5 MB voice file
+      const label = s.phase === "base" ? "Downloading offline engine (one-time)" : "Syncing Offline Voice";
+      return <span className="persona-sync persona-sync--busy">⬇ {label}{pct}</span>;
+    }
+    return <span className="persona-sync persona-sync--pending">⚡ Cloud Only</span>;
+  };
 
   return (
     <>
       <div className="settings-section">
-        <div className="settings-section-title">Voice Selection</div>
-        <div className="setting-desc" style={{ marginBottom: 8 }}>
-          Tap a voice to hear a demo. Selected voice is used for all NEXUS responses.
+        <div className="settings-section-title">
+          Voice Selection
+          <span
+            className={`transport-dot transport-dot--${transport}`}
+            title={transport === "cloud" ? "Speaking via cloud" : "Speaking via local offline voice"}
+          >
+            ● {transport === "cloud" ? "Cloud" : "Local"}
+          </span>
         </div>
-        <div className="voice-list">
-          {voices.length === 0 && (
+        <div className="setting-desc" style={{ marginBottom: 8 }}>
+          Tap ▶ for a demo. Tap a card to equip it — cloud switches instantly, the offline twin syncs in the background.
+        </div>
+        <div className="persona-grid">
+          {personas.length === 0 && (
             <div className="voice-empty">Loading voices…</div>
           )}
-          {voices.map((v) => (
+          {personas.map((p) => (
             <div
-              key={v.id}
-              className={`voice-row ${currentVoice === v.id ? "voice-row--selected" : ""}`}
-              onClick={() => update("edgeTtsVoice", v.id)}
+              key={p.key}
+              className={`persona-card ${activeKey === p.key ? "persona-card--active" : ""}`}
+              onClick={() => equipVoice(p)}
+              title={p.persona}
             >
-              <div className={`voice-radio ${currentVoice === v.id ? "voice-radio--on" : ""}`} />
-              <div className="voice-info">
-                <span className="voice-name">{v.name}</span>
-                <span className="voice-meta">
-                  <span className={`voice-gender voice-gender--${v.gender.toLowerCase()}`}>{v.gender}</span>
-                  <span className={`voice-provider voice-provider--${v.provider}`}>{v.provider === "edge-tts" ? "Cloud" : "Offline"}</span>
-                </span>
+              <div className="persona-card-top">
+                <span className="persona-avatar" aria-hidden="true">{p.avatar}</span>
+                {activeKey === p.key && <span className="persona-check">✓</span>}
               </div>
+              <div className="persona-name">{p.name}</div>
+              <div className="persona-accent">{p.accentTag}</div>
+              <div className="persona-desc">{p.persona}</div>
+              {activeKey === p.key && syncPill(p.key)}
               <button
-                className="voice-play-btn"
-                disabled={previewing !== null}
+                className="persona-play-btn"
+                disabled={previewing !== null || equipping !== null}
                 onClick={(e) => {
                   e.stopPropagation();
-                  previewVoice(v.id);
+                  previewVoice(p);
                 }}
               >
-                {previewing === v.id ? "⏸" : "▶"}
+                {previewing === p.key ? "⏸ Pause" : "▶ Play Demo"}
               </button>
             </div>
           ))}
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Orb Visual Morphology</div>
+        <div className="setting-row" style={{ alignItems: "center" }}>
+          <div>
+            <div className="setting-label">Orb Animation Customization</div>
+            <div className="setting-desc">Configure particle geometry for thinking, speaking, and listening states.</div>
+          </div>
+          <div className="setting-control">
+            <button
+              className="settings-btn"
+              style={{
+                background: "rgba(168, 85, 247, 0.15)",
+                borderColor: "rgba(168, 85, 247, 0.4)",
+                color: "#c084fc",
+                fontWeight: 600,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px"
+              }}
+              onClick={() => invoke("open_orb_studio_window").catch(() => {})}
+            >
+              ✦ Customize Orb
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <HandModeSection settings={settings} update={update} />
+
+      <div className="settings-section">
+        <div className="settings-section-title">Personality</div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Tone mode</div>
+            <div className="setting-desc">Butler is formal ("sir"). Friend uses your name, talks casually, counsels honestly.</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.personaMode ?? "butler"}
+              onChange={(e) => update("personaMode", e.target.value)}
+            >
+              <option value="butler">Butler (formal)</option>
+              <option value="friend">Friend (casual)</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -526,6 +1078,27 @@ function AudioTab({ settings, update }: {
             <span className="slider-value">{volume}%</span>
           </div>
         </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Voice emotion</div>
+            <div className="setting-desc">Auto picks per reply (errors sad, success cheerful)</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.ttsEmotion ?? "auto"}
+              onChange={(e) => update("ttsEmotion", e.target.value)}
+            >
+              <option value="auto">Auto</option>
+              <option value="neutral">Neutral</option>
+              <option value="cheerful">Cheerful</option>
+              <option value="calm">Calm</option>
+              <option value="sad">Sad</option>
+              <option value="urgent">Urgent</option>
+              <option value="whisper">Whisper</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       <div className="settings-section">
@@ -539,6 +1112,18 @@ function AudioTab({ settings, update }: {
             <div
               className={`settings-toggle ${settings.localSttOnly ? "settings-toggle--on" : ""}`}
               onClick={() => update("localSttOnly", !settings.localSttOnly)}
+            />
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Speaker verification</div>
+            <div className="setting-desc">Only enrolled voice can wake NEXUS</div>
+          </div>
+          <div className="setting-control">
+            <div
+              className={`settings-toggle ${settings.speakerVerification ? "settings-toggle--on" : ""}`}
+              onClick={() => update("speakerVerification", !settings.speakerVerification)}
             />
           </div>
         </div>
@@ -564,34 +1149,137 @@ function AudioTab({ settings, update }: {
   );
 }
 
-// ─── Auth Tab (Phase 3 — OAuth + API keys) ────────────────────────────
+// ─── Auth Tab (Multi-Email Google + Direct OAuth + API keys) ──────────
+interface GoogleAccountProfile {
+  email: string;
+  name: string;
+  picture?: string;
+  is_primary: boolean;
+  added_at_ms: number;
+  scopes: string[];
+  phone?: string | null;
+  address?: string | null;
+}
+
 function AuthTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
 }) {
   const [oauthStatus, setOauthStatus] = useState<Record<string, OAuthStatus>>({});
+  const [googleAccounts, setGoogleAccounts] = useState<GoogleAccountProfile[]>([]);
   const [connecting, setConnecting] = useState<string | null>(null);
+  const [connectingGoogle, setConnectingGoogle] = useState(false);
+  const [showCustomCreds, setShowCustomCreds] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [credStatus, setCredStatus] = useState<{ configured: boolean; has_client_id: boolean; has_secret: boolean; message?: string | null } | null>(null);
+  const [credSaved, setCredSaved] = useState(false);
 
-  // Set the sidecar base URL and fetch OAuth status on mount
+  const loadCredStatus = useCallback(async () => {
+    try {
+      const st = await invoke<{ configured: boolean; has_client_id: boolean; has_secret: boolean; message?: string | null }>("google_credentials_status");
+      setCredStatus(st);
+      // Not set up yet: open the drawer so the missing step is in front of the user.
+      if (!st.configured) setShowCustomCreds(true);
+    } catch {
+      /* status is advisory */
+    }
+  }, []);
   useEffect(() => {
+    void loadCredStatus();
+  }, [loadCredStatus]);
+
+  const loadGoogleAccounts = useCallback(async () => {
+    try {
+      const accs = await invoke<GoogleAccountProfile[]>("google_get_accounts");
+      setGoogleAccounts(accs);
+    } catch (e) {
+      console.warn("Failed to load google accounts", e);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadGoogleAccounts();
     if (settings.serverUrl) {
       setSidecarBaseUrl(settings.serverUrl);
       if (settings.userId) {
         getOAuthStatus(settings.userId).then(setOauthStatus).catch(() => {});
       }
     }
-  }, [settings.serverUrl, settings.userId]);
+  }, [loadGoogleAccounts, settings.serverUrl, settings.userId]);
 
-  const handleConnect = async (provider: "google" | "github") => {
+  const handleConnectGoogleNative = async () => {
     setError(null);
-    setConnecting(provider);
+    setConnectingGoogle(true);
+    try {
+      await invoke("google_connect_account");
+      await loadGoogleAccounts();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConnectingGoogle(false);
+    }
+  };
+
+  const handleSetPrimaryGoogle = async (email: string) => {
+    try {
+      await invoke("google_set_primary_account", { email });
+      await loadGoogleAccounts();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleDisconnectGoogle = async (email: string) => {
+    try {
+      await invoke("google_disconnect_account", { email });
+      await loadGoogleAccounts();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Progressive re-consent (optional phone + address scopes). Absence is
+  // normal — the button simply reappears if nothing was granted/saved.
+  const [extendingGoogle, setExtendingGoogle] = useState(false);
+  const handleExtendGoogle = async () => {
+    setError(null);
+    setExtendingGoogle(true);
+    try {
+      await invoke("google_connect_extended");
+      await loadGoogleAccounts();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExtendingGoogle(false);
+    }
+  };
+
+  const handleSaveCustomCreds = async () => {
+    setError(null);
+    setCredSaved(false);
+    try {
+      await invoke("google_save_custom_credentials", {
+        clientId,
+        clientSecret: clientSecret || null,
+      });
+      setClientSecret("");
+      setCredSaved(true);
+      await loadCredStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleConnectGithub = async () => {
+    setError(null);
+    setConnecting("github");
     try {
       if (!settings.serverUrl) throw new Error("Server URL not configured");
       setSidecarBaseUrl(settings.serverUrl);
-      const success = await connectOAuth(provider, settings.userId || "local-user");
+      const success = await connectOAuth("github", settings.userId || "local-user");
       if (success) {
-        // Refresh status
         const status = await getOAuthStatus(settings.userId || "local-user");
         setOauthStatus(status);
       }
@@ -602,10 +1290,10 @@ function AuthTab({ settings, update }: {
     }
   };
 
-  const handleDisconnect = async (provider: "google" | "github") => {
+  const handleDisconnectGithub = async () => {
     setError(null);
     try {
-      await disconnectOAuth(settings.userId || "local-user", provider);
+      await disconnectOAuth(settings.userId || "local-user", "github");
       const status = await getOAuthStatus(settings.userId || "local-user");
       setOauthStatus(status);
     } catch (e) {
@@ -613,11 +1301,12 @@ function AuthTab({ settings, update }: {
     }
   };
 
-  const googleConnected = oauthStatus.google?.connected ?? false;
   const githubConnected = oauthStatus.github?.connected ?? false;
 
+  // Phone-width column (carbon copy): the whole Accounts view reads as
+  // a phone-sized card centered in the wider sidebar window.
   return (
-    <>
+    <div className="hub-phone-col">
       {error && (
         <div className="auth-card" style={{ borderColor: "rgba(255,80,80,0.3)" }}>
           <span style={{ fontSize: 12, color: "rgba(255,150,150,0.9)" }}>{error}</span>
@@ -625,32 +1314,174 @@ function AuthTab({ settings, update }: {
       )}
 
       <div className="settings-section">
-        <div className="settings-section-title">Connected Accounts</div>
+        <div className="settings-section-title">Window Theme</div>
+        <div className="setting-desc" style={{ marginBottom: 8 }}>
+          Liquid frosted glass — dark, light, or follow the system across all windows, analyses, and mapper.
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {(["light", "dark", "system"] as const).map((m) => (
+            <button
+              key={m}
+              className={`settings-btn ${((settings.themeMode ?? "dark") === m) ? "settings-btn--primary" : ""}`}
+              style={{ flex: 1, textTransform: "capitalize" }}
+              onClick={() => {
+                update("themeMode", m);
+                void import("../sidebar/theme").then(({ applyThemeMode }) => applyThemeMode(m)).catch(() => {});
+                invoke("settings_patch", { patch: { themeMode: m } }).catch(() => {});
+              }}
+            >
+              {m === "light" ? "☀ Light (Frosted Glass)" : m === "dark" ? "🌙 Dark (Liquid Glass)" : "🖥 Follow System"}
+            </button>
+          ))}
+        </div>
+      </div>
 
-        <div className="auth-card">
-          <div className="auth-card-header">
-            <span className="auth-card-title">Google</span>
-            <span className={`status-badge ${googleConnected ? "status-badge--connected" : "status-badge--disconnected"}`}>
-              {googleConnected ? "Connected" : "Not connected"}
-            </span>
-          </div>
-          <div className="auth-card-actions">
-            {googleConnected ? (
-              <button className="settings-btn settings-btn--danger" onClick={() => handleDisconnect("google")}>
-                Disconnect
+      {/* Profile header card (carbon copy): primary/first account, Add Account link */}
+      <div className="hub-card hub-profile">
+        {(() => {
+          const primary = googleAccounts.find((a) => a.is_primary) ?? googleAccounts[0];
+          if (!primary) {
+            return (
+              <div className="hub-profile--empty">
+                <div className="hub-profile-name">No account yet</div>
+                <div className="hub-profile-email">Connect Google for Gmail, Calendar, Sentinel watch, &amp; Photos.</div>
+              </div>
+            );
+          }
+          return (
+            <>
+              {primary.picture ? (
+                <img src={primary.picture} alt="" className="hub-avatar hub-avatar--lg" />
+              ) : (
+                <div className="hub-avatar hub-avatar--lg hub-avatar--fallback" aria-hidden="true">
+                  {(primary.name || primary.email).charAt(0).toUpperCase()}
+                </div>
+              )}
+              <div className="hub-profile-name">{primary.name}</div>
+              <div className="hub-profile-email">{primary.email}</div>
+            </>
+          );
+        })()}
+        <button
+          className="hub-link"
+          disabled={connectingGoogle}
+          onClick={handleConnectGoogleNative}
+        >
+          {connectingGoogle ? "Signing in..." : "+ Add Account"}
+        </button>
+      </div>
+
+      {/* Per-account rows: one row per account (photo + name + email). */
+      /* Row tap promotes to primary; Remove stays an explicit control. */}
+      {googleAccounts.length > 0 && (
+        <div className="hub-card hub-accounts" role="list" aria-label="Connected accounts">
+          {googleAccounts.map((acc) => (
+            <div
+              key={acc.email}
+              role="listitem"
+              className={`hub-account-row ${acc.is_primary ? "hub-account-row--primary" : ""}`}
+              onClick={() => { if (!acc.is_primary) void handleSetPrimaryGoogle(acc.email); }}
+              title={acc.is_primary ? "Primary account" : "Tap to make primary"}
+            >
+              {acc.picture ? (
+                <img src={acc.picture} alt="" className="hub-avatar" />
+              ) : (
+                <div className="hub-avatar hub-avatar--fallback" aria-hidden="true">
+                  {(acc.name || acc.email).charAt(0).toUpperCase()}
+                </div>
+              )}
+              <div className="hub-account-meta">
+                <div className="hub-account-name">
+                  {acc.name}
+                  {acc.is_primary && <span className="hub-primary-badge">Primary</span>}
+                </div>
+                <div className="hub-account-email">{acc.email}</div>
+                {(acc.phone || acc.address) ? (
+                  <div className="hub-account-contact">
+                    {[acc.phone, acc.address].filter(Boolean).join(" · ")}
+                  </div>
+                ) : (
+                  <button
+                    className="hub-link hub-link--sm"
+                    title="Re-consent with phone & address scopes (optional, never required)"
+                    onClick={(e) => { e.stopPropagation(); void handleExtendGoogle(); }}
+                  >
+                    {extendingGoogle ? "Opening Google…" : "Add phone & address"}
+                  </button>
+                )}
+              </div>
+              <span className="hub-chevron" aria-hidden="true">›</span>
+              <button
+                className="hub-remove"
+                title={`Remove ${acc.email}`}
+                onClick={(e) => { e.stopPropagation(); void handleDisconnectGoogle(acc.email); }}
+              >
+                Remove
               </button>
-            ) : (
+            </div>
+          ))}
+        </div>
+      )}
+
+        <div style={{ marginTop: 8 }}>
+          <button
+            className="settings-btn"
+            style={{ fontSize: 10, opacity: 0.7 }}
+            onClick={() => setShowCustomCreds(!showCustomCreds)}
+          >
+            {showCustomCreds ? "Hide Developer Credentials" : "Custom Developer OAuth Credentials"}
+          </button>
+          {credStatus && !credStatus.configured && (
+            <div className="hx-error" style={{ marginTop: 8, fontSize: 11 }}>
+              {credStatus.message}
+            </div>
+          )}
+          {credStatus?.configured && (
+            <div className="hx-note" style={{ marginTop: 8, fontSize: 11 }}>
+              Google sign-in is set up. Click “Add Google Account”.
+            </div>
+          )}
+          {showCustomCreds && (
+            <div className="auth-card" style={{ marginTop: 8, padding: 12 }}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.7)", marginBottom: 8 }}>
+                Required to sign in with Google. In Google Cloud Console: create an OAuth client of type
+                <b> Desktop app</b>, enable the <b>Gmail API</b> and <b>Google Calendar API</b>, add your Gmail address under
+                <b> Test users</b> on the consent screen, then paste the Client ID and Client Secret here:
+              </div>
+              <input
+                type="text"
+                className="settings-input"
+                placeholder="Client ID (...apps.googleusercontent.com)"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                style={{ marginBottom: 8, fontSize: 11 }}
+              />
+              <input
+                type="password"
+                className="settings-input"
+                placeholder="Client Secret (required)"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                style={{ marginBottom: 8, fontSize: 11 }}
+              />
               <button
                 className="settings-btn settings-btn--primary"
-                disabled={connecting === "google"}
-                onClick={() => handleConnect("google")}
+                style={{ fontSize: 11, width: "100%" }}
+                onClick={handleSaveCustomCreds}
               >
-                {connecting === "google" ? "Waiting..." : "Connect Google"}
+                Save Credentials
               </button>
-            )}
-          </div>
+              {credSaved && (
+                <div className="hx-note" style={{ marginTop: 6, fontSize: 11 }}>
+                  Saved. Now click “Add Google Account”.
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
+      <div className="settings-section">
+        <div className="settings-section-title">GitHub Account</div>
         <div className="auth-card">
           <div className="auth-card-header">
             <span className="auth-card-title">GitHub</span>
@@ -660,14 +1491,14 @@ function AuthTab({ settings, update }: {
           </div>
           <div className="auth-card-actions">
             {githubConnected ? (
-              <button className="settings-btn settings-btn--danger" onClick={() => handleDisconnect("github")}>
+              <button className="settings-btn settings-btn--danger" onClick={() => handleDisconnectGithub()}>
                 Disconnect
               </button>
             ) : (
               <button
                 className="settings-btn settings-btn--primary"
                 disabled={connecting === "github"}
-                onClick={() => handleConnect("github")}
+                onClick={() => handleConnectGithub()}
               >
                 {connecting === "github" ? "Waiting..." : "Connect GitHub"}
               </button>
@@ -682,6 +1513,7 @@ function AuthTab({ settings, update }: {
         <div className="auth-card">
           <div className="auth-card-header">
             <span className="auth-card-title">Gemini API Key</span>
+            <GeminiKeyPill />
           </div>
           <input
             type="password"
@@ -690,6 +1522,27 @@ function AuthTab({ settings, update }: {
             value={settings.geminiApiKey ?? ""}
             onChange={(e) => update("geminiApiKey", e.target.value)}
           />
+          {(settings.geminiApiKey ?? "").trim() !== "" &&
+            !isPlausibleGeminiKey(settings.geminiApiKey ?? "") && (
+              <div className="setting-desc" style={{ marginTop: 4, color: "#ffd479" }}>
+                Doesn&apos;t look like a Gemini key — should start with AIza… (39 chars). Hit Test to verify.
+              </div>
+            )}
+          <div className="setting-desc" style={{ marginTop: 4 }}>
+            Powers spatial screen analysis + ghost vision grounding. Free tier covers ~500 vision calls/day.{" "}
+            <a
+              href="#"
+              onClick={(e) => {
+                e.preventDefault();
+                import("@tauri-apps/plugin-shell").then(({ open }) => {
+                  open("https://aistudio.google.com/apikey").catch(() => {});
+                });
+              }}
+            >
+              Get a free key
+            </a>
+          </div>
+          <GeminiKeyTest />
         </div>
 
         <div className="auth-card">
@@ -717,8 +1570,161 @@ function AuthTab({ settings, update }: {
             onChange={(e) => update("cerebrasApiKey", e.target.value)}
           />
         </div>
+        <div className="setting-desc" style={{ marginTop: 4 }}>
+          Keys stay on this device (OS keychain) — never uploaded, never in Cloudflare.
+        </div>
       </div>
-    </>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Ghost Vision</div>
+        <div className="setting-desc" style={{ marginBottom: 8 }}>
+          Spatial screen analysis (“analyse the screen”) needs a Gemini key — add it under API Keys above.
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Vision provider</div>
+            <div className="setting-desc">Who sees custom buttons UIA can't. Gemini is the sole vision engine (Groq retired vision).</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.visionProvider ?? "auto"}
+              onChange={(e) => update("visionProvider", e.target.value)}
+            >
+              <option value="auto">Auto (Gemini)</option>
+              <option value="gemini">Gemini only</option>
+              <option value="groq">Groq only (unavailable)</option>
+            </select>
+          </div>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Vision speed</div>
+            <div className="setting-desc">Single provider active — sequential only. Racing returns if a second vision engine appears.</div>
+          </div>
+          <div className="setting-control">
+            <select
+              className="settings-input"
+              value={settings.visionRace ?? "sequential"}
+              onChange={(e) => update("visionRace", e.target.value)}
+            >
+              <option value="sequential">Sequential (save quota)</option>
+              <option value="speed" disabled>Race (needs 2 engines)</option>
+            </select>
+          </div>
+        </div>
+        <VisionQuota />
+      </div>
+    </div>
+  );
+}
+
+function GeminiKeyPill() {
+  const [present, setPresent] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    invoke<{ gemini_present?: boolean }>("vision_key_status")
+      .then((s) => setPresent(!!s?.gemini_present))
+      .catch(() => setPresent(null));
+  }, []);
+
+  if (present === null) return null;
+  return present ? (
+    <span className="status-badge status-badge--connected">✓ Saved</span>
+  ) : (
+    <span className="status-badge status-badge--disconnected">○ Missing</span>
+  );
+}
+
+function GeminiKeyTest() {
+  const [state, setState] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [detail, setDetail] = useState<string>("");
+
+  const runTest = () => {
+    setState("testing");
+    setDetail("");
+    invoke<{ ok?: boolean; detail?: string }>("vision_test_key")
+      .then((r) => {
+        if (r?.ok) {
+          setState("ok");
+          setDetail("");
+        } else {
+          setState("fail");
+          setDetail(
+            r?.detail === "no-key"
+              ? "Save a key first, then test."
+              : r?.detail === "quota-exhausted"
+                ? "Key valid but daily quota is spent."
+                : r?.detail === "network-error"
+                  ? "Network unreachable — check connection."
+                  : "Key rejected — check for typos."
+          );
+        }
+      })
+      .catch(() => {
+        setState("fail");
+        setDetail("Test call failed.");
+      });
+  };
+
+  return (
+    <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+      <button
+        className="settings-btn"
+        disabled={state === "testing"}
+        onClick={runTest}
+      >
+        {state === "testing" ? "Testing…" : "Test Key"}
+      </button>
+      {state === "ok" && (
+        <span className="status-badge status-badge--connected">✓ Valid</span>
+      )}
+      {state === "fail" && (
+        <span className="status-badge status-badge--disconnected">
+          ✗ {detail || "Invalid"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function VisionQuota() {
+  const [quota, setQuota] = useState<{
+    date: string;
+    groq: { used: number; limit: number };
+    gemini: { used: number; limit: number };
+  } | null>(null);
+
+  useEffect(() => {
+    invoke<{
+      date: string;
+      groq: { used: number; limit: number };
+      gemini: { used: number; limit: number };
+    }>("vision_quota_status").then(setQuota).catch(() => {});
+  }, []);
+
+  if (!quota) {
+    return (
+      <div className="setting-row">
+        <div>
+          <div className="setting-label">Daily usage</div>
+          <div className="setting-desc">Loading…</div>
+        </div>
+      </div>
+    );
+  }
+  const pct = (u: number, l: number) => (l > 0 ? Math.min(100, Math.round((u / l) * 100)) : 0);
+  return (
+    <div className="setting-row">
+      <div>
+        <div className="setting-label">Daily usage (resets midnight PT)</div>
+        <div className="setting-desc">
+          Groq {quota.groq.used} / {quota.groq.limit} ({pct(quota.groq.used, quota.groq.limit)}%)
+          {" • "}
+          Gemini {quota.gemini.used} / {quota.gemini.limit} ({pct(quota.gemini.used, quota.gemini.limit)}%)
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -736,6 +1742,24 @@ const VAULT_META: Record<string, { title: string; hint: string; kind: "oauth" | 
   render: { title: "Render", hint: "1. Open Render API keys (button below). 2. Create a key. 3. Paste it here. OAuth preferred — keys are broadly scoped.", kind: "token", tokenUrl: "https://dashboard.render.com/u/keys" },
 };
 
+function statusCell(ok: boolean): React.CSSProperties {
+  return {
+    display: "flex",
+    justifyContent: "space-between",
+    padding: "6px 10px",
+    borderRadius: 4,
+    background: ok ? "rgba(80,200,120,0.08)" : "rgba(255,120,120,0.08)",
+    border: `1px solid ${ok ? "rgba(80,200,120,0.25)" : "rgba(255,120,120,0.25)"}`,
+  };
+}
+
+function formatUptime(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+  return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`;
+}
+
 function ConnectionsTab({ settings, update }: {
   settings: Settings;
   update: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
@@ -744,6 +1768,27 @@ function ConnectionsTab({ settings, update }: {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [swiggyConnecting, setSwiggyConnecting] = useState(false);
+  const [health, setHealth] = useState<{
+    memoryMb: number;
+    uptimeSec: number;
+    sttPort: boolean;
+    nluPort: boolean;
+    workerReachable: boolean;
+    groqKey: boolean;
+    geminiKey: boolean;
+  } | null>(null);
+  // Feature 88: canonical laptop identity state.
+  const [identityState, setIdentityState] = useState<{
+    state: string;
+    profileId?: string;
+    deviceName?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    invoke<{ state: string; profileId?: string; deviceName?: string }>("get_identity_status")
+      .then((st) => setIdentityState(st))
+      .catch(() => setIdentityState({ state: "unknown_profile" }));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -756,7 +1801,31 @@ function ConnectionsTab({ settings, update }: {
     }
   }, []);
 
+  const refreshHealth = useCallback(async () => {
+    try {
+      const h = await invoke<{
+        memoryMb: number;
+        uptimeSec: number;
+        sttPort: boolean;
+        nluPort: boolean;
+        workerReachable: boolean;
+        groqKey: boolean;
+        geminiKey: boolean;
+      }>("get_health_status");
+      setHealth(h);
+    } catch {
+      // Health check failed — leave stale data
+    }
+  }, []);
+
   useEffect(() => { refresh().catch(() => {}); }, [refresh]);
+  useEffect(() => { refreshHealth().catch(() => {}); }, [refreshHealth]);
+
+  // Refresh health every 5s while tab is open
+  useEffect(() => {
+    const id = setInterval(() => { refreshHealth().catch(() => {}); }, 5000);
+    return () => clearInterval(id);
+  }, [refreshHealth]);
 
   // Live refresh when the idle vault monitor reports a credential change
   // (expiry/reconnect while the tab is open).
@@ -822,6 +1891,100 @@ function ConnectionsTab({ settings, update }: {
           <span style={{ fontSize: 12, color: "rgba(255,150,150,0.9)" }}>{error}</span>
         </div>
       )}
+
+      <AgentWatchSection />
+
+      <div className="settings-section">
+        <div className="settings-section-title">Identity</div>
+        {(() => {
+          if (identityState == null) {
+            return <div style={{ fontSize: 12, opacity: 0.5 }}>Loading…</div>;
+          }
+          const banner = identityBanner(identityState);
+          const colors: Record<IdentityBanner["tone"], string> = {
+            amber: "#fbbf24", green: "#22c55e", red: "#ef4444", dim: "#94a3b8",
+          };
+          return (
+            <div className="auth-card">
+              <div className="auth-card-header">
+                <span className="auth-card-title">{banner.title}</span>
+                <span style={{ fontSize: 11, color: colors[banner.tone] }}>{identityState.state}</span>
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>{banner.subtitle}</div>
+              {identityState.profileId ? (
+                <div style={{ fontSize: 11, opacity: 0.45, marginBottom: 8 }}>
+                  device: {identityState.deviceName || "unknown"} · profile …{identityState.profileId.slice(-6)}
+                </div>
+              ) : null}
+              {identityState.state === "approved" && (
+                <button
+                  className="settings-btn"
+                  onClick={async () => {
+                    if (!window.confirm("Disconnect this device from the NEXUS cloud? Cloud features will be disabled until re-approval.")) return;
+                    try {
+                      await invoke("disconnect_device");
+                      setIdentityState({ state: "provisional" });
+                    } catch (err) {
+                      console.warn("[NEXUS] disconnect failed:", err);
+                    }
+                  }}
+                >
+                  Disconnect this device
+                </button>
+              )}
+            </div>
+          );
+        })()}
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">System Status</div>
+        {health ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", fontSize: 12 }}>
+            <div style={statusCell(health.memoryMb > 0)}>
+              <span style={{ opacity: 0.6 }}>Memory</span>
+              <span>{health.memoryMb} MB</span>
+            </div>
+            <div style={statusCell(true)}>
+              <span style={{ opacity: 0.6 }}>Uptime</span>
+              <span>{formatUptime(health.uptimeSec)}</span>
+            </div>
+            <div style={statusCell(health.sttPort)}>
+              <span style={{ opacity: 0.6 }}>STT</span>
+              <span>{health.sttPort ? "Running" : "Idle"}</span>
+            </div>
+            <div style={statusCell(health.nluPort)}>
+              <span style={{ opacity: 0.6 }}>NLU</span>
+              <span>{health.nluPort ? "Running" : "Idle"}</span>
+            </div>
+            <div style={statusCell(health.workerReachable)}>
+              <span style={{ opacity: 0.6 }}>Worker</span>
+              <span>{health.workerReachable ? "Online" : "Offline"}</span>
+            </div>
+            <div style={statusCell(true)}>
+              <span style={{ opacity: 0.6 }}>Wake</span>
+              <span>Active</span>
+            </div>
+            <div style={statusCell(health.groqKey || health.geminiKey)}>
+              <span style={{ opacity: 0.6 }}>Keys</span>
+              <span>Groq {health.groqKey ? "✓" : "✗"} · Gemini {health.geminiKey ? "✓" : "✗"}</span>
+            </div>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, opacity: 0.5 }}>Loading…</div>
+        )}
+      </div>
+
+      <div className="settings-section">
+        <div className="settings-section-title">Vision keys</div>
+        <div style={{ fontSize: 12, opacity: 0.65, margin: "4px 0 8px" }}>
+          {health == null
+            ? "Checking…"
+            : health.groqKey || health.geminiKey
+              ? "A vision key is present — ghost clicks can see custom buttons."
+              : "No Groq or Gemini key — add one in the Accounts tab for cloud STT + ghost vision."}
+        </div>
+      </div>
 
       <div className="settings-section">
         <div className="settings-section-title">MCP Connections (vault)</div>

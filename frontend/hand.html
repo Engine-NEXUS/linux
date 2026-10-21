@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NEXUS Hand Mode</title>
+  </head>
+  <body>
+    <div id="hand-root">
+      <div class="stage">
+        <video id="cam" autoplay muted playsinline></video>
+        <canvas id="skeleton"></canvas>
+        <div id="badge" class="badge">starting…</div>
+        <div id="fpsnote" class="fpsnote"></div>
+        <div id="flash" class="flash"></div>
+      </div>
+      <div class="bar">
+        <div id="dots" class="dots"><i></i><i></i><i></i><i></i></div>
+        <div id="status" class="status">starting camera…</div>
+        <canvas id="map" width="64" height="36"></canvas>
+      </div>
+    </div>
+    <script type="module" src="/src/hand/main.ts"></script>
+  </body>
+</html>

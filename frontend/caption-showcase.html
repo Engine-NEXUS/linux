@@ -1,0 +1,1774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NEXUS Revolutionary Voice Captions — 12 Next-Gen Paradigms</title>
+  <style>
+    :root {
+      --bg: #07080c;
+      --card-bg: rgba(15, 17, 26, 0.85);
+      --border: rgba(255, 255, 255, 0.08);
+      --border-glow: rgba(0, 229, 255, 0.4);
+      --accent: #00e5ff;
+      --accent-purple: #a855f7;
+      --accent-gold: #f59e0b;
+      --accent-green: #10b981;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+      padding-bottom: 90px;
+      user-select: none;
+    }
+
+    /* ── Sticky Top Header ── */
+    .showcase-header {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      background: rgba(7, 8, 12, 0.92);
+      backdrop-filter: blur(28px) saturate(190%);
+      -webkit-backdrop-filter: blur(28px) saturate(190%);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.7);
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .brand-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-badge {
+      background: linear-gradient(135deg, #00e5ff, #a855f7);
+      color: #000;
+      font-weight: 900;
+      font-size: 11px;
+      padding: 4px 9px;
+      border-radius: 6px;
+      letter-spacing: 0.8px;
+    }
+
+    .brand-title {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .brand-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .controls-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .btn-play {
+      background: linear-gradient(135deg, #00e5ff, #00b4d8);
+      color: #000;
+      border: none;
+      padding: 8px 18px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      box-shadow: 0 0 24px rgba(0, 229, 255, 0.4);
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .btn-play:hover {
+      transform: translateY(-1px) scale(1.02);
+      box-shadow: 0 0 32px rgba(0, 229, 255, 0.6);
+    }
+
+    .btn-play.paused {
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+      box-shadow: none;
+    }
+
+    .ctrl-pill {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .ctrl-pill select, .ctrl-pill input {
+      background: transparent;
+      border: none;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 600;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .ctrl-pill select option {
+      background: #11131c;
+      color: #fff;
+    }
+
+    /* Jump Bar: Numbers 1..12 */
+    .jump-bar {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }
+
+    .jump-bar::-webkit-scrollbar { height: 4px; }
+    .jump-bar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+
+    .jump-btn {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 5px 12px;
+      border-radius: 14px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+
+    .jump-btn:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #fff;
+    }
+
+    .jump-btn.active {
+      background: rgba(0, 229, 255, 0.16);
+      border-color: #00e5ff;
+      color: #00e5ff;
+      box-shadow: 0 0 14px rgba(0, 229, 255, 0.3);
+    }
+
+    /* ── Main Container & Grid ── */
+    .showcase-grid {
+      max-width: 1480px;
+      margin: 28px auto 0;
+      padding: 0 24px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(660px, 1fr));
+      gap: 28px;
+    }
+
+    @media (max-width: 740px) {
+      .showcase-grid { grid-template-columns: 1fr; }
+    }
+
+    .showcase-focus .design-card { display: none; }
+    .showcase-focus .design-card.focus-active {
+      display: flex;
+      grid-column: 1 / -1;
+      max-width: 960px;
+      margin: 0 auto;
+    }
+
+    /* ── Design Card ── */
+    .design-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: border-color 0.25s, box-shadow 0.25s, transform 0.25s;
+      position: relative;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+    }
+
+    .design-card:hover {
+      border-color: rgba(255, 255, 255, 0.22);
+      box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+    }
+
+    .design-card.selected-vote {
+      border-color: #00e5ff;
+      box-shadow: 0 0 36px rgba(0, 229, 255, 0.35);
+    }
+
+    .card-header {
+      padding: 16px 22px;
+      background: rgba(0, 0, 0, 0.35);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .card-meta {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .badge-num {
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #1e293b, #0f172a);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #00e5ff;
+      font-size: 16px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    }
+
+    .design-card.selected-vote .badge-num {
+      background: #00e5ff;
+      color: #000;
+      border-color: #00e5ff;
+      box-shadow: 0 0 16px #00e5ff;
+    }
+
+    .title-block h3 {
+      font-size: 15px;
+      font-weight: 750;
+      color: #fff;
+      letter-spacing: -0.2px;
+    }
+
+    .title-block p {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .btn-vote {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 7px 16px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-vote:hover {
+      background: #00e5ff;
+      color: #000;
+      border-color: #00e5ff;
+      box-shadow: 0 0 14px rgba(0, 229, 255, 0.4);
+    }
+
+    .design-card.selected-vote .btn-vote {
+      background: #00e5ff;
+      color: #000;
+      border-color: #00e5ff;
+      box-shadow: 0 0 16px rgba(0, 229, 255, 0.5);
+    }
+
+    /* ── Stage Canvas ── */
+    .stage {
+      height: 310px;
+      width: 100%;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      transition: background 0.3s;
+    }
+
+    .bg-dark { background: radial-gradient(circle at center, #151926 0%, #090b12 85%); }
+    .bg-editor {
+      background: #181a1f;
+      background-image: 
+        radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 0),
+        linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 20px 20px, 80px 100%;
+    }
+    .bg-light { background: linear-gradient(135deg, #e2e8f0 0%, #cbd5e1 100%); color: #0f172a; }
+    .bg-black { background: #000000; }
+
+    /* Mock Orb Component */
+    .mock-orb-wrap {
+      margin-bottom: 22px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .mock-orb-core {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #00e5ff, #8b5cf6 65%, #3b82f6 95%);
+      box-shadow: 0 0 25px rgba(0, 229, 255, 0.6), inset 0 0 12px rgba(255, 255, 255, 0.6);
+      animation: orb-float 2.4s ease-in-out infinite alternate;
+    }
+
+    .mock-orb-speaking .mock-orb-core {
+      animation: orb-speak 0.35s ease-in-out infinite alternate;
+      box-shadow: 0 0 38px rgba(0, 229, 255, 0.85), inset 0 0 16px #ffffff;
+    }
+
+    @keyframes orb-float {
+      0% { transform: translateY(0) scale(1); }
+      100% { transform: translateY(-4px) scale(1.03); }
+    }
+    @keyframes orb-speak {
+      0% { transform: scale(0.97); }
+      100% { transform: scale(1.08); }
+    }
+
+    .card-footer {
+      padding: 12px 22px;
+      background: rgba(0, 0, 0, 0.25);
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11.5px;
+      color: var(--text-muted);
+    }
+
+    .tag-chip {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-weight: 600;
+      color: #e2e8f0;
+    }
+
+    /* =====================================================================
+       PARADIGM 1: Apple Intelligence 18 Siri Flow (Liquid Aurora Wave)
+       ===================================================================== */
+    .c-aurora-capsule {
+      position: relative;
+      background: rgba(18, 22, 34, 0.72);
+      backdrop-filter: blur(28px) saturate(200%);
+      -webkit-backdrop-filter: blur(28px) saturate(200%);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 100px;
+      padding: 14px 28px;
+      max-width: 580px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+      overflow: hidden;
+    }
+
+    .c-aurora-bg {
+      position: absolute;
+      inset: -50%;
+      background: conic-gradient(from 0deg, #00e5ff, #8b5cf6, #ec4899, #f59e0b, #00e5ff);
+      opacity: 0.18;
+      filter: blur(24px);
+      animation: rotate-aurora 6s linear infinite;
+      pointer-events: none;
+    }
+    @keyframes rotate-aurora {
+      100% { transform: rotate(360deg); }
+    }
+
+    .c-aurora-wave {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: linear-gradient(90deg, #00e5ff, #a855f7, #ec4899);
+      box-shadow: 0 0 12px #00e5ff;
+    }
+
+    .c-aurora-text {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.2px;
+      position: relative;
+      z-index: 1;
+      line-height: 1.4;
+      text-align: center;
+      width: 100%;
+    }
+
+    .c-aurora-text .w-past { color: #f8fafc; opacity: 0.85; }
+    .c-aurora-text .w-active {
+      color: #ffffff;
+      font-weight: 800;
+      text-shadow: 0 0 16px #00e5ff, 0 0 30px #a855f7;
+      display: inline-block;
+      transform: scale(1.08);
+      transition: transform 0.15s;
+    }
+    .c-aurora-text .w-future { color: rgba(255, 255, 255, 0.35); }
+
+    /* =====================================================================
+       PARADIGM 2: OpenAI / ElevenLabs Dynamic Kinetic Spring (4-Word Window)
+       ===================================================================== */
+    .c-kinetic-spring {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      font-size: 26px;
+      font-weight: 750;
+      letter-spacing: -0.5px;
+      max-width: 600px;
+      text-align: center;
+      position: relative;
+      height: 60px;
+    }
+
+    .c-spring-word {
+      display: inline-block;
+      transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    .c-spring-word.active {
+      color: #ffffff;
+      transform: translateY(-4px) scale(1.16);
+      text-shadow: 0 4px 20px rgba(0, 229, 255, 0.7);
+    }
+
+    .c-spring-word.dim {
+      color: rgba(255, 255, 255, 0.38);
+      transform: translateY(0) scale(0.96);
+    }
+
+    .c-spring-word.leaving {
+      color: rgba(255, 255, 255, 0.15);
+      filter: blur(2px);
+      transform: translateY(-16px) scale(0.85);
+      opacity: 0;
+    }
+
+    /* =====================================================================
+       PARADIGM 3: Dynamic Island Jet-Black Morphing Capsule
+       ===================================================================== */
+    .c-island-capsule {
+      background: #000000;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 100px;
+      padding: 10px 22px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.8), inset 0 1px 1px rgba(255, 255, 255, 0.2);
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      max-width: 560px;
+    }
+
+    .c-island-eq {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      height: 18px;
+    }
+
+    .c-island-eq-bar {
+      width: 3px;
+      background: #00e5ff;
+      border-radius: 2px;
+      height: 6px;
+      transition: height 0.08s ease;
+      box-shadow: 0 0 6px #00e5ff;
+    }
+
+    .c-island-text {
+      font-size: 16px;
+      font-weight: 600;
+      color: #f1f5f9;
+      letter-spacing: -0.2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .c-island-text .active { color: #00e5ff; font-weight: 750; }
+
+    /* =====================================================================
+       PARADIGM 4: Holographic Cyberpunk JARVIS HUD
+       ===================================================================== */
+    .c-jarvis-hud {
+      background: rgba(4, 18, 28, 0.85);
+      border: 1px solid #00e5ff;
+      border-radius: 8px;
+      padding: 16px 22px;
+      max-width: 540px;
+      position: relative;
+      box-shadow: 0 0 30px rgba(0, 229, 255, 0.25), inset 0 0 20px rgba(0, 229, 255, 0.1);
+      font-family: "JetBrains Mono", "SF Mono", Consolas, monospace;
+    }
+
+    .c-hud-corner {
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      border-color: #00e5ff;
+      border-style: solid;
+    }
+    .c-hud-tl { top: -2px; left: -2px; border-width: 2px 0 0 2px; }
+    .c-hud-tr { top: -2px; right: -2px; border-width: 2px 2px 0 0; }
+    .c-hud-bl { bottom: -2px; left: -2px; border-width: 0 0 2px 2px; }
+    .c-hud-br { bottom: -2px; right: -2px; border-width: 0 2px 2px 0; }
+
+    .c-hud-telemetry {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: #00e5ff;
+      opacity: 0.8;
+      letter-spacing: 0.8px;
+      margin-bottom: 8px;
+      border-bottom: 1px dashed rgba(0, 229, 255, 0.3);
+      padding-bottom: 4px;
+    }
+
+    .c-hud-body {
+      font-size: 15px;
+      color: #e2e8f0;
+      line-height: 1.45;
+    }
+
+    .c-hud-body .target-word {
+      background: rgba(0, 229, 255, 0.22);
+      color: #ffffff;
+      padding: 1px 6px;
+      border-radius: 3px;
+      border: 1px solid #00e5ff;
+      font-weight: 700;
+      text-shadow: 0 0 8px #00e5ff;
+    }
+
+    /* =====================================================================
+       PARADIGM 5: Bioluminescent Deep-Sea Aura (Mesh Gradient Typography)
+       ===================================================================== */
+    .c-bio-aura {
+      position: relative;
+      text-align: center;
+      max-width: 580px;
+      padding: 20px 30px;
+    }
+
+    .c-bio-glow-halo {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at center, rgba(168, 85, 247, 0.35) 0%, rgba(0, 229, 255, 0.2) 50%, transparent 75%);
+      filter: blur(28px);
+      border-radius: 50%;
+      pointer-events: none;
+      animation: bio-pulse 2.2s ease-in-out infinite alternate;
+    }
+    @keyframes bio-pulse {
+      0% { transform: scale(0.9); opacity: 0.5; }
+      100% { transform: scale(1.15); opacity: 0.95; }
+    }
+
+    .c-bio-text {
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.4;
+      position: relative;
+      z-index: 1;
+    }
+
+    .c-bio-text .w-active {
+      background: linear-gradient(135deg, #00e5ff, #ec4899, #f59e0b);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      filter: drop-shadow(0 0 12px rgba(0, 229, 255, 0.8));
+      font-weight: 850;
+      display: inline-block;
+      transform: scale(1.1);
+    }
+    .c-bio-text .w-other {
+      color: rgba(255, 255, 255, 0.6);
+    }
+
+    /* =====================================================================
+       PARADIGM 6: Real-Time Canvas Particle Stardust Assembly
+       ===================================================================== */
+    .c-particle-wrap {
+      position: relative;
+      width: 560px;
+      height: 90px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .c-particle-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .c-particle-text {
+      position: relative;
+      z-index: 2;
+      font-size: 19px;
+      font-weight: 650;
+      text-align: center;
+      line-height: 1.4;
+      color: #fff;
+    }
+
+    .c-particle-text .stardust-active {
+      color: #00e5ff;
+      font-weight: 800;
+      text-shadow: 0 0 14px #00e5ff, 0 0 28px #8b5cf6;
+    }
+
+    .c-particle-text .stardust-past {
+      color: rgba(255, 255, 255, 0.7);
+    }
+
+    /* =====================================================================
+       PARADIGM 7: Spatial VisionOS Floating Glass Capsule
+       ===================================================================== */
+    .c-visionos-pill {
+      background: rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(40px) saturate(210%);
+      -webkit-backdrop-filter: blur(40px) saturate(210%);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 100px;
+      padding: 14px 28px;
+      max-width: 560px;
+      box-shadow: 
+        0 20px 50px rgba(0, 0, 0, 0.6),
+        inset 0 1px 2px rgba(255, 255, 255, 0.4),
+        inset 0 -1px 2px rgba(0, 0, 0, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+    }
+
+    .c-visionos-text {
+      font-size: 17.5px;
+      font-weight: 600;
+      letter-spacing: -0.2px;
+      line-height: 1.35;
+    }
+
+    .c-visionos-text .v-active {
+      color: #ffffff;
+      font-weight: 800;
+      text-shadow: 0 2px 14px rgba(255, 255, 255, 0.9);
+      display: inline-block;
+      transform: scale(1.06);
+    }
+    .c-visionos-text .v-dim {
+      color: rgba(255, 255, 255, 0.45);
+    }
+
+    /* =====================================================================
+       PARADIGM 8: Swiss High-Speed Minimalist Equalizer (Teenage Engineering)
+       ===================================================================== */
+    .c-swiss-wrap {
+      background: rgba(10, 10, 12, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      padding: 16px 24px;
+      max-width: 560px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .c-swiss-words {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      font-size: 17px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+
+    .c-swiss-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .c-swiss-item.active .swiss-word {
+      color: #fff;
+      font-weight: 800;
+    }
+
+    .c-swiss-item.dim .swiss-word {
+      color: rgba(255, 255, 255, 0.35);
+    }
+
+    .swiss-eq-bar {
+      width: 100%;
+      height: 3px;
+      background: transparent;
+      border-radius: 2px;
+    }
+
+    .c-swiss-item.active .swiss-eq-bar {
+      background: #f59e0b;
+      box-shadow: 0 0 8px #f59e0b;
+      height: 3px;
+      animation: bar-dance 0.25s infinite alternate;
+    }
+    @keyframes bar-dance {
+      0% { transform: scaleY(1); }
+      100% { transform: scaleY(2.2); }
+    }
+
+    /* =====================================================================
+       PARADIGM 9: Broadcast Teleprompter Smooth Stage Cascade
+       ===================================================================== */
+    .c-broadcast-stage {
+      background: rgba(14, 16, 22, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 16px;
+      padding: 18px 26px;
+      max-width: 560px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+    }
+
+    .c-stage-current {
+      font-size: 19px;
+      font-weight: 750;
+      color: #ffffff;
+      line-height: 1.35;
+      letter-spacing: -0.3px;
+    }
+
+    .c-stage-upcoming {
+      font-size: 13px;
+      font-weight: 500;
+      color: rgba(255, 255, 255, 0.4);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .c-stage-upcoming::before {
+      content: "NEXT";
+      font-size: 9px;
+      font-weight: 800;
+      background: rgba(255, 255, 255, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #94a3b8;
+    }
+
+    /* =====================================================================
+       PARADIGM 10: Kinetic Word-Burst Pop (Hyper-Dynamic TikTok / Reel)
+       ===================================================================== */
+    .c-wordburst-stage {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 70px;
+      position: relative;
+    }
+
+    .c-burst-word {
+      font-size: 38px;
+      font-weight: 900;
+      letter-spacing: -0.8px;
+      color: #ffffff;
+      text-transform: uppercase;
+      text-shadow: 0 4px 24px rgba(0, 229, 255, 0.8), 0 0 10px #000;
+      animation: burst-pop 0.22s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      display: inline-block;
+    }
+
+    @keyframes burst-pop {
+      0% { transform: scale(0.65) translateY(10px); opacity: 0; }
+      100% { transform: scale(1) translateY(0); opacity: 1; }
+    }
+
+    .c-burst-ring {
+      position: absolute;
+      width: 140px;
+      height: 140px;
+      border: 2px solid #00e5ff;
+      border-radius: 50%;
+      animation: ring-expand 0.4s ease-out;
+      pointer-events: none;
+    }
+    @keyframes ring-expand {
+      0% { transform: scale(0.3); opacity: 1; }
+      100% { transform: scale(1.6); opacity: 0; }
+    }
+
+    /* =====================================================================
+       PARADIGM 11: Liquid Mercury Stream (Incremental Spoken Reveal)
+       ===================================================================== */
+    .c-mercury-pill {
+      background: rgba(16, 20, 30, 0.78);
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      border-radius: 100px;
+      padding: 12px 28px;
+      max-width: 580px;
+      min-height: 50px;
+      backdrop-filter: blur(36px) saturate(200%);
+      -webkit-backdrop-filter: blur(36px) saturate(200%);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65), inset 0 1px 2px rgba(255, 255, 255, 0.35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .c-mercury-text {
+      font-size: 19px;
+      font-weight: 650;
+      letter-spacing: -0.2px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+    }
+
+    .m-word {
+      display: inline-block;
+      transition: all 0.2s ease;
+    }
+
+    .m-word.m-active {
+      color: #ffffff;
+      font-weight: 850;
+      transform: scale(1.1) translateY(-1px);
+      text-shadow: 0 0 16px #00e5ff, 0 0 28px rgba(0, 229, 255, 0.7);
+      animation: mercury-pop 200ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    }
+
+    .m-word.m-spoken {
+      color: #f1f5f9;
+      opacity: 0.88;
+      transform: scale(1) translateY(0);
+    }
+
+    @keyframes mercury-pop {
+      0% { opacity: 0; transform: scale(0.8) translateY(6px); filter: blur(2px); }
+      100% { opacity: 1; transform: scale(1.1) translateY(-1px); filter: blur(0px); }
+    }
+
+    /* =====================================================================
+       PARADIGM 12: Neon Phosphor Oscilloscope Ribbon
+       ===================================================================== */
+    .c-oscilloscope-stage {
+      background: rgba(6, 12, 8, 0.9);
+      border: 1px solid #10b981;
+      border-radius: 12px;
+      padding: 14px 22px;
+      max-width: 560px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-shadow: 0 0 24px rgba(16, 185, 129, 0.25), inset 0 0 14px rgba(16, 185, 129, 0.08);
+      font-family: "JetBrains Mono", Consolas, monospace;
+    }
+
+    .c-oscilloscope-svg {
+      width: 100%;
+      height: 24px;
+      stroke: #10b981;
+      stroke-width: 2;
+      fill: none;
+      filter: drop-shadow(0 0 6px #10b981);
+    }
+
+    .c-oscilloscope-text {
+      font-size: 15px;
+      color: #a7f3d0;
+      line-height: 1.4;
+    }
+
+    .c-oscilloscope-text .active {
+      color: #ffffff;
+      background: rgba(16, 185, 129, 0.3);
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-weight: 750;
+      text-shadow: 0 0 10px #10b981;
+    }
+
+    /* ── Vote Toast Modal ── */
+    .vote-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: rgba(15, 18, 28, 0.96);
+      border: 1px solid #00e5ff;
+      border-radius: 16px;
+      padding: 16px 24px;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.8), 0 0 25px rgba(0, 229, 255, 0.4);
+      z-index: 9999;
+      transform: translateY(140px);
+      opacity: 0;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .vote-toast.show {
+      transform: translateY(0);
+      opacity: 1;
+    }
+
+    .toast-badge {
+      background: #00e5ff;
+      color: #000;
+      font-weight: 850;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Sticky Header Controls -->
+  <header class="showcase-header">
+    <div class="header-top">
+      <div class="brand-group">
+        <span class="brand-badge">NEXUS CAPTION LAB</span>
+        <div>
+          <h1 class="brand-title">Revolutionary Voice Caption Showcase</h1>
+          <p class="brand-sub">Real-time simulation across 12 cutting-edge motion graphics paradigms. Pick your favorite (#1 – #12).</p>
+        </div>
+      </div>
+
+      <div class="controls-group">
+        <button id="playBtn" class="btn-play">
+          <span id="playIcon">⏸</span> <span id="playText">Running Simulation</span>
+        </button>
+
+        <div class="ctrl-pill">
+          <span>Phrase:</span>
+          <select id="phraseSelect">
+            <option value="action" selected>Action: "Analyzing Servx repository pull request number five."</option>
+            <option value="short">Short: "On it sir, opening VS Code."</option>
+            <option value="long">Long: "The neural pipeline is synchronized, cloud STT latency is two hundred and forty milliseconds, all systems operational."</option>
+            <option value="custom">Custom Text...</option>
+          </select>
+        </div>
+
+        <div class="ctrl-pill">
+          <span>Pace:</span>
+          <select id="speedSelect">
+            <option value="0.75">0.75x (Calm)</option>
+            <option value="1.0" selected>1.0x (Normal)</option>
+            <option value="1.3">1.3x (Fast)</option>
+            <option value="1.6">1.6x (Speed)</option>
+          </select>
+        </div>
+
+        <div class="ctrl-pill">
+          <span>Backdrop:</span>
+          <select id="backdropSelect">
+            <option value="bg-dark" selected>🌌 Dark Desktop</option>
+            <option value="bg-editor">💻 Code Editor</option>
+            <option value="bg-light">☀️ Light Desktop</option>
+            <option value="bg-black">⬛ Pure OLED</option>
+          </select>
+        </div>
+
+        <div class="ctrl-pill">
+          <span>View:</span>
+          <select id="viewSelect">
+            <option value="grid" selected>Grid View (All 12)</option>
+            <option value="focus">Focus Mode (Single)</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Jump Numbers Bar (1..12) -->
+    <div class="jump-bar" id="jumpBar">
+      <button class="jump-btn active" data-id="all">All 12 Designs</button>
+      <button class="jump-btn" data-id="1">#1 Apple Siri 18 Flow</button>
+      <button class="jump-btn" data-id="2">#2 OpenAI Kinetic Spring</button>
+      <button class="jump-btn" data-id="3">#3 Dynamic Island Capsule</button>
+      <button class="jump-btn" data-id="4">#4 Holographic JARVIS HUD</button>
+      <button class="jump-btn" data-id="5">#5 Bioluminescent Deep-Sea</button>
+      <button class="jump-btn" data-id="6">#6 Particle Stardust Assembly</button>
+      <button class="jump-btn" data-id="7">#7 Spatial VisionOS Pill</button>
+      <button class="jump-btn" data-id="8">#8 Swiss Minimalist EQ</button>
+      <button class="jump-btn" data-id="9">#9 Broadcast Teleprompter</button>
+      <button class="jump-btn" data-id="10">#10 Kinetic Word-Burst Pop</button>
+      <button class="jump-btn" data-id="11">#11 Liquid Mercury Glass</button>
+      <button class="jump-btn" data-id="12">#12 Phosphor Oscilloscope</button>
+    </div>
+  </header>
+
+  <!-- 12 Designs Grid -->
+  <main class="showcase-grid" id="gridContainer">
+
+    <!-- #1: Apple Intelligence 18 Siri Flow -->
+    <article class="design-card" id="card-1" data-id="1">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#1</span>
+          <div class="title-block">
+            <h3>Apple Intelligence 18 Siri Flow</h3>
+            <p>Conic chromatic aurora aura + specular word bloom on frosted liquid glass</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(1)">Choose #1</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-aurora-capsule">
+          <div class="c-aurora-bg"></div>
+          <div class="c-aurora-wave"></div>
+          <div class="c-aurora-text" id="cap-1"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">iOS 18 Siri / Fluid Glass</span>
+        <span>Aesthetic: Ultra-clean floating glass with radiant chromatic boundary</span>
+      </div>
+    </article>
+
+    <!-- #2: OpenAI / ElevenLabs Dynamic Kinetic Spring -->
+    <article class="design-card" id="card-2" data-id="2">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#2</span>
+          <div class="title-block">
+            <h3>OpenAI Kinetic Spring Window</h3>
+            <p>Moving 4-word FIFO sliding window with elastic spring physics & depth blur</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(2)">Choose #2</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-kinetic-spring" id="cap-2"></div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">Frameless / Elastic Typography</span>
+        <span>Aesthetic: Zero container, high-energy spring bounce</span>
+      </div>
+    </article>
+
+    <!-- #3: Dynamic Island Morphing Capsule -->
+    <article class="design-card" id="card-3" data-id="3">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#3</span>
+          <div class="title-block">
+            <h3>Dynamic Island OLED Capsule</h3>
+            <p>Jet-black OLED pill with integrated dancing frequency bars & smooth ticker</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(3)">Choose #3</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-island-capsule">
+          <div class="c-island-eq">
+            <div class="c-island-eq-bar" id="eq-bar-1"></div>
+            <div class="c-island-eq-bar" id="eq-bar-2"></div>
+            <div class="c-island-eq-bar" id="eq-bar-3"></div>
+            <div class="c-island-eq-bar" id="eq-bar-4"></div>
+          </div>
+          <div class="c-island-text" id="cap-3"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">Apple Dynamic Island / LED</span>
+        <span>Aesthetic: Deep contrast, compact floating taskbar companion</span>
+      </div>
+    </article>
+
+    <!-- #4: Holographic Cyberpunk JARVIS HUD -->
+    <article class="design-card" id="card-4" data-id="4">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#4</span>
+          <div class="title-block">
+            <h3>Holographic JARVIS HUD</h3>
+            <p>Tactical targeting brackets locking onto active words with telemetry diagnostics</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(4)">Choose #4</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-jarvis-hud">
+          <div class="c-hud-corner c-hud-tl"></div>
+          <div class="c-hud-corner c-hud-tr"></div>
+          <div class="c-hud-corner c-hud-bl"></div>
+          <div class="c-hud-corner c-hud-br"></div>
+          <div class="c-hud-telemetry">
+            <span>[NEXUS_CORE // ONLINE]</span>
+            <span id="hudClock">240ms STT</span>
+            <span>[RMS: -14.2dB]</span>
+          </div>
+          <div class="c-hud-body" id="cap-4"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">Sci-Fi HUD / Iron Man Tactical</span>
+        <span>Aesthetic: High-tech targeting matrix for power users</span>
+      </div>
+    </article>
+
+    <!-- #5: Bioluminescent Deep-Sea Aura -->
+    <article class="design-card" id="card-5" data-id="5">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#5</span>
+          <div class="title-block">
+            <h3>Bioluminescent Deep-Sea Aura</h3>
+            <p>Breathing Gaussian glow pulsing with voice cadence + iridescent gradient text</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(5)">Choose #5</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-bio-aura">
+          <div class="c-bio-glow-halo"></div>
+          <div class="c-bio-text" id="cap-5"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">Arc Browser / Fluid Mesh</span>
+        <span>Aesthetic: Organic, living, atmospheric illumination</span>
+      </div>
+    </article>
+
+    <!-- #6: Real-Time Canvas Particle Stardust Assembly -->
+    <article class="design-card" id="card-6" data-id="6">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#6</span>
+          <div class="title-block">
+            <h3>Particle Stardust Assembly</h3>
+            <p>Physical particle simulation: 200+ stardust sparks flow into words and dissipate</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(6)">Choose #6</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-particle-wrap">
+          <canvas class="c-particle-canvas" id="stardustCanvas"></canvas>
+          <div class="c-particle-text" id="cap-6"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">V2 Video Parity / HTML5 Canvas</span>
+        <span>Aesthetic: Physical particles streaming directly from the avatar</span>
+      </div>
+    </article>
+
+    <!-- #7: Spatial VisionOS Floating Glass Capsule -->
+    <article class="design-card" id="card-7" data-id="7">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#7</span>
+          <div class="title-block">
+            <h3>Spatial VisionOS Glass Pill</h3>
+            <p>Apple Vision Pro translucent glass with specular refraction & soft depth bloom</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(7)">Choose #7</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-visionos-pill">
+          <div class="c-visionos-text" id="cap-7"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">Apple Vision Pro / Spatial Glass</span>
+        <span>Aesthetic: High-end frosted glass with specular rim reflections</span>
+      </div>
+    </article>
+
+    <!-- #8: Swiss High-Speed Minimalist Equalizer -->
+    <article class="design-card" id="card-8" data-id="8">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#8</span>
+          <div class="title-block">
+            <h3>Swiss Minimalist EQ (Teenage Eng.)</h3>
+            <p>Clean monochrome typography with micro-equalizer dancing under active words</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(8)">Choose #8</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-swiss-wrap">
+          <div class="c-swiss-words" id="cap-8"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">Dieter Rams / Teenage Engineering</span>
+        <span>Aesthetic: Precision industrial design, zero noise</span>
+      </div>
+    </article>
+
+    <!-- #9: Broadcast Teleprompter Smooth Stage Cascade -->
+    <article class="design-card" id="card-9" data-id="9">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#9</span>
+          <div class="title-block">
+            <h3>Broadcast Stage Teleprompter</h3>
+            <p>Dual-tiered display: current sentence in high-impact bold + upcoming clause preview</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(9)">Choose #9</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-broadcast-stage">
+          <div class="c-stage-current" id="cap-9-top"></div>
+          <div class="c-stage-upcoming" id="cap-9-sub"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">BBC / Apple Keynote Studio</span>
+        <span>Aesthetic: Maximum readability for long complex responses</span>
+      </div>
+    </article>
+
+    <!-- #10: Kinetic Word-Burst Pop -->
+    <article class="design-card" id="card-10" data-id="10">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#10</span>
+          <div class="title-block">
+            <h3>Kinetic Word-Burst Pop</h3>
+            <p>High-impact word-by-word pop with acoustic shockwave ring expansion</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(10)">Choose #10</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-wordburst-stage" id="cap-10-wrap">
+          <div class="c-burst-ring" id="burstRing"></div>
+          <span class="c-burst-word" id="cap-10"></span>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">TikTok / CapCut Kinetic Pop</span>
+        <span>Aesthetic: Unmistakable, punchy, hyper-energetic focus</span>
+      </div>
+    </article>
+
+    <!-- #11: Liquid Mercury / Fluid Chrome Glass -->
+    <article class="design-card" id="card-11" data-id="11">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#11</span>
+          <div class="title-block">
+            <h3>Liquid Mercury Stream (Incremental)</h3>
+            <p>Words materialize one by one ONLY as spoken; zero upcoming words shown</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(11)">Choose #11</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-mercury-pill">
+          <div class="c-mercury-text" id="cap-11"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">Strict Word Stream / Liquid Chrome</span>
+        <span>Aesthetic: Incremental reveal without advance sentence distraction</span>
+      </div>
+    </article>
+
+    <!-- #12: Neon Phosphor Oscilloscope Ribbon -->
+    <article class="design-card" id="card-12" data-id="12">
+      <div class="card-header">
+        <div class="card-meta">
+          <span class="badge-num">#12</span>
+          <div class="title-block">
+            <h3>Phosphor Oscilloscope Ribbon</h3>
+            <p>Real-time dancing audio soundwave vector with terminal phosphor green glow</p>
+          </div>
+        </div>
+        <button class="btn-vote" onclick="chooseDesign(12)">Choose #12</button>
+      </div>
+      <div class="stage bg-dark">
+        <div class="mock-orb-wrap"><div class="mock-orb-core"></div></div>
+        <div class="c-oscilloscope-stage">
+          <svg class="c-oscilloscope-svg" viewBox="0 0 400 24" preserveAspectRatio="none">
+            <path id="oscWavePath" d="M 0 12 Q 100 12, 200 12 T 400 12"></path>
+          </svg>
+          <div class="c-oscilloscope-text" id="cap-12"></div>
+        </div>
+      </div>
+      <div class="card-footer">
+        <span class="tag-chip">Vintage Lab / Cyberpunk Audio</span>
+        <span>Aesthetic: Authentic laboratory acoustic oscilloscope</span>
+      </div>
+    </article>
+
+  </main>
+
+  <!-- Notification Toast for Chosen Option -->
+  <div class="vote-toast" id="voteToast">
+    <span class="toast-badge" id="toastBadge">OPTION #1</span>
+    <div>
+      <div style="font-weight: 800; font-size: 13.5px;" id="toastTitle">Design Chosen!</div>
+      <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;" id="toastDesc">Tell Antigravity: "I like Option #1" to equip it in NEXUS!</div>
+    </div>
+  </div>
+
+  <script>
+    // --- Sentences Catalog ---
+    const PHRASES = {
+      action: "Analyzing Servx repository pull request number five.",
+      short: "On it sir, opening VS Code.",
+      long: "The neural pipeline is synchronized, cloud STT latency is two hundred and forty milliseconds, all systems operational."
+    };
+
+    let currentText = PHRASES.action;
+    let words = currentText.split(" ");
+    let activeIdx = 0;
+    let isPlaying = true;
+    let playbackSpeed = 1.0;
+    let timerId = null;
+
+    // Names map
+    const DESIGN_NAMES = {
+      1: "Apple Intelligence 18 Siri Flow",
+      2: "OpenAI Kinetic Spring Window",
+      3: "Dynamic Island OLED Capsule",
+      4: "Holographic JARVIS HUD",
+      5: "Bioluminescent Deep-Sea Aura",
+      6: "Particle Stardust Assembly",
+      7: "Spatial VisionOS Glass Pill",
+      8: "Swiss Minimalist EQ",
+      9: "Broadcast Stage Teleprompter",
+      10: "Kinetic Word-Burst Pop",
+      11: "Liquid Mercury Chrome",
+      12: "Phosphor Oscilloscope Ribbon"
+    };
+
+    // --- DOM Elements ---
+    const playBtn = document.getElementById("playBtn");
+    const playIcon = document.getElementById("playIcon");
+    const playText = document.getElementById("playText");
+    const phraseSelect = document.getElementById("phraseSelect");
+    const speedSelect = document.getElementById("speedSelect");
+    const backdropSelect = document.getElementById("backdropSelect");
+    const viewSelect = document.getElementById("viewSelect");
+    const jumpBar = document.getElementById("jumpBar");
+    const gridContainer = document.getElementById("gridContainer");
+
+    // --- Particle Canvas Setup for #6 ---
+    const pCanvas = document.getElementById("stardustCanvas");
+    const pCtx = pCanvas.getContext("2d");
+    let particles = [];
+
+    function resizeParticleCanvas() {
+      if (!pCanvas) return;
+      const rect = pCanvas.getBoundingClientRect();
+      pCanvas.width = rect.width * (window.devicePixelRatio || 1);
+      pCanvas.height = rect.height * (window.devicePixelRatio || 1);
+      pCtx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+    }
+    resizeParticleCanvas();
+    window.addEventListener("resize", resizeParticleCanvas);
+
+    function spawnWordParticles(x, y) {
+      for (let i = 0; i < 18; i++) {
+        const ang = Math.random() * Math.PI * 2;
+        const spd = 0.8 + Math.random() * 2.5;
+        particles.push({
+          x: x + (Math.random() - 0.5) * 40,
+          y: y + (Math.random() - 0.5) * 15,
+          vx: Math.cos(ang) * spd,
+          vy: Math.sin(ang) * spd - 0.6,
+          life: 1.0,
+          decay: 0.02 + Math.random() * 0.03,
+          size: 1.2 + Math.random() * 2.0,
+          color: Math.random() > 0.4 ? "#00e5ff" : "#a855f7"
+        });
+      }
+    }
+
+    function renderParticles() {
+      if (!pCtx) return;
+      const w = pCanvas.clientWidth;
+      const h = pCanvas.clientHeight;
+      pCtx.clearRect(0, 0, w, h);
+
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= p.decay;
+
+        if (p.life <= 0) {
+          particles.splice(i, 1);
+          continue;
+        }
+
+        pCtx.save();
+        pCtx.globalAlpha = p.life;
+        pCtx.fillStyle = p.color;
+        pCtx.shadowColor = p.color;
+        pCtx.shadowBlur = 6;
+        pCtx.beginPath();
+        pCtx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        pCtx.fill();
+        pCtx.restore();
+      }
+
+      requestAnimationFrame(renderParticles);
+    }
+    requestAnimationFrame(renderParticles);
+
+    // --- Oscilloscope Dynamic Waveform for #12 ---
+    let oscPhase = 0;
+    function updateOscilloscope() {
+      const path = document.getElementById("oscWavePath");
+      if (!path) return;
+      oscPhase += 0.15;
+      const amp = isPlaying ? 8 : 1;
+      let d = "M 0 12 ";
+      for (let x = 0; x <= 400; x += 20) {
+        const y = 12 + Math.sin(x * 0.05 + oscPhase) * amp * Math.cos(x * 0.02 - oscPhase);
+        d += `L ${x} ${y.toFixed(1)} `;
+      }
+      path.setAttribute("d", d);
+      requestAnimationFrame(updateOscilloscope);
+    }
+    requestAnimationFrame(updateOscilloscope);
+
+    // --- Update Dynamic Island EQ for #3 ---
+    function updateIslandEq() {
+      if (!isPlaying) return;
+      for (let i = 1; i <= 4; i++) {
+        const b = document.getElementById(`eq-bar-${i}`);
+        if (b) {
+          const h = 4 + Math.floor(Math.random() * 14);
+          b.style.height = `${h}px`;
+        }
+      }
+    }
+
+    // --- Main Render Function Across All 12 Paradigms ---
+    function renderAll() {
+      // 1: Siri 18 Flow
+      const el1 = document.getElementById("cap-1");
+      if (el1) {
+        el1.innerHTML = words.map((w, i) => {
+          const cls = i < activeIdx ? "w-past" : (i === activeIdx ? "w-active" : "w-future");
+          return `<span class="${cls}">${w}</span>`;
+        }).join(" ");
+      }
+
+      // 2: OpenAI Spring (4-word sliding window)
+      const el2 = document.getElementById("cap-2");
+      if (el2) {
+        const start = Math.max(0, activeIdx - 1);
+        const end = Math.min(words.length, start + 4);
+        const win = words.slice(start, end);
+        el2.innerHTML = win.map((w, idx) => {
+          const gIdx = start + idx;
+          const cls = gIdx === activeIdx ? "active" : (gIdx < activeIdx ? "leaving" : "dim");
+          return `<span class="c-spring-word ${cls}">${w}</span>`;
+        }).join(" ");
+      }
+
+      // 3: Dynamic Island Capsule
+      const el3 = document.getElementById("cap-3");
+      if (el3) {
+        el3.innerHTML = words.map((w, i) => {
+          return i === activeIdx ? `<span class="active">${w}</span>` : w;
+        }).join(" ");
+      }
+
+      // 4: Holographic JARVIS HUD
+      const el4 = document.getElementById("cap-4");
+      if (el4) {
+        el4.innerHTML = words.map((w, i) => {
+          return i === activeIdx ? `<span class="target-word">${w}</span>` : w;
+        }).join(" ");
+      }
+
+      // 5: Bioluminescent Deep-Sea
+      const el5 = document.getElementById("cap-5");
+      if (el5) {
+        el5.innerHTML = words.map((w, i) => {
+          const cls = i === activeIdx ? "w-active" : "w-other";
+          return `<span class="${cls}">${w}</span>`;
+        }).join(" ");
+      }
+
+      // 6: Particle Stardust Assembly
+      const el6 = document.getElementById("cap-6");
+      if (el6) {
+        el6.innerHTML = words.map((w, i) => {
+          const cls = i === activeIdx ? "stardust-active" : (i < activeIdx ? "stardust-past" : "w-future");
+          return `<span class="${cls}" id="pword-${i}">${w}</span>`;
+        }).join(" ");
+        // Spawn sparks from active word position
+        if (pCanvas) {
+          const cw = pCanvas.clientWidth;
+          const ch = pCanvas.clientHeight;
+          spawnWordParticles(cw / 2, ch / 2);
+        }
+      }
+
+      // 7: Spatial VisionOS Glass Pill
+      const el7 = document.getElementById("cap-7");
+      if (el7) {
+        el7.innerHTML = words.map((w, i) => {
+          const cls = i === activeIdx ? "v-active" : "v-dim";
+          return `<span class="${cls}">${w}</span>`;
+        }).join(" ");
+      }
+
+      // 8: Swiss Minimalist EQ
+      const el8 = document.getElementById("cap-8");
+      if (el8) {
+        el8.innerHTML = words.map((w, i) => {
+          const cls = i === activeIdx ? "active" : "dim";
+          return `
+            <div class="c-swiss-item ${cls}">
+              <span class="swiss-word">${w}</span>
+              <div class="swiss-eq-bar"></div>
+            </div>
+          `;
+        }).join("");
+      }
+
+      // 9: Broadcast Stage Teleprompter
+      const el9Top = document.getElementById("cap-9-top");
+      const el9Sub = document.getElementById("cap-9-sub");
+      if (el9Top && el9Sub) {
+        const half = Math.ceil(words.length / 2);
+        if (activeIdx < half) {
+          el9Top.textContent = words.slice(0, half).join(" ");
+          el9Sub.textContent = words.slice(half).join(" ");
+        } else {
+          el9Top.textContent = words.slice(half).join(" ");
+          el9Sub.textContent = words.slice(0, half).join(" ");
+        }
+      }
+
+      // 10: Kinetic Word-Burst Pop
+      const el10 = document.getElementById("cap-10");
+      const burstRing = document.getElementById("burstRing");
+      if (el10) {
+        el10.textContent = words[activeIdx] || "";
+        // Re-trigger animation
+        el10.style.animation = 'none';
+        void el10.offsetWidth;
+        el10.style.animation = 'burst-pop 0.22s cubic-bezier(0.175, 0.885, 0.32, 1.275)';
+
+        if (burstRing) {
+          burstRing.style.animation = 'none';
+          void burstRing.offsetWidth;
+          burstRing.style.animation = 'ring-expand 0.38s ease-out';
+        }
+      }
+
+      // 11: Liquid Mercury Stream (Only spoken words visible, zero future words)
+      const el11 = document.getElementById("cap-11");
+      if (el11) {
+        const spokenWords = words.slice(0, activeIdx + 1);
+        el11.innerHTML = spokenWords.map((w, i) => {
+          const isLatest = i === activeIdx;
+          return `<span class="m-word ${isLatest ? 'm-active' : 'm-spoken'}">${w}</span>`;
+        }).join(" ");
+      }
+
+      // 12: Phosphor Oscilloscope Ribbon
+      const el12 = document.getElementById("cap-12");
+      if (el12) {
+        el12.innerHTML = words.map((w, i) => {
+          return i === activeIdx ? `<span class="active">${w}</span>` : w;
+        }).join(" ");
+      }
+
+      // Toggle orb speaking pulse state
+      document.querySelectorAll(".mock-orb-wrap").forEach(wrap => {
+        if (isPlaying) wrap.classList.add("mock-orb-speaking");
+        else wrap.classList.remove("mock-orb-speaking");
+      });
+
+      updateIslandEq();
+    }
+
+    // --- Simulation Timer ---
+    function startTimer() {
+      if (timerId) clearInterval(timerId);
+      const stepMs = Math.round(360 / playbackSpeed);
+      timerId = setInterval(() => {
+        if (!isPlaying) return;
+        activeIdx++;
+        if (activeIdx >= words.length) {
+          activeIdx = 0;
+        }
+        renderAll();
+      }, stepMs);
+    }
+
+    // --- Event Listeners ---
+    playBtn.addEventListener("click", () => {
+      isPlaying = !isPlaying;
+      if (isPlaying) {
+        playIcon.textContent = "⏸";
+        playText.textContent = "Running Simulation";
+        playBtn.classList.remove("paused");
+      } else {
+        playIcon.textContent = "▶";
+        playText.textContent = "Resume Simulation";
+        playBtn.classList.add("paused");
+      }
+      renderAll();
+    });
+
+    phraseSelect.addEventListener("change", (e) => {
+      if (e.target.value === "custom") {
+        const c = prompt("Enter phrase to simulate:", currentText);
+        if (c && c.trim()) currentText = c.trim();
+      } else {
+        currentText = PHRASES[e.target.value] || PHRASES.action;
+      }
+      words = currentText.split(" ").filter(Boolean);
+      activeIdx = 0;
+      renderAll();
+    });
+
+    speedSelect.addEventListener("change", (e) => {
+      playbackSpeed = parseFloat(e.target.value) || 1.0;
+      startTimer();
+    });
+
+    backdropSelect.addEventListener("change", (e) => {
+      const mode = e.target.value;
+      document.querySelectorAll(".stage").forEach(s => {
+        s.className = `stage ${mode}`;
+      });
+    });
+
+    viewSelect.addEventListener("change", (e) => {
+      if (e.target.value === "focus") {
+        gridContainer.classList.add("showcase-focus");
+        focusCard(1);
+      } else {
+        gridContainer.classList.remove("showcase-focus");
+        document.querySelectorAll(".design-card").forEach(c => c.classList.remove("focus-active"));
+      }
+    });
+
+    jumpBar.addEventListener("click", (e) => {
+      const btn = e.target.closest(".jump-btn");
+      if (!btn) return;
+      document.querySelectorAll(".jump-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+
+      const id = btn.dataset.id;
+      if (id === "all") {
+        viewSelect.value = "grid";
+        gridContainer.classList.remove("showcase-focus");
+        document.querySelectorAll(".design-card").forEach(c => c.classList.remove("focus-active"));
+      } else {
+        viewSelect.value = "focus";
+        gridContainer.classList.add("showcase-focus");
+        focusCard(parseInt(id));
+      }
+    });
+
+    function focusCard(id) {
+      document.querySelectorAll(".design-card").forEach(c => c.classList.remove("focus-active"));
+      const c = document.getElementById(`card-${id}`);
+      if (c) {
+        c.classList.add("focus-active");
+        c.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+
+    // --- Choose / Vote Action ---
+    window.chooseDesign = function(id) {
+      document.querySelectorAll(".design-card").forEach(c => c.classList.remove("selected-vote"));
+      const c = document.getElementById(`card-${id}`);
+      if (c) c.classList.add("selected-vote");
+
+      const toast = document.getElementById("voteToast");
+      const badge = document.getElementById("toastBadge");
+      const title = document.getElementById("toastTitle");
+      const desc = document.getElementById("toastDesc");
+
+      const name = DESIGN_NAMES[id] || `Option #${id}`;
+      badge.textContent = `OPTION #${id}`;
+      title.textContent = `Option #${id} (${name}) Selected!`;
+      desc.textContent = `Tell Antigravity: "I like Option #${id}" to integrate it directly into NEXUS!`;
+
+      toast.classList.add("show");
+      setTimeout(() => {
+        toast.classList.remove("show");
+      }, 5500);
+    };
+
+    // Auto-start simulation immediately
+    startTimer();
+    renderAll();
+  </script>
+</body>
+</html>

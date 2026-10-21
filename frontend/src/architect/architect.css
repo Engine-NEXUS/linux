@@ -5,22 +5,41 @@
 
 @import "../theme/tokens.css";
 
-:root {
+:root,
+[data-theme="dark"] {
   --apple-text-primary:    #ffffff;
   --apple-text-secondary:  #8e8e93;
   --apple-text-tertiary:   #636366;
   --apple-text-accent:     #fa586a;
-  --apple-surface-base:    #000000;
-  --apple-surface-sidebar: rgba(18, 18, 18, 0.45);
-  --apple-surface-muted:   rgba(28, 28, 30, 0.72);
-  --apple-surface-raised:  rgba(44, 44, 46, 0.75);
-  --apple-surface-strong:  rgba(58, 58, 60, 0.90);
-  --apple-surface-bar:     rgba(22, 22, 24, 0.88);
+  --apple-surface-base:    rgba(12, 12, 16, 0.72);
+  --apple-surface-sidebar: rgba(18, 18, 24, 0.55);
+  --apple-surface-muted:   rgba(28, 28, 34, 0.65);
+  --apple-surface-raised:  rgba(44, 44, 52, 0.75);
+  --apple-surface-strong:  rgba(58, 58, 68, 0.85);
+  --apple-surface-bar:     rgba(22, 22, 28, 0.75);
   --apple-border-default:  rgba(255, 255, 255, 0.08);
   --apple-border-strong:   rgba(255, 255, 255, 0.16);
   --apple-accent-blue:     #0a84ff;
   --apple-accent-purple:   #bf5af2;
   --apple-accent-cyan:     #64d2ff;
+}
+
+[data-theme="light"] {
+  --apple-text-primary:    #111827;
+  --apple-text-secondary:  rgba(0, 0, 0, 0.65);
+  --apple-text-tertiary:   rgba(0, 0, 0, 0.45);
+  --apple-text-accent:     #fa586a;
+  --apple-surface-base:    rgba(244, 244, 248, 0.75);
+  --apple-surface-sidebar: rgba(255, 255, 255, 0.65);
+  --apple-surface-muted:   rgba(235, 235, 240, 0.70);
+  --apple-surface-raised:  rgba(255, 255, 255, 0.85);
+  --apple-surface-strong:  rgba(255, 255, 255, 0.95);
+  --apple-surface-bar:     rgba(248, 248, 252, 0.80);
+  --apple-border-default:  rgba(0, 0, 0, 0.08);
+  --apple-border-strong:   rgba(0, 0, 0, 0.16);
+  --apple-accent-blue:     #007aff;
+  --apple-accent-purple:   #af52de;
+  --apple-accent-cyan:     #5ac8fa;
 }
 
 * {
@@ -35,51 +54,42 @@ html, body, #root {
   overflow: hidden;
   background: transparent !important;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
-  color: #ffffff;
+  color: var(--apple-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* ── Liquid Glass Card ────────────────────────────────────────────
-   Same mechanism as the response sidebar: the window is genuinely
-   transparent (transparent: true in Tauri), and Rust captures the
-   desktop region behind it into a blurred PNG data URI before
-   showing the window. The CSS renders this as the ::after backdrop
-   layer. The ::before layer provides the specular edge sheen. */
+/* ── Liquid Glass Card ─────────────────────────────────────────── */
 .architect-app {
   width: 100vw;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  /* Liquid glass card — same styling as .sidebar-card */
   position: relative;
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, transparent 40%);
-  background-color: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-top: 1px solid rgba(255, 255, 255, 0.25);
+  background-color: var(--apple-surface-base);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid var(--apple-border-strong);
+  border-top: 1px solid var(--apple-border-strong);
   border-radius: 18px;
   box-shadow:
-    0 24px 64px rgba(0, 0, 0, 0.6),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-    inset 0 0 6px 0 rgba(255, 255, 255, 0.04),
-    inset 0 2px 4px -2px rgba(255, 255, 255, 0.28),
-    inset 0 -2px 4px -2px rgba(0, 0, 0, 0.25);
+    0 24px 64px rgba(0, 0, 0, 0.35),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.06);
   overflow: hidden;
   isolation: isolate;
+  color: var(--apple-text-primary);
 }
 
-/* Blurred backdrop layer — renders the live-capture PNG behind content */
+/* Frosted glass backdrop layer */
 .architect-app::after {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: 18px;
-  background-image:
-    linear-gradient(180deg, rgba(8, 8, 10, 0.50) 0%, rgba(8, 8, 10, 0.30) 100%),
-    var(--sidebar-backdrop-image, none);
-  background-size: cover;
-  background-position: center;
-  opacity: 1;
+  background: var(--apple-surface-base);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  opacity: 0.95;
   transition: opacity 0.3s ease-out;
   pointer-events: none;
   z-index: 0;
@@ -774,4 +784,65 @@ html, body, #root {
   text-align: center;
   padding: 20px;
 }
+
+/* ── Light Theme Adaptations ────────────────────────────────────── */
+[data-theme="light"] .architect-view-tab {
+  color: var(--apple-text-secondary);
+}
+[data-theme="light"] .architect-view-tab:hover:not(:disabled) {
+  color: var(--apple-text-primary);
+  background: rgba(0, 0, 0, 0.05);
+}
+[data-theme="light"] .architect-input-wrapper {
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+[data-theme="light"] .architect-repo-input {
+  color: var(--apple-text-primary);
+}
+[data-theme="light"] .architect-view-tabs {
+  background: rgba(240, 240, 245, 0.8);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+[data-theme="light"] .architect-hero-card {
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.08);
+}
+[data-theme="light"] .architect-hero-subtitle {
+  color: var(--apple-text-secondary);
+}
+[data-theme="light"] .architect-file-node {
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  color: var(--apple-text-primary);
+}
+[data-theme="light"] .architect-analytics-section {
+  background: rgba(0, 0, 0, 0.04);
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+[data-theme="light"] .architect-analytics-col {
+  background: rgba(255, 255, 255, 0.65);
+}
+[data-theme="light"] .architect-analytics-header {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  background: rgba(0, 0, 0, 0.02);
+}
+[data-theme="light"] .architect-analytics-title {
+  color: var(--apple-text-primary);
+}
+[data-theme="light"] .architect-analytics-count {
+  color: var(--apple-text-secondary);
+  background: rgba(0, 0, 0, 0.05);
+}
+[data-theme="light"] .architect-analytics-item {
+  background: rgba(0, 0, 0, 0.02);
+}
+[data-theme="light"] .architect-analytics-file {
+  color: var(--apple-text-primary);
+}
+[data-theme="light"] .architect-analytics-chain {
+  color: var(--apple-text-primary);
+}
+
 

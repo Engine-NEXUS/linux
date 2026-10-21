@@ -9,7 +9,7 @@
 //!   3. For each file whose sha256 differs: GET /models/nlu/download?name=
 //!   4. Verify sha256 of each downloaded file
 //!   5. Write to app data `nlu_model/` dir
-//!   6. If NLU server is running: POST /reload_model (hot-swap, no restart)
+//!   6. Hot-swap the in-process model (nlu_local::reload) — no restart
 //!
 //! Everything is additive and non-blocking: if the Worker has no manifest,
 //! R2 is unconfigured, or the download fails, the bundled model is used
@@ -23,9 +23,6 @@ use sha2::{Digest, Sha256};
 use tauri::Manager;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-
-/// NLU server port — must match lazy_nlu.rs.
-const NLU_PORT: u16 = 39218;
 
 /// Manifest returned by GET /models/nlu/latest.
 #[derive(Debug, Deserialize)]
@@ -62,7 +59,7 @@ fn usable_model_dir(dir: PathBuf) -> Option<PathBuf> {
 
 /// Same as `model_dir` but without an `AppHandle` — derives the app
 /// data dir from environment the same way `lazy_stt.rs` does. Used by
-/// `lazy_nlu` at spawn time (no AppHandle in that call path).
+/// `nlu_local::resolve_nlu_dir` (no AppHandle in that call path).
 pub fn downloaded_model_dir_envless() -> Option<PathBuf> {
     let base = if let Ok(appdata) = std::env::var("APPDATA") {
         PathBuf::from(appdata).join("com.nexus.assistant")
@@ -86,6 +83,7 @@ fn installed_version(dir: &PathBuf) -> Option<String> {
 }
 
 /// Whether the downloaded model dir is usable (ONNX present).
+#[allow(dead_code)]
 pub fn downloaded_model_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     usable_model_dir(model_dir(app)?)
 }
@@ -208,37 +206,19 @@ async fn check_and_update(app: &tauri::AppHandle) -> Result<(), String> {
 
     tracing::info!("[nlu_update] NLU model updated to {}", manifest.version);
 
-    // 5. Hot-swap if the NLU server is already running.
-    if nlu_server_running() {
-        match client
-            .post(format!("http://127.0.0.1:{}/reload_model", NLU_PORT))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("[nlu_update] hot-swapped model in running NLU server");
+    // 5. Hot-swap the in-process model (nlu_local.rs runs the ONNX model
+    // in-process now — no Python sidecar to POST /reload to anymore).
+    let _ = tokio::task::spawn_blocking(crate::nlu_local::reload)
+        .await
+        .map(|ok| {
+            if ok {
+                tracing::info!("[nlu_update] hot-swapped in-process NLU model");
+            } else {
+                tracing::warn!("[nlu_update] in-process reload found no usable model after download");
             }
-            Ok(resp) => {
-                tracing::warn!("[nlu_update] reload_model returned {}", resp.status());
-            }
-            Err(e) => {
-                tracing::warn!("[nlu_update] reload_model failed: {}", e);
-            }
-        }
-    }
+        });
 
     Ok(())
-}
-
-fn nlu_server_running() -> bool {
-    use std::net::TcpStream;
-    use std::time::Duration as TcpDuration;
-    let addr = format!("127.0.0.1:{}", NLU_PORT);
-    TcpStream::connect_timeout(
-        &addr.parse().unwrap(),
-        TcpDuration::from_millis(200),
-    )
-    .is_ok()
 }
 
 #[cfg(test)]

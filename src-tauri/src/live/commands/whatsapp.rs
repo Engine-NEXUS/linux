@@ -72,6 +72,7 @@ pub fn send_message() -> Result<(), String> {
 /// Full WhatsApp send flow: open → search contact → type → send.
 /// The `confirm_send` callback is called before the final Enter press.
 /// If it returns false, the message is NOT sent.
+#[allow(dead_code)]
 pub fn full_send_flow(
     contact: &str,
     message: &str,

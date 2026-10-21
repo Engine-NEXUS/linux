@@ -118,6 +118,7 @@ impl SttLearningState {
             transcript: transcript.to_lowercase(),
             timestamp: Instant::now(),
         });
+        crate::missed_intent_logger::log_missed_intent(transcript, "stt_learning", "parser_failure");
         tracing::info!("stt_learning: logged failure: \"{}\"", transcript);
     }
 

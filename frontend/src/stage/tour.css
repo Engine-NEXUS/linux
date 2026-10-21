@@ -1,0 +1,171 @@
+/* Narrated screen tour overlay (stage/TourOverlay.tsx).
+   Everything dynamic is class/SVG-attribute/CSSOM — the stage CSP drops
+   inline `style` props. Click-through: pointer-events none throughout. */
+
+.tour-svg {
+  position: fixed;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  z-index: 99990;
+  overflow: visible;
+}
+
+.tour-ring {
+  fill: rgba(110, 170, 255, 0.1);
+  stroke: rgba(140, 200, 255, 0.95);
+  stroke-width: 2.5;
+  opacity: 0;
+  filter: drop-shadow(0 0 10px rgba(110, 170, 255, 0.75));
+  transition: opacity 180ms ease;
+}
+.tour-svg.in .tour-ring {
+  opacity: 1;
+  animation: tour-ring-pulse 1.8s ease-in-out infinite;
+}
+
+.tour-leader {
+  fill: none;
+  stroke: rgba(140, 200, 255, 0.9);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  filter: drop-shadow(0 0 6px rgba(110, 170, 255, 0.6));
+}
+.tour-svg.in .tour-leader {
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 380ms ease-out;
+}
+
+.tour-arrow {
+  fill: rgba(150, 210, 255, 1);
+  opacity: 0;
+  filter: drop-shadow(0 0 6px rgba(110, 170, 255, 0.8));
+  transition: opacity 160ms ease 200ms;
+}
+.tour-dot {
+  fill: rgba(150, 210, 255, 1);
+  opacity: 0;
+  transition: opacity 160ms ease 200ms;
+}
+.tour-svg.in .tour-arrow,
+.tour-svg.in .tour-dot {
+  opacity: 1;
+}
+
+.tour-callout {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 320px;
+  box-sizing: border-box;
+  padding: 14px 38px 14px 52px;
+  border-radius: 16px;
+  background: rgba(16, 20, 30, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  color: #fff;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  pointer-events: none;
+  z-index: 99991;
+  opacity: 0;
+  scale: 0.96;
+  transition: opacity 180ms ease, scale 180ms ease;
+}
+.tour-callout.in {
+  opacity: 1;
+  scale: 1;
+  pointer-events: auto;
+}
+
+.tour-callout-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 22px;
+  height: 22px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+  pointer-events: auto;
+  transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+  user-select: none;
+}
+.tour-callout-close:hover {
+  background: rgba(239, 68, 68, 0.35);
+  border-color: rgba(239, 68, 68, 0.8);
+  color: #ffffff;
+}
+
+.tour-callout-num {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  min-width: 28px;
+  height: 28px;
+  border-radius: 14px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  background: rgba(110, 170, 255, 0.28);
+  border: 1px solid rgba(150, 210, 255, 0.7);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 26px;
+  text-align: center;
+}
+.tour-callout-of {
+  font-weight: 400;
+  opacity: 0.6;
+  font-size: 10px;
+}
+.tour-callout-title {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 4px;
+}
+.tour-callout-text {
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+@keyframes tour-ring-pulse {
+  0%, 100% { stroke-opacity: 1; }
+  50% { stroke-opacity: 0.55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-svg.in .tour-ring { animation: none; }
+  .tour-callout, .tour-ring, .tour-arrow, .tour-dot { transition: none; }
+  .tour-svg.in .tour-leader { transition: none; }
+  .tour-callout { scale: 1; }
+}
+
+/* Light theme: the tour callout becomes a light card (ring/leader keep the blue accent). */
+:root[data-theme="light"] .tour-callout {
+  background: rgba(250, 250, 250, 0.96);
+  border-color: rgba(60, 60, 67, 0.22);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+  color: #1c1c1e;
+}
+:root[data-theme="light"] .tour-callout-text {
+  color: rgba(28, 28, 30, 0.78);
+}
+:root[data-theme="light"] .tour-callout-of {
+  opacity: 0.55;
+}
+:root[data-theme="light"] .tour-callout-num {
+  background: rgba(10, 132, 214, 0.14);
+  border-color: rgba(10, 132, 214, 0.6);
+}

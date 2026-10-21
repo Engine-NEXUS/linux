@@ -1,0 +1,9 @@
+{
+  "name": "nexus",
+  "private": true,
+  "description": "Root shim so tauri.conf.json beforeDevCommand/beforeBuildCommand work. Real scripts live in frontend/.",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build"
+  }
+}

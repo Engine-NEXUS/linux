@@ -6,18 +6,13 @@ use std::os::windows::process::CommandExt;
 #[cfg(feature = "wakeword-sherpa")]
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::{Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_autostart::ManagerExt;
 
 // Phase D: voice_profile is now available for both wakeword-oww and wakeword-sherpa
 use crate::voice_profile;
 use crate::app_registry;
-
-/// Hardcoded fallback Worker URL for Linux/Ubuntu builds.
-/// Origin uses `option_env!("NEXUS_SERVER_URL")` (baked at build time);
-/// diagnostics falls back to this const when no session/config exists yet.
-pub const WORKER_URL: &str = "https://nexus-worker.chitkullakshya.workers.dev";
 
 // ─── Pending sidebar content ───────────────────────────────────────
 //
@@ -91,17 +86,11 @@ pub fn close_setup_window<R: Runtime>(
     first_run: Option<bool>,
 ) -> Result<(), String> {
     let _ = crate::dyn_windows::destroy_window(&app, "setup");
-    if let Some(main_win) = app.get_webview_window("main") {
-        let _ = main_win.show();
-        let _ = crate::window_manager::configure_non_activating_overlay(&main_win);
-        let _ = main_win.set_ignore_cursor_events(false);
-        if first_run.unwrap_or(false) {
-            let _ = main_win.eval(
-                "window.__NEXUS_FIRST_RUN_GREETING__ && window.__NEXUS_FIRST_RUN_GREETING__()",
-            );
-        } else {
-            let _ = main_win.eval("window.__NEXUS_WAKE__ && window.__NEXUS_WAKE__()");
-        }
+    crate::window_manager::show_orb_interactive(&app);
+    if first_run.unwrap_or(false) {
+        let _ = tauri::Emitter::emit(&app, "orb:first_run_greeting", ());
+    } else {
+        let _ = tauri::Emitter::emit(&app, "orb:wake", ());
     }
     Ok(())
 }
@@ -174,6 +163,46 @@ pub fn get_server_config<R: Runtime>(
         user_id: json["userId"].as_str().unwrap_or("").to_string(),
         device_id: json["deviceId"].as_str().unwrap_or("").to_string(),
     })
+}
+
+// ─── Feature 88: canonical laptop identity commands ──────────────
+
+/// IPC: Claim the canonical profile from the Worker (setup Accounts step).
+/// The Worker issues profile_id/device_id/device_token; the token goes to
+/// the OS keyring. Idempotent — safe to call again on retry.
+#[tauri::command]
+pub async fn claim_profile<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<crate::identity_state::IdentityStatus, String> {
+    let status = crate::identity_state::claim(&app).await?;
+    // Kick off the pending-approval poll loop (bounded).
+    crate::identity_state::spawn_pending_poll(app);
+    Ok(status)
+}
+
+/// IPC: Current identity state (provisional/pending/approved/suspended/revoked).
+#[tauri::command]
+pub fn get_identity_status<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<crate::identity_state::IdentityStatus, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::identity_state::identity_status(&dir))
+}
+
+/// IPC: Force-refresh identity state from the Worker (/v1/profiles/me).
+#[tauri::command]
+pub async fn refresh_identity_status<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<crate::identity_state::IdentityStatus, String> {
+    crate::identity_state::refresh_status(&app).await
+}
+
+/// IPC: Self-revoke this device (settings Identity card "Disconnect").
+#[tauri::command]
+pub async fn disconnect_device<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    crate::identity_state::disconnect(&app).await
 }
 
 // ─── Voice profile commands ──────────────────────────────────────
@@ -668,10 +697,8 @@ static PENDING_SETTINGS_BACKDROP: std::sync::Mutex<Option<String>> = std::sync::
 pub async fn show_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::sidebar())?;
-    // Check if window is already visible to avoid capturing ourselves
-    let already_visible = win.is_visible().unwrap_or(false);
-    show_sidebar_inner(&app, &win, already_visible)?;
+    // Unified window delegate — Assistant view, default right dock.
+    let _ = unified_show_sidebar(&app, "assistant", None).await?;
     Ok(())
 }
 
@@ -692,43 +719,12 @@ pub async fn show_sidebar_with_content<R: Runtime>(
     text: String,
 ) -> Result<(), String> {
     let window_existed = app.get_webview_window("sidebar").is_some();
-    let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::sidebar())?;
 
-    // ── Key fix: pre-position the window BEFORE capturing the backdrop ──
-    // A freshly-created window sits at physical (0, 0). On Windows, a window
-    // at (0, 0) may be partially off-screen or on the wrong monitor, which
-    // causes `win.current_monitor()` inside `capture_backdrop` to return None,
-    // silently aborting the capture. We run the same positioning math used by
-    // `show_sidebar_inner` here first, so the window is in its final position
-    // on the correct monitor before we call `BitBlt`. This is safe to do even
-    // before `win.show()` — `set_position` works on hidden windows.
-    if let Ok(Some(monitor)) = win.current_monitor().or_else(|_| {
-        // Fallback: if not yet on a monitor, try primary monitor
-        win.primary_monitor()
-    }) {
-        let scale = monitor.scale_factor();
-        let screen = monitor.size();
-        let sidebar_w = 400i32;
-        let sidebar_h = 1000i32;
-        let phys_w = (sidebar_w as f64 * scale) as i32;
-        let phys_h = (sidebar_h as f64 * scale) as i32;
-        #[cfg(target_os = "windows")]
-        let taskbar = (48.0 * scale) as i32;
-        #[cfg(not(target_os = "windows"))]
-        let taskbar = (48.0 * scale) as i32;
-        let gap = (12.0 * scale) as i32;
-        let x = screen.width as i32 - phys_w - gap;
-        let y = (screen.height as i32 - phys_h - taskbar - gap).max(0);
-        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-    }
-
-    // Capture the backdrop before showing (only for fresh windows or hidden ones).
-    // If the window is already visible, skip capture to avoid capturing ourselves.
-    let backdrop = if window_existed && win.is_visible().unwrap_or(false) {
-        None
-    } else {
-        capture_backdrop(&app, &win)
-    };
+    // Unified delegate — Assistant view, right dock. prepare_sidebar
+    // applies geometry WITHOUT showing, so the backdrop capture below
+    // photographs the desktop, not the sidebar itself.
+    let prep = prepare_sidebar(&app, "assistant", None).await?;
+    let backdrop = capture_and_emit_backdrop(&app, &prep);
 
     // Store the pending content so the frontend can fetch it on mount.
     // This handles the fresh-window case where events would be missed.
@@ -743,8 +739,9 @@ pub async fn show_sidebar_with_content<R: Runtime>(
         });
     }
 
-    // Show the window (no-op if already visible).
-    show_sidebar_inner(&app, &win, backdrop.is_some())?;
+    // Show + focus + emit sidebar:set_view (React switches view instantly).
+    finish_sidebar(&app, &prep.win, "assistant", None)?;
+    spawn_sidebar_live_blur(&app, &prep.win);
 
     // If the window already existed (React already loaded), also emit the
     // event as a fast path. The frontend listener will handle it immediately.
@@ -775,18 +772,10 @@ pub async fn show_sidebar_with_analysis<R: Runtime>(
     analysis: serde_json::Value,
 ) -> Result<(), String> {
     let window_existed = app.get_webview_window("sidebar").is_some();
-    let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::sidebar())?;
 
-    // Pre-position the window before capturing backdrop
-    if !window_existed {
-        let _ = win.set_position(tauri::LogicalPosition::new(0.0, 0.0));
-    }
-
-    let backdrop = if window_existed && win.is_visible().unwrap_or(false) {
-        None
-    } else {
-        capture_backdrop(&app, &win)
-    };
+    // Unified delegate — Assistant view, right dock, geometry before capture.
+    let prep = prepare_sidebar(&app, "assistant", None).await?;
+    let backdrop = capture_and_emit_backdrop(&app, &prep);
 
     {
         let mut pending = PENDING_SIDEBAR.lock().unwrap();
@@ -799,7 +788,8 @@ pub async fn show_sidebar_with_analysis<R: Runtime>(
         });
     }
 
-    show_sidebar_inner(&app, &win, backdrop.is_some())?;
+    finish_sidebar(&app, &prep.win, "assistant", None)?;
+    spawn_sidebar_live_blur(&app, &prep.win);
 
     // Fast path: if the window already exists, also emit events
     if window_existed {
@@ -832,17 +822,10 @@ pub async fn show_sidebar_with_confirmation<R: Runtime>(
     confirmation: serde_json::Value,
 ) -> Result<(), String> {
     let window_existed = app.get_webview_window("sidebar").is_some();
-    let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::sidebar())?;
 
-    if !window_existed {
-        let _ = win.set_position(tauri::LogicalPosition::new(0.0, 0.0));
-    }
-
-    let backdrop = if window_existed && win.is_visible().unwrap_or(false) {
-        None
-    } else {
-        capture_backdrop(&app, &win)
-    };
+    // Unified delegate — Assistant view, right dock, geometry before capture.
+    let prep = prepare_sidebar(&app, "assistant", None).await?;
+    let backdrop = capture_and_emit_backdrop(&app, &prep);
 
     {
         let mut pending = PENDING_SIDEBAR.lock().unwrap();
@@ -855,7 +838,8 @@ pub async fn show_sidebar_with_confirmation<R: Runtime>(
         });
     }
 
-    show_sidebar_inner(&app, &win, backdrop.is_some())?;
+    finish_sidebar(&app, &prep.win, "assistant", None)?;
+    spawn_sidebar_live_blur(&app, &prep.win);
 
     if window_existed {
         let _ = app.emit("sidebar:show", serde_json::json!({
@@ -876,14 +860,26 @@ pub async fn show_sidebar_with_confirmation<R: Runtime>(
     Ok(())
 }
 
+/// Store pending sidebar content from non-commands modules (the OCR
+/// fallback in the orchestrator). Same race-free pattern; no backdrop.
+pub fn set_pending_sidebar_text(query: String, text: String) {
+    let mut pending = PENDING_SIDEBAR.lock().unwrap();
+    *pending = Some(PendingSidebar {
+        query,
+        text,
+        backdrop: None,
+        analysis: None,
+        confirmation: None,
+    });
+}
+
 /// IPC: Fetch pending sidebar content (called by the frontend on mount).
 /// Returns the content + backdrop + analysis + confirmation that was stored by
 /// `show_sidebar_with_content`, `show_sidebar_with_analysis`, or
 /// `show_sidebar_with_confirmation`, or null if no content is pending.
 /// Clears the pending data after returning.
 #[tauri::command]
-pub fn get_pending_sidebar_content() -> Result<Option<serde_json::Value>, String> {
-    let mut pending = PENDING_SIDEBAR.lock().unwrap();
+pub fn get_pending_sidebar_content() -> Result<Option<serde_json::Value>, String> {    let mut pending = PENDING_SIDEBAR.lock().unwrap();
     let data = pending.take();
     match data {
         Some(p) => {
@@ -902,524 +898,533 @@ pub fn get_pending_sidebar_content() -> Result<Option<serde_json::Value>, String
 
 /// Capture the desktop region behind the sidebar window (Windows only).
 /// Must be called BEFORE `win.show()` so we don't capture the sidebar itself.
-/// Returns the blurred backdrop as a `data:image/png;base64,...` URI, or None.
-fn capture_backdrop<R: Runtime>(
+/// If `geom` is provided, uses those physical coords directly (avoids a race
+/// where `win.outer_position()`/`inner_size()` haven't propagated yet).
+/// Returns the blurred backdrop as a `data:image/jpeg;base64,...` URI, or None.
+pub(crate) fn capture_backdrop<R: Runtime>(
     _app: &tauri::AppHandle<R>,
     win: &tauri::WebviewWindow<R>,
+    geom: Option<(i32, i32, i32, i32)>,
 ) -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        let monitor = win.current_monitor().ok()??;
-        let scale = monitor.scale_factor();
-        let screen = monitor.size();
-        // Read the ACTUAL window size — the wide sidebar is 900px, not 600px.
-        let logical = win.inner_size().map(|s| s.to_logical::<f64>(scale)).unwrap_or(
-            tauri::LogicalSize::new(400.0, 1000.0)
-        );
-        let sidebar_w = logical.width;
-        let sidebar_h = logical.height;
-        let phys_w = (sidebar_w * scale) as i32;
-        let phys_h = (sidebar_h * scale) as i32;
-        let taskbar = (48.0 * scale) as i32;
-        let gap = (12.0 * scale) as i32;
-        let x = screen.width as i32 - phys_w - gap;
-        let y = (screen.height as i32 - phys_h - taskbar - gap).max(0);
+        let (x, y, phys_w, phys_h) = match geom {
+            Some(g) => g,
+            None => {
+                let pos = win.outer_position().ok()?;
+                let scale = win.scale_factor().ok()?;
+                let logical = win.inner_size().ok()?.to_logical::<f64>(scale);
+                (pos.x, pos.y, (logical.width * scale) as i32, (logical.height * scale) as i32)
+            }
+        };
 
-        match crate::sidebar_backdrop::capture_and_blur(x, y, phys_w, phys_h, 32.0) {
+        match crate::sidebar_backdrop::capture_and_blur_jpeg(x, y, phys_w, phys_h, 10.0) {
             Some(data_uri) => {
                 tracing::info!("sidebar: backdrop captured ({} bytes)", data_uri.len());
                 Some(data_uri)
             }
             None => {
-                tracing::warn!("sidebar: backdrop capture failed (x={x}, y={y}, w={phys_w}, h={phys_h})");
+                tracing::warn!("sidebar: backdrop capture failed (x={}, y={}, w={}, h={})", x, y, phys_w, phys_h);
                 None
             }
         }
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = (win, geom);
         None
     }
 }
 
-/// Shared inner logic for showing the sidebar window.
-/// `backdrop_already_captured`: if true, skip the backdrop capture (it was
-/// already done by the caller and stored in the pending content). This prevents
-/// re-capturing the window itself when the window is already visible.
-fn show_sidebar_inner<R: Runtime>(
-    _app: &tauri::AppHandle<R>,
-    win: &tauri::WebviewWindow<R>,
-    backdrop_already_captured: bool,
-) -> Result<(), String> {
+// ─── Unified dynamic sidebar (one window, four views) ────────────────
+//
+// ONE Tauri window ("sidebar") hosts every panel view — Assistant,
+// Command Hub (settings), Architect, PR List — switched in React via
+// `sidebar:set_view` without creating/destroying OS HWNDs. This kills
+// the 4×WebView2 process cost (~250 MB each), the z-order fighting, and
+// the spawn flicker, while the single compact HWND keeps native DWM
+// hardware glass + rounded corners + capture exclusion fully active.
+//
+// Current view geometry (logical px):
+//   assistant / pr-list : 520×min(1040, mh-40), right dock (x=mw-530, y=20)
+//   settings            : 400×min(780, mh-40), right dock (x=mw-410, y=20)
+//   architect           : 960×min(1040, mh-40), centered (y=40)
+// Explicit left/right/center docks override the default anchor per view.
 
-    // Force the sidebar to the correct size in case the window was
-    // created with a different size from a previous build.
-    if let Ok(scale) = win.scale_factor() {
-        let _ = win.set_size(tauri::PhysicalSize::new(
-            (400.0 * scale) as i32,
-            (1000.0 * scale) as i32,
-        ));
-    }
+/// The currently active sidebar view — kept so `set_sidebar_dock` can
+/// re-anchor the window without the frontend re-sending the view name.
+static ACTIVE_SIDEBAR_VIEW: Mutex<String> = Mutex::new(String::new());
 
-    // Position at bottom-right of the screen, above the taskbar.
-    // Read the ACTUAL window size (logical) instead of hardcoding —
-    // the wide sidebar is 900px and would otherwise be pushed off-screen.
-    use tauri::PhysicalPosition;
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let scale = monitor.scale_factor();
-        let screen = monitor.size();
-        // Get the window's actual logical size; fall back to 600x1000 if unavailable
-        let logical = win.inner_size().map(|s| s.to_logical::<f64>(scale)).unwrap_or(
-            tauri::LogicalSize::new(400.0, 1000.0)
-        );
-        let sidebar_w = logical.width;
-        let sidebar_h = logical.height;
-        let phys_w = (sidebar_w * scale) as i32;
-        let phys_h = (sidebar_h * scale) as i32;
+/// Requested-but-possibly-lost view — the same race as pending sidebar
+/// content: Rust emits `sidebar:set_view` the moment the window shows,
+/// but the React router may not have mounted yet. Persist here; the
+/// frontend fetches (and clears) it on mount so the FIRST show lands on
+/// the right view.
+static PENDING_SIDEBAR_VIEW: Mutex<Option<String>> = Mutex::new(None);
 
-        #[cfg(target_os = "macos")]
-        let taskbar = (70.0 * scale) as i32;
-        #[cfg(target_os = "windows")]
-        let taskbar = (48.0 * scale) as i32;
-        #[cfg(target_os = "linux")]
-        let taskbar = (36.0 * scale) as i32;
-        let gap = (12.0 * scale) as i32;
+fn set_active_sidebar_view(view: &str) {
+    *ACTIVE_SIDEBAR_VIEW.lock().unwrap() = view.to_string();
+}
 
-        let x = screen.width as i32 - phys_w - gap;
-        // Clamp Y so the window doesn't go off-screen if taller than the monitor
-        let y = (screen.height as i32 - phys_h - taskbar - gap).max(0);
-        let _ = win.set_position(PhysicalPosition::new(x, y));
-    }
+/// IPC: Fetch the pending sidebar view (router calls this on mount).
+/// Returns the view name that was requested before the router mounted,
+/// or null. Clears the pending value.
+#[tauri::command]
+pub fn get_pending_sidebar_view() -> Result<Option<String>, String> {
+    let mut pending = PENDING_SIDEBAR_VIEW.lock().unwrap();
+    Ok(pending.take())
+}
 
-    // ─── "Fake blur" backdrop capture (Windows only) ───────────────
-    // Only capture if the caller hasn't already done so. This prevents
-    // capturing the sidebar itself when the window is already visible
-    // (e.g. when show_sidebar is called from the frontend's useEffect).
-    if !backdrop_already_captured {
-        if let Some(data_uri) = capture_backdrop(_app, win) {
-            let _ = _app.emit("sidebar:backdrop", data_uri);
+// ─── Pending spatial analysis (Feature 86 race-free pattern) ─────────
+// The orchestrator stores the full spatial payload BEFORE showing the
+// unified sidebar; the Spatial view fetches it on mount (fresh-window
+// race path) — same shape as PENDING_SIDEBAR.
+static PENDING_SPATIAL: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+
+/// Store the spatial payload (called by the orchestrator).
+pub fn set_pending_spatial(payload: &serde_json::Value) {
+    *PENDING_SPATIAL.lock().unwrap() = Some(payload.clone());
+}
+
+/// IPC: Fetch pending spatial data (Spatial view calls this on mount).
+/// Clears after returning.
+#[tauri::command]
+pub fn get_pending_spatial() -> Result<Option<serde_json::Value>, String> {
+    let mut pending = PENDING_SPATIAL.lock().unwrap();
+    Ok(pending.take())
+}
+
+// ─── Pending annotation seed (Feature 87 race-free pattern) ─────────
+// Same shape as PENDING_SPATIAL: the orchestrator stores the seed canvas
+// BEFORE showing the unified sidebar; the Annotate view fetches it on
+// mount (fresh-window race path) and also listens for show_annotation
+// (warm-window path).
+static PENDING_ANNOTATION: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+
+/// Store the annotation seed (called by the orchestrator).
+pub fn set_pending_annotation(payload: &serde_json::Value) {
+    *PENDING_ANNOTATION.lock().unwrap() = Some(payload.clone());
+}
+
+/// IPC: Fetch pending annotation seed (Annotate view calls this on mount).
+/// Clears after returning.
+#[tauri::command]
+pub fn get_pending_annotation() -> Result<Option<serde_json::Value>, String> {
+    let mut pending = PENDING_ANNOTATION.lock().unwrap();
+    Ok(pending.take())
+}
+
+/// Pure geometry resolver for the unified sidebar window.
+/// Returns (x, y, width, height) in LOGICAL pixels for `view`/`dock` on a
+/// monitor of logical size (monitor_w, monitor_h). Unit-tested — keep it
+/// side-effect free.
+pub fn sidebar_geometry(
+    view: &str,
+    dock: Option<&str>,
+    monitor_w: f64,
+    monitor_h: f64,
+) -> (f64, f64, f64, f64) {
+    let left = dock == Some("left");
+    let right = dock == Some("right");
+    let docked = left || right;
+// Right dock: window sits inside the right screen edge with a 10px margin.
+// x = monitor_w - w - 10. Left dock: 10px from left edge. y = 20px top
+// margin for both. The right edge must never leave the screen.
+    let dock_x = |w: f64, h: f64| -> (f64, f64, f64, f64) {
+        let x = if left {
+            10.0
+        } else {
+            (monitor_w - w - 10.0).max(0.0)
+        };
+        (x, 20.0, w, h)
+    };
+    let center_xy = |w: f64, h: f64| -> (f64, f64, f64, f64) {
+        (
+            ((monitor_w - w) / 2.0).max(0.0),
+            ((monitor_h - h) / 2.0).max(0.0),
+            w,
+            h,
+        )
+    };
+    match view {
+        "settings" => {
+            // Command Hub: full vertical span card — 400px wide, covering
+            // from top margin down to screen edge / taskbar, right-docked (or left).
+            let h = (monitor_h - 40.0).min(1040.0).max(400.0);
+            dock_x(400.0, h)
+        }
+        "architect" | "maps" => {
+            let h = (monitor_h - 40.0).min(1040.0).max(400.0);
+            if docked {
+                dock_x(960.0, h)
+            } else {
+                // Centered horizontally, pinned near the top (y=40, spec).
+                let x = ((monitor_w - 960.0) / 2.0).max(0.0);
+                (x, 40.0, 960.0, h)
+            }
+        }
+        // "assistant" | "pr-list" | fallback → default right dock, full height.
+        _ => {
+            let h = (monitor_h - 40.0).min(1040.0).max(400.0);
+            if dock == Some("center") { center_xy(520.0, h) } else { dock_x(520.0, h) }
         }
     }
+}
 
-    win.show().map_err(|e| e.to_string())?;
-
-    #[cfg(target_os = "linux")]
-    {
-        use tauri::PhysicalPosition;
-        if let Ok(Some(monitor)) = win.current_monitor() {
-            let scale = monitor.scale_factor();
-            let screen = monitor.size();
-            let sidebar_w = 400i32;
-            let sidebar_h = 1000i32;
-            let phys_w = (sidebar_w as f64 * scale) as i32;
-            let phys_h = (sidebar_h as f64 * scale) as i32;
-            let taskbar = (36.0 * scale) as i32;
-            let gap = (12.0 * scale) as i32;
-            let x = screen.width as i32 - phys_w - gap;
-            let y = (screen.height as i32 - phys_h - taskbar - gap).max(0);
-            let _ = win.set_position(PhysicalPosition::new(x, y));
-        }
+/// One shared 1 FPS live-blur loop for the unified sidebar (replaces the
+/// three per-view loops). Reads the window's ACTUAL position + size every
+/// tick, so view switches and dock moves are tracked automatically with
+/// zero extra wiring.
+///
+/// TEMPORARY: disabled. The post-show capture photographs the sidebar's own
+/// transparent pixels — GDI BitBlt does not reliably honor
+/// WDA_EXCLUDEFROMCAPTURE — producing black frames that paint the panel
+/// pitch black (2026-10-01 live regression). Blur comes from the pre-show
+/// `capture_backdrop` (ADR-05). A correct live loop needs DXGI desktop
+/// duplication, which is separate future work.
+pub(crate) fn spawn_sidebar_live_blur<R: Runtime>(app: &tauri::AppHandle<R>, win: &tauri::WebviewWindow<R>) {
+    const DEV_LIVE_BLUR_DISABLED: bool = false; // 1 Hz live refresh enabled
+    if DEV_LIVE_BLUR_DISABLED {
+        return;
     }
-
     #[cfg(target_os = "windows")]
     {
-        // No window-vibrancy re-apply here — see the detailed comment in
-        // lib.rs's setup hook for why this window intentionally never calls
-        // apply_blur/apply_acrylic/apply_mica. The window's transparency
-        // comes from tao's own material-free DWM registration (done once at
-        // window creation) and does not need re-applying on every show.
-        //
-        // Corner rounding is a plain window-shape attribute (not a material)
-        // so it's safe/cheap to re-assert on every show in case it was lost.
-        crate::dwm_corners::round_corners(&win);
+        static LIVE_BLUR_ACTIVE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static LAST_FRAME_HASH: Mutex<Option<u64>> = Mutex::new(None);
+        if LIVE_BLUR_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        LIVE_BLUR_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+        *LAST_FRAME_HASH.lock().unwrap() = None;
 
-        // ── Live blur: 1 FPS + change detection ──────────────────────
-        // The previous 200ms (5 FPS) loop created a "buffering video"
-        // effect — each frame required the full capture→blur→JPEG→base64
-        //→event→repaint pipeline (~50-100ms), making 5 FPS look stuttery.
-        //
-        // Now: capture every 1s, hash the raw BGRA, and only run the
-        // expensive blur→encode→emit pipeline when the background actually
-        // changed (hash differs). When nothing moves behind the sidebar,
-        // CPU stays at ~0. When something moves, the blur updates within
-        // ~1s with a gentle CSS crossfade (see sidebar.css ::before).
-        static LIVE_BLUR_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        static LAST_FRAME_HASH: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
-        if !LIVE_BLUR_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
-            LIVE_BLUR_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-            // Reset hash so the first frame after show always emits
-            *LAST_FRAME_HASH.lock().unwrap() = None;
+        let win_clone = win.clone();
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn(async move {
+            // Wait for window to fully appear
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-            let win_clone = win.clone();
-            let app_clone = _app.clone();
-            tauri::async_runtime::spawn(async move {
-                // Wait for window to fully appear
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            while win_clone.is_visible().unwrap_or(false) {
+                // 4 FPS live blur — shared interval, see sidebar_backdrop.
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    crate::sidebar_backdrop::LIVE_BLUR_INTERVAL_MS,
+                ))
+                .await;
 
-                while win_clone.is_visible().unwrap_or(false) {
-                    // 4 FPS live blur — shared interval, see sidebar_backdrop.
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        crate::sidebar_backdrop::LIVE_BLUR_INTERVAL_MS,
-                    ))
-                    .await;
-
-                    if !win_clone.is_visible().unwrap_or(false) {
-                        break;
-                    }
-
-                    if let Ok(Some(monitor)) = win_clone.current_monitor() {
-                        let scale = monitor.scale_factor();
-                        let screen = monitor.size();
-                        let sidebar_w = 400i32;
-                        let sidebar_h = 1000i32;
-                        let phys_w = (sidebar_w as f64 * scale) as i32;
-                        let phys_h = (sidebar_h as f64 * scale) as i32;
-                        let taskbar = (48.0 * scale) as i32;
-                        let gap = (12.0 * scale) as i32;
-                        let x = screen.width as i32 - phys_w - gap;
-                        let y = (screen.height as i32 - phys_h - taskbar - gap).max(0);
-
-                        // Step 1: cheap raw capture for hashing (~1ms)
-                        let raw_bgra = match crate::sidebar_backdrop::capture_region_bgra_public(x, y, phys_w, phys_h) {
-                            Some(bgra) => bgra,
-                            None => continue,
-                        };
-
-                        // Step 2: hash and compare to previous frame
-                        let current_hash = crate::sidebar_backdrop::frame_hash(&raw_bgra);
-                        let mut prev_hash_guard = LAST_FRAME_HASH.lock().unwrap();
-                        let should_emit = match *prev_hash_guard {
-                            Some(prev) => prev != current_hash,
-                            None => true, // First frame after show — always emit
-                        };
-                        *prev_hash_guard = Some(current_hash);
-                        drop(prev_hash_guard);
-
-                        // Step 3: only run the pipeline if changed —
-                        // half-res fast blur keeps 4 FPS affordable.
-                        if should_emit {
-                            // We already have the raw BGRA — blur + encode it
-                            // without re-capturing (reuse the bytes we have).
-                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg_fast(&raw_bgra, phys_w, phys_h, 32.0) {
-                                let _ = app_clone.emit("sidebar:backdrop", data_uri);
-                            }
-                        }
-                    }
+                if !win_clone.is_visible().unwrap_or(false) {
+                    break;
                 }
 
-                // Clean up: reset hash so next show captures fresh
-                *LAST_FRAME_HASH.lock().unwrap() = None;
-                LIVE_BLUR_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
-            });
+                let scale = win_clone
+                    .scale_factor()
+                    .unwrap_or(1.0);
+                let Ok(pos) = win_clone.outer_position() else { continue };
+                let Ok(logical) = win_clone
+                    .inner_size()
+                    .map(|s| s.to_logical::<f64>(scale))
+                else { continue };
+                let phys_w = (logical.width * scale) as i32;
+                let phys_h = (logical.height * scale) as i32;
+
+                // Step 1: cheap raw capture for hashing (~1ms)
+                let raw_bgra = match crate::sidebar_backdrop::capture_region_bgra_public(pos.x, pos.y, phys_w, phys_h) {
+                    Some(bgra) => bgra,
+                    None => continue,
+                };
+
+                // Step 2: hash and compare to previous frame
+                let current_hash = crate::sidebar_backdrop::frame_hash(&raw_bgra);
+                let mut prev_hash_guard = LAST_FRAME_HASH.lock().unwrap();
+                let should_emit = match *prev_hash_guard {
+                    Some(prev) => prev != current_hash,
+                    None => true, // First frame after show — always emit
+                };
+                *prev_hash_guard = Some(current_hash);
+                drop(prev_hash_guard);
+
+                // Step 3: only run the pipeline if changed —
+                // half-res fast blur keeps 4 FPS affordable.
+                if should_emit {
+                    if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg_fast(&raw_bgra, phys_w, phys_h, 32.0) {
+                        let _ = app_clone.emit("sidebar:backdrop", data_uri);
+                    }
+                }
+            }
+
+            // Clean up: reset hash so next show captures fresh
+            *LAST_FRAME_HASH.lock().unwrap() = None;
+            LIVE_BLUR_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, win);
+    }
+}
+
+/// Prepared unified-sidebar state: window + whether it was already on
+/// screen (a visible window must NOT have its backdrop re-captured —
+/// that would photograph the sidebar itself) + physical capture geometry.
+pub(crate) struct SidebarPrepared<R: Runtime> {
+    pub(crate) win: tauri::WebviewWindow<R>,
+    pub(crate) already_visible: bool,
+    pub(crate) capture_geom: Option<(i32, i32, i32, i32)>,
+}
+
+/// Get/create the unified sidebar window and apply the view's geometry
+/// (logical size + position from `sidebar_geometry`). Does NOT show it.
+/// MUST be awaited from an async context — `get_or_create_window` may
+/// build a WebView, and `WebviewWindowBuilder::build()` dispatches to the
+/// main thread (a sync command would deadlock there).
+pub(crate) async fn prepare_sidebar<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    view: &str,
+    dock: Option<&str>,
+) -> Result<SidebarPrepared<R>, String> {
+    let win = crate::dyn_windows::get_or_create_window(app, crate::dyn_windows::WindowConfig::sidebar())?;
+    let already_visible = win.is_visible().unwrap_or(false);
+
+    let monitor = win.current_monitor().or_else(|_| win.primary_monitor());
+    // Linux (Wayland): a window that is not mapped yet has no current
+    // monitor, and Wayland has no "primary" one (both `Ok(None)`), which
+    // skipped the whole geometry below. Any known monitor is better.
+    #[cfg(target_os = "linux")]
+    let monitor = match monitor {
+        Ok(None) => match win.primary_monitor() {
+            Ok(None) => win.available_monitors().map(|m| m.into_iter().next()),
+            other => other,
+        },
+        other => other,
+    };
+    if let Ok(Some(monitor)) = monitor {
+        let scale = monitor.scale_factor();
+        let mw = monitor.size().width as f64 / scale;
+        let mh = monitor.size().height as f64 / scale;
+        // Linux drawer: its margins count from the panels, so the geometry
+        // is computed inside the area they leave free.
+        #[cfg(target_os = "linux")]
+        let (mw, mh) = crate::overlay_linux::drawer_area_logical(mw, mh);
+        let (x, y, w, h) = sidebar_geometry(view, dock, mw, mh);
+        let _ = win.set_size(tauri::LogicalSize::new(w, h));
+        #[cfg(target_os = "linux")]
+        crate::overlay_linux::place_drawer(&win, x, y, w, h, mw);
+        let _ = win.set_position(tauri::LogicalPosition::new(x, y));
+
+        // ── Physical clamp (scale-mismatch drift fix) ──
+        // Tauri converts a Logical position through the WINDOW's scale
+        // factor, which can disagree with the monitor's (fresh windows
+        // realize at 1.0 before DPI context attaches). That drift pushed
+        // the right dock past the screen edge. Clamp the final PHYSICAL
+        // rect into the monitor's physical bounds — correct on every
+        // monitor/DPI combination regardless of which side drifted.
+        let mon_w = monitor.size().width as i32;
+        let mon_h = monitor.size().height as i32;
+        let pw = (w * scale).round() as i32;
+        let ph = (h * scale).round() as i32;
+        if let Ok(cur) = win.outer_position() {
+            let cx = cur.x.clamp(0, (mon_w - pw).max(0));
+            let cy = cur.y.clamp(0, (mon_h - ph).max(0));
+            if cx != cur.x || cy != cur.y {
+                let _ = win.set_position(tauri::PhysicalPosition::new(cx, cy));
+            }
         }
     }
 
+    set_active_sidebar_view(view);
+    // Persist for the router's fresh-window race path only after the window
+    // has been prepared successfully.
+    *PENDING_SIDEBAR_VIEW.lock().unwrap() = Some(view.to_string());
+
+    // Compute physical capture geometry from the logical values we just set.
+    // This avoids the race where win.outer_position()/inner_size() haven't
+    // propagated yet when capture_backdrop runs immediately after.
+    let capture_geom = if let Ok(Some(monitor)) = win.current_monitor().or_else(|_| win.primary_monitor()) {
+        let scale = monitor.scale_factor();
+        let mw = monitor.size().width as f64 / scale;
+        let mh = monitor.size().height as f64 / scale;
+        let (x, y, w, h) = sidebar_geometry(view, dock, mw, mh);
+        let pw = (w * scale).round() as i32;
+        let ph = (h * scale).round() as i32;
+        let phys_x = ((x * scale).round() as i32).clamp(0, (monitor.size().width as i32 - pw).max(0));
+        let phys_y = ((y * scale).round() as i32).clamp(0, (monitor.size().height as i32 - ph).max(0));
+        Some((phys_x, phys_y, pw, ph))
+    } else {
+        None
+    };
+
+    Ok(SidebarPrepared { win, already_visible, capture_geom })
+}
+
+/// Show + focus + re-assert DWM corners (+ macOS vibrancy re-apply) +
+/// emit `sidebar:set_view` so the React router switches instantly.
+pub(crate) fn finish_sidebar<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    win: &tauri::WebviewWindow<R>,
+    view: &str,
+    dock: Option<&str>,
+) -> Result<(), String> {
+    win.show().map_err(|e| format!("sidebar show: {e}"))?;
+    let _ = win.set_focus();
+    #[cfg(target_os = "windows")]
+    crate::dwm_corners::round_corners(win);
     #[cfg(target_os = "macos")]
     {
-        // Re-apply vibrancy after show — the effect can be lost if the
-        // window was hidden for a long time or the app was backgrounded.
         use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
         let _ = apply_vibrancy(
-            &win,
+            win,
             NSVisualEffectMaterial::Sidebar,
             Some(NSVisualEffectState::Active),
             Some(20.0),
         );
     }
-
+    let _ = app.emit(
+        "sidebar:set_view",
+        serde_json::json!({ "view": view, "dock": dock }),
+    );
     Ok(())
+}
+
+/// Capture the backdrop (if safe) and emit it as the fast-path
+/// `sidebar:backdrop` event. Returns the captured URI so legacy commands
+/// can also store it in their pending content (fresh-window race path).
+/// When the window is already visible, returns None — capturing then
+/// would photograph the sidebar itself.
+pub(crate) fn capture_and_emit_backdrop<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    prep: &SidebarPrepared<R>,
+) -> Option<String> {
+    if prep.already_visible {
+        return None;
+    }
+    let uri = capture_backdrop(app, &prep.win, prep.capture_geom);
+    if let Some(u) = &uri {
+        let _ = app.emit("sidebar:backdrop", u.clone());
+    }
+    uri
+}
+
+/// One-stop unified show: prepare → backdrop (currently disabled in
+/// solid-black mode) → show/focus → set_view → live-blur loop (currently
+/// disabled). Returns the captured backdrop for legacy pending
+/// storage. Used by the new `show_sidebar_view` / `set_sidebar_dock`
+/// commands and by every legacy show command below.
+pub(crate) async fn unified_show_sidebar<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    view: &str,
+    dock: Option<&str>,
+) -> Result<Option<String>, String> {
+    // `prepare_sidebar` persists the requested view for the router's
+    // fresh-window race path and tracks the active view.
+    let prep = prepare_sidebar(app, view, dock).await?;
+    let backdrop = capture_and_emit_backdrop(app, &prep);
+    finish_sidebar(app, &prep.win, view, dock)?;
+    spawn_sidebar_live_blur(app, &prep.win);
+    Ok(backdrop)
+}
+
+/// IPC: Show the unified sidebar in a specific view with an optional
+/// dock anchor. `view`: "assistant" | "settings" | "architect" | "pr-list".
+/// `dock`: Some("left"|"right"|"center") or None (view default).
+#[tauri::command]
+pub async fn show_sidebar_view<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    view: String,
+    dock: Option<String>,
+) -> Result<(), String> {
+    unified_show_sidebar(&app, &view, dock.as_deref())
+        .await
+        .map(|_| ())
+}
+
+/// IPC: Re-anchor the unified sidebar to a dock position ("left",
+/// "right", or "center"/"float") keeping the currently active view.
+#[tauri::command]
+pub async fn set_sidebar_dock<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    dock: String,
+) -> Result<(), String> {
+    let view = {
+        let current = ACTIVE_SIDEBAR_VIEW.lock().unwrap();
+        if current.is_empty() { "assistant".to_string() } else { current.clone() }
+    };
+    let dock_opt = match dock.as_str() {
+        "center" | "float" | "" => None,
+        other => Some(other.to_string()),
+    };
+    unified_show_sidebar(&app, &view, dock_opt.as_deref())
+        .await
+        .map(|_| ())
 }
 
 /// IPC: Hide the response sidebar window.
 /// Called after the server response has been spoken.
-/// Also destroys the architect-sidebar if it's open.
 #[tauri::command]
 pub fn hide_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    // Destroy sidebar windows to free ~250 MB of WebView2 processes each.
+    // Destroy the unified sidebar window to free its ~250 MB WebView2 tree.
     let _ = crate::dyn_windows::destroy_window(&app, "sidebar");
-    let _ = crate::dyn_windows::destroy_window(&app, "architect-sidebar");
     Ok(())
 }
 
-// ─── PR List sidebar window ───────────────────────────────────────────
+// ─── PR List view (unified sidebar) ──────────────────────────────────
 
-/// IPC: Show the PR list sidebar window.
-/// Creates a 500x1000 transparent, always-on-top, non-activating window
-/// on the right edge of the screen. Shows the PR list with Merge and
-/// Analyse buttons. The window is created on-demand and destroyed when
-/// closed (frees ~250 MB of WebView2 processes).
-///
-/// Carbon copy of the response sidebar: captures the desktop backdrop,
-/// blurs it, emits `sidebar:backdrop`, and runs a 1 FPS live blur loop
-/// so the PR list has the same liquid-glass appearance.
+/// IPC: Show the PR list in the unified sidebar window.
+/// Right-dock geometry (520×980) comes from `prepare_sidebar`; the
+/// backdrop capture + shared live-blur loop give the same liquid-glass
+/// appearance as every other view.
 #[tauri::command]
 pub async fn show_pr_list_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    let win = crate::dyn_windows::get_or_create_window(
-        &app,
-        crate::dyn_windows::WindowConfig::pr_list_sidebar(),
-    )?;
-
-    // Position at the right edge of the screen, vertically centered
-    use tauri::PhysicalPosition;
-    let mut capture_x = 0i32;
-    let mut capture_y = 0i32;
-    let mut capture_w = 500i32;
-    let mut capture_h = 1000i32;
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let scale = monitor.scale_factor();
-        let screen = monitor.size();
-        let win_w = 500i32;
-        let win_h = 1000i32;
-        let phys_w = (win_w as f64 * scale) as i32;
-        let phys_h = (win_h as f64 * scale) as i32;
-        let gap = (12.0 * scale) as i32;
-        let x = screen.width as i32 - phys_w - gap;
-        let y = (screen.height as i32 - phys_h) / 2; // vertically centered
-        let _ = win.set_position(PhysicalPosition::new(x, y));
-        capture_x = x;
-        capture_y = y;
-        capture_w = phys_w;
-        capture_h = phys_h;
-    }
-
-    // ─── "Fake blur" backdrop capture (Windows only) ───────────────
-    // Capture the desktop behind the window BEFORE showing it, so we
-    // don't capture the sidebar itself. This matches the response sidebar.
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(data_uri) = crate::sidebar_backdrop::capture_and_blur(
-            capture_x, capture_y, capture_w, capture_h, 32.0,
-        ) {
-            tracing::info!("pr-list: backdrop captured ({} bytes)", data_uri.len());
-            let _ = app.emit("sidebar:backdrop", data_uri);
-        } else {
-            tracing::warn!("pr-list: backdrop capture failed");
-        }
-    }
-
-    win.show().map_err(|e| e.to_string())?;
-
-    // ─── Live blur loop (Windows only) ──────────────────────────────
-    // 1 FPS capture + change detection, matching the response sidebar.
-    #[cfg(target_os = "windows")]
-    {
-        static PR_LIVE_BLUR_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        static PR_LAST_FRAME_HASH: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
-        if !PR_LIVE_BLUR_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
-            PR_LIVE_BLUR_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-            *PR_LAST_FRAME_HASH.lock().unwrap() = None;
-
-            let win_clone = win.clone();
-            let app_clone = app.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-                while win_clone.is_visible().unwrap_or(false) {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        crate::sidebar_backdrop::LIVE_BLUR_INTERVAL_MS,
-                    ))
-                    .await;
-                    if !win_clone.is_visible().unwrap_or(false) {
-                        break;
-                    }
-
-                    if let Ok(Some(monitor)) = win_clone.current_monitor() {
-                        let scale = monitor.scale_factor();
-                        let screen = monitor.size();
-                        let win_w = 500i32;
-                        let win_h = 1000i32;
-                        let phys_w = (win_w as f64 * scale) as i32;
-                        let phys_h = (win_h as f64 * scale) as i32;
-                        let gap = (12.0 * scale) as i32;
-                        let x = screen.width as i32 - phys_w - gap;
-                        let y = (screen.height as i32 - phys_h) / 2;
-
-                        let raw_bgra = match crate::sidebar_backdrop::capture_region_bgra_public(x, y, phys_w, phys_h) {
-                            Some(bgra) => bgra,
-                            None => continue,
-                        };
-
-                        let current_hash = crate::sidebar_backdrop::frame_hash(&raw_bgra);
-                        let mut prev_hash_guard = PR_LAST_FRAME_HASH.lock().unwrap();
-                        let should_emit = match *prev_hash_guard {
-                            Some(prev) => prev != current_hash,
-                            None => true,
-                        };
-                        *prev_hash_guard = Some(current_hash);
-                        drop(prev_hash_guard);
-
-                        if should_emit {
-                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg_fast(&raw_bgra, phys_w, phys_h, 32.0) {
-                                let _ = app_clone.emit("sidebar:backdrop", data_uri);
-                            }
-                        }
-                    }
-                }
-
-                *PR_LAST_FRAME_HASH.lock().unwrap() = None;
-                PR_LIVE_BLUR_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
-            });
-        }
-    }
-
+    let _ = unified_show_sidebar(&app, "pr-list", None).await?;
     Ok(())
 }
 
 /// IPC: Hide (destroy) the PR list sidebar window.
+/// With the unified window this closes the whole sidebar panel.
 #[tauri::command]
 pub fn hide_pr_list_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    let _ = crate::dyn_windows::destroy_window(&app, "pr-list-sidebar");
+    let _ = crate::dyn_windows::destroy_window(&app, "sidebar");
     Ok(())
 }
 
-/// IPC: Show the settings sidebar (liquid-glass, 520x1000, always-on-top).
-/// Creates the window on-demand, positions it at the LEFT edge of the
-/// screen (vertically centered) so the orb is visible on the right while
-/// adjusting position. Captures the desktop backdrop for the blur effect
-/// and starts the live-blur loop. Same pattern as the other sidebars.
+/// IPC: Show the Command Hub (settings view) in the unified sidebar.
+/// Default geometry: center floating modal (740×min(900, mh-100)); users
+/// can re-dock via the drag bar.
 #[tauri::command]
 pub async fn show_settings_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    let win = crate::dyn_windows::get_or_create_window(
-        &app,
-        crate::dyn_windows::WindowConfig::settings_sidebar(),
-    )?;
+    // Unified delegate — Command Hub view, default center modal.
+    let prep = prepare_sidebar(&app, "settings", None).await?;
 
-    // Update size in case the window already existed with a different size
-    let _ = win.set_size(tauri::PhysicalSize::new(
-        (520.0 * win.scale_factor().unwrap_or(1.0)) as i32,
-        (1000.0 * win.scale_factor().unwrap_or(1.0)) as i32,
-    ));
-
-    // Show the main orb window so the user can see it move while dragging
-    // the position sliders in the Display tab.
-    if let Some(orb) = app.get_webview_window("main") {
-        let _ = orb.show();
-    }
-
-    // Position at the LEFT edge of the screen, vertically centered.
-    // This keeps the right side of the screen free so the orb is visible
-    // while the user adjusts its position via the sliders.
-    use tauri::PhysicalPosition;
-    let mut capture_x = 0i32;
-    let mut capture_y = 0i32;
-    let mut capture_w = 520i32;
-    let mut capture_h = 1000i32;
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let scale = monitor.scale_factor();
-        let screen = monitor.size();
-        let win_w = 520i32;
-        let win_h = 1000i32;
-        let phys_w = (win_w as f64 * scale) as i32;
-        let phys_h = (win_h as f64 * scale) as i32;
-        let gap = (12.0 * scale) as i32;
-        let x = gap; // LEFT edge
-        let y = (screen.height as i32 - phys_h) / 2;
-        let _ = win.set_position(PhysicalPosition::new(x, y));
-        capture_x = x;
-        capture_y = y;
-        capture_w = phys_w;
-        capture_h = phys_h;
-    }
-
-    // "Fake blur" backdrop capture (Windows only) — same as other sidebars.
-    // Store in PENDING_SETTINGS_BACKDROP so the frontend can fetch it on
-    // mount (the event would be lost if emitted before React loads).
+    // Capture backdrop BEFORE showing (uses geometry we just set in prepare_sidebar).
     #[cfg(target_os = "windows")]
     {
-        if let Some(data_uri) = crate::sidebar_backdrop::capture_and_blur(
-            capture_x, capture_y, capture_w, capture_h, 32.0,
-        ) {
+        if let Some(data_uri) = capture_and_emit_backdrop(&app, &prep) {
             tracing::info!("settings-sidebar: backdrop captured ({} bytes)", data_uri.len());
-            // Store for frontend to fetch on mount
             *PENDING_SETTINGS_BACKDROP.lock().unwrap() = Some(data_uri.clone());
-            // Also emit (works if window already existed and React is loaded)
-            let _ = app.emit("sidebar:backdrop", data_uri);
         } else {
-            tracing::warn!("settings-sidebar: backdrop capture failed");
+            tracing::warn!("settings-sidebar: backdrop capture failed or skipped (already_visible={})", prep.already_visible);
         }
     }
 
-    win.show().map_err(|e| e.to_string())?;
-
-    // Live blur loop (Windows only) — 1 FPS capture + change detection.
-    #[cfg(target_os = "windows")]
-    {
-        static SETTINGS_LIVE_BLUR_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        static SETTINGS_LAST_FRAME_HASH: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
-        if !SETTINGS_LIVE_BLUR_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
-            SETTINGS_LIVE_BLUR_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
-            *SETTINGS_LAST_FRAME_HASH.lock().unwrap() = None;
-
-            let win_clone = win.clone();
-            let app_clone = app.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-                while win_clone.is_visible().unwrap_or(false) {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        crate::sidebar_backdrop::LIVE_BLUR_INTERVAL_MS,
-                    ))
-                    .await;
-                    if !win_clone.is_visible().unwrap_or(false) {
-                        break;
-                    }
-
-                    if let Ok(Some(monitor)) = win_clone.current_monitor() {
-                        let scale = monitor.scale_factor();
-                        let screen = monitor.size();
-                        let win_w = 520i32;
-                        let win_h = 1000i32;
-                        let phys_w = (win_w as f64 * scale) as i32;
-                        let phys_h = (win_h as f64 * scale) as i32;
-                        let gap = (12.0 * scale) as i32;
-                        let x = gap; // LEFT edge
-                        let y = (screen.height as i32 - phys_h) / 2;
-
-                        let raw_bgra = match crate::sidebar_backdrop::capture_region_bgra_public(x, y, phys_w, phys_h) {
-                            Some(bgra) => bgra,
-                            None => continue,
-                        };
-
-                        let current_hash = crate::sidebar_backdrop::frame_hash(&raw_bgra);
-                        let mut prev_hash_guard = SETTINGS_LAST_FRAME_HASH.lock().unwrap();
-                        let should_emit = match *prev_hash_guard {
-                            Some(prev) => prev != current_hash,
-                            None => true,
-                        };
-                        *prev_hash_guard = Some(current_hash);
-                        drop(prev_hash_guard);
-
-                        if should_emit {
-                            if let Some(data_uri) = crate::sidebar_backdrop::blur_bgra_to_jpeg_fast(&raw_bgra, phys_w, phys_h, 32.0) {
-                                let _ = app_clone.emit("sidebar:backdrop", data_uri);
-                            }
-                        }
-                    }
-                }
-
-                *SETTINGS_LAST_FRAME_HASH.lock().unwrap() = None;
-                SETTINGS_LIVE_BLUR_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
-            });
-        }
-    }
+    finish_sidebar(&app, &prep.win, "settings", None)?;
+    spawn_sidebar_live_blur(&app, &prep.win);
 
     Ok(())
 }
 
 /// IPC: Hide (destroy) the settings sidebar window.
+/// With the unified window this closes the whole sidebar panel.
 #[tauri::command]
 pub fn hide_settings_sidebar<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    let _ = crate::dyn_windows::destroy_window(&app, "settings-sidebar");
+    let _ = crate::dyn_windows::destroy_window(&app, "sidebar");
     Ok(())
 }
 
@@ -1433,62 +1438,8 @@ pub fn get_pending_settings_backdrop() -> Result<Option<String>, String> {
     Ok(pending.take())
 }
 
-// ─── Loading indicator window ────────────────────────────────────────
-
-/// IPC: Show the loading indicator window.
-/// Creates a small 80x80 transparent click-through window at the
-/// top-right corner of the screen. Shows the loading.json Lottie
-/// animation while NEXUS is processing a request (after "On it sir").
-/// The window is permanently click-through — mouse events pass through
-/// to whatever is behind it.
-///
-/// IMPORTANT: This command is async so it runs on a thread pool, NOT the
-/// main thread. A synchronous command would block the main thread during
-/// WebView2 window creation, which prevents Tauri events (like the Worker
-/// "result" event) from being delivered to the frontend — causing the
-/// response to never appear.
-#[tauri::command]
-pub async fn show_loading_indicator<R: Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<(), String> {
-    // Create the window — WebviewWindowBuilder::build() dispatches to the
-    // main thread internally, so this is safe to call from a thread pool.
-    let win = crate::dyn_windows::get_or_create_window(
-        &app,
-        crate::dyn_windows::WindowConfig::loading_indicator(),
-    )?;
-
-    // Position at the top-right corner — 7px from right, 9px from top.
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let scale = monitor.scale_factor();
-        let screen = monitor.size();
-        let win_size = 80i32;
-        let phys_win = (win_size as f64 * scale) as i32;
-        let inset_x = (7.0 * scale) as i32;
-        let inset_y = (9.0 * scale) as i32;
-        let x = screen.width as i32 - phys_win - inset_x;
-        let y = inset_y;
-        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-        tracing::debug!("loading-indicator positioned at ({x}, {y}) [scale={scale}]");
-    }
-
-    // Permanently click-through — mouse events pass through to windows behind.
-    win.set_ignore_cursor_events(true).map_err(|e| e.to_string())?;
-    win.show().map_err(|e| e.to_string())?;
-    tracing::info!("loading-indicator window shown");
-    Ok(())
-}
-
-/// IPC: Hide/destroy the loading indicator window.
-/// Called when the Worker response arrives. Destroys the window to
-/// free ~250 MB of WebView2 processes.
-#[tauri::command]
-pub async fn hide_loading_indicator<R: Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<(), String> {
-    let _ = crate::dyn_windows::destroy_window(&app, "loading-indicator");
-    Ok(())
-}
+// ─── Loading indicator (stage-hosted, see orchestrator::show_loading/
+// hide_loading and window_manager::emit_loading_rect) ──────────────────
 
 // ─── Settings window + persistence ───────────────────────────────────
 
@@ -1511,6 +1462,98 @@ pub fn close_settings_window<R: Runtime>(
 ) -> Result<(), String> {
     // Destroy to free ~250 MB of WebView2 processes.
     let _ = crate::dyn_windows::destroy_window(&app, "settings");
+    Ok(())
+}
+
+/// IPC: Open the Orb Studio customization window.
+/// Spawns directly to the left of the Settings sidebar without closing Settings.
+/// Width is 800px (twice Settings' 400px width).
+#[tauri::command]
+pub async fn open_orb_studio_window<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let win = crate::dyn_windows::get_or_create_window(&app, crate::dyn_windows::WindowConfig::orb_studio())?;
+
+    // Position directly to the left of the settings window
+    if let Ok(monitors) = win.available_monitors() {
+        if let Some(primary) = monitors.first() {
+            let size = primary.size();
+            let scale = primary.scale_factor();
+            let mw = size.width as f64 / scale;
+            let mh = size.height as f64 / scale;
+
+            let h = (mh - 40.0).min(1040.0).max(400.0);
+            let studio_w = 800.0;
+            // Settings right dock x = mw - 400 - 10 = mw - 410.
+            // Studio sits 12px to the left of settings: x = mw - 410 - 800 - 12 = mw - 1222.
+            let studio_x = (mw - 1222.0).max(10.0);
+            let studio_y = 20.0;
+
+            let _ = win.set_size(tauri::LogicalSize::new(studio_w, h));
+            let _ = win.set_position(tauri::LogicalPosition::new(studio_x, studio_y));
+        }
+    }
+
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// IPC: Close/destroy the Orb Studio window.
+#[tauri::command]
+pub fn close_orb_studio_window<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let _ = crate::dyn_windows::destroy_window(&app, "orb-studio");
+    Ok(())
+}
+
+/// IPC: Save custom orb morphology selection and broadcast to all windows immediately.
+#[tauri::command]
+pub fn set_orb_morphology<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    think: u32,
+    speak: u32,
+    listen: u32,
+) -> Result<(), String> {
+    let mut settings = get_settings(app.clone())?;
+    settings.orb_think_mode = think;
+    settings.orb_speak_mode = speak;
+    settings.orb_listen_mode = listen;
+    save_settings(app.clone(), settings.clone())?;
+    let _ = app.emit("orb:morphology_changed", serde_json::json!({
+        "think": think,
+        "speak": speak,
+        "listen": listen,
+    }));
+    Ok(())
+}
+
+/// IPC: Save custom orb capsule style ("classic" | "pebble") and broadcast immediately.
+#[tauri::command]
+pub fn set_orb_capsule_style<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    style: String,
+    mode: Option<u32>,
+    genesis: Option<u32>,
+) -> Result<(), String> {
+    let mut settings = get_settings(app.clone())?;
+    settings.orb_capsule_style = style.clone();
+    if let Some(m) = mode { settings.orb_wakeup_mode = m; }
+    if let Some(g) = genesis { settings.orb_interior_genesis = g; }
+    save_settings(app.clone(), settings.clone())?;
+    let _ = app.emit("orb:capsule_style", serde_json::json!({
+        "style": style,
+        "mode": settings.orb_wakeup_mode,
+        "genesis": settings.orb_interior_genesis,
+    }));
+    Ok(())
+}
+
+/// IPC: Trigger test wakeup animation on desktop.
+#[tauri::command]
+pub fn test_wake_orb<R: Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    crate::window_manager::wake_orb_src(&app, "preview-wake");
     Ok(())
 }
 
@@ -1549,6 +1592,14 @@ pub struct NexusSettings {
     /// Default: en-US-AvaNeural. See full list at Microsoft Speech docs.
     #[serde(default = "default_edge_tts_voice")]
     pub edge_tts_voice: String,
+    /// Iconic voice persona key (Feature 83 catalog, e.g. "jarvis").
+    /// Default: "nexus". Written by set_voice_preference.
+    #[serde(default = "default_selected_voice")]
+    pub selected_voice: String,
+    /// Local Kokoro voice name for the selected persona (e.g. "bm_george").
+    /// Default: af_heart. Written by set_voice_preference; resolved by the swap worker.
+    #[serde(default = "default_offline_voice_model")]
+    pub offline_voice_model: String,
     /// Orb horizontal position as percentage (0.0 = left, 0.5 = center, 1.0 = right).
     /// Default 0.5 (center). Saved to settings.json, persists across restarts.
     #[serde(default = "default_orb_horizontal_pct")]
@@ -1557,10 +1608,58 @@ pub struct NexusSettings {
     /// Default 1.0 (bottom). Saved to settings.json, persists across restarts.
     #[serde(default = "default_orb_vertical_pct")]
     pub orb_vertical_pct: f64,
-    /// Orb window size in pixels (100-300).
+    /// Orb window size in pixels (100-400).
     /// Default 200. Saved to settings.json, persists across restarts.
     #[serde(default = "default_orb_size")]
     pub orb_size: u32,
+    /// Orb color theme (hex string, e.g. "#f2b859").
+    /// Default: "#f2b859" (golden amber).
+    #[serde(default = "default_orb_color")]
+    pub orb_color: String,
+    /// Orb fixed position: "top" or "bottom".
+    /// Default: "top".
+    #[serde(default = "default_orb_position")]
+    pub orb_position: String,
+    /// Orb background capsule style: "classic" or "pebble".
+    /// Default: "classic".
+    #[serde(default = "default_orb_capsule_style")]
+    pub orb_capsule_style: String,
+    /// Orb wakeup animation mode (1..5): 1=elastic thread, 2=bowstring, 3=liquid meniscus, 4=horizon, 5=acoustic.
+    #[serde(default = "default_orb_wakeup_mode")]
+    pub orb_wakeup_mode: u32,
+    /// Orb interior genesis mode (0..3): 0=bloom, 1=droplet roll, 2=spark burst, 3=helix.
+    #[serde(default = "default_orb_interior_genesis")]
+    pub orb_interior_genesis: u32,
+    /// Scoop width in px.
+    #[serde(default = "default_orb_scoop_width")]
+    pub orb_scoop_width: u32,
+    /// Scoop depth in px.
+    #[serde(default = "default_orb_scoop_height")]
+    pub orb_scoop_height: u32,
+    /// Wing contact highlight opacity (0..100%).
+    #[serde(default = "default_orb_wing_rim_opacity")]
+    pub orb_wing_rim_opacity: u32,
+    /// Perimeter rim base opacity (0..100%).
+    #[serde(default = "default_orb_base_rim_opacity")]
+    pub orb_base_rim_opacity: u32,
+    /// Wing contact glow width in px.
+    #[serde(default = "default_orb_wing_glow_spread")]
+    pub orb_wing_glow_spread: u32,
+    /// Elastic spring stiffness factor * 100.
+    #[serde(default = "default_orb_stiffness")]
+    pub orb_stiffness: u32,
+    /// Orb thinking morphology mode (1..12).
+    /// Default: 6 (Trefoil Celtic Helix Cage).
+    #[serde(default = "default_orb_think_mode")]
+    pub orb_think_mode: u32,
+    /// Orb speaking morphology mode (1..6).
+    /// Default: 2 (64-strand Fibonacci Blossom).
+    #[serde(default = "default_orb_speak_mode")]
+    pub orb_speak_mode: u32,
+    /// Orb listening morphology mode (1..4).
+    /// Default: 1 (Acoustic Sand Cymatics & Inward Vortex).
+    #[serde(default = "default_orb_listen_mode")]
+    pub orb_listen_mode: u32,
     /// Gemini API key for Google Gemini models.
     /// When empty, Gemini features are unavailable.
     #[serde(default)]
@@ -1570,6 +1669,16 @@ pub struct NexusSettings {
     /// When empty, Cerebras is skipped in the 9Router cascade.
     #[serde(default)]
     pub cerebras_api_key: String,
+    /// Deepgram API key for Nova-2 cloud streaming STT.
+    /// When empty, NEXUS uses Groq Whisper Large v3 Turbo ($0 free tier).
+    #[serde(default)]
+    pub deepgram_api_key: String,
+    /// Google Routes API key (spoken ETA for "directions to ..."). Optional.
+    #[serde(default)]
+    pub routes_api_key: String,
+    /// Google Places API (New) key ("nearest pharmacy"). Optional.
+    #[serde(default)]
+    pub places_api_key: String,
     /// Moonshine STT model architecture.
     /// Options: "small_streaming" (123M, 7.84% WER, default for family),
     ///          "medium_streaming" (245M, 6.65% WER, recommended for admin),
@@ -1588,42 +1697,203 @@ pub struct NexusSettings {
     /// path mid-session. Default: true. Silent zeros, ~0 CPU.
     #[serde(default = "default_mic_keep_alive")]
     pub mic_keep_alive: bool,
+    /// TTS voice emotion: "auto" (default, heuristics per reply),
+    /// "neutral", "cheerful", "calm", "sad", "urgent", "whisper".
+    /// Prosody mapped to edge-tts rate/pitch/volume.
+    #[serde(default = "default_tts_emotion")]
+    pub tts_emotion: String,
+    /// Ghost vision provider order: "auto" (default, Gemini — sole vision
+    /// engine since Groq decommissioned vision 2026-10-01), "groq"
+    /// (kept for forward-compat; currently always fails), or "gemini".
+    #[serde(default = "default_vision_provider")]
+    pub vision_provider: String,
+    /// Ghost vision strategy: "sequential" (default, quota-frugal) or
+    /// "speed" (race both providers in parallel, first valid wins —
+    /// halves worst-case latency, spends 2 quota units per miss).
+    #[serde(default = "default_vision_race")]
+    pub vision_race: String,
     /// Telegram owner chat id for the owner-only remote bridge (see
     /// telegram.rs). Empty = bridge off. The bot token itself lives in the
     /// vault ("telegram" service), never here. Set from the Connections tab.
     #[serde(default)]
     pub telegram_chat_id: String,
-    /// Screen pointer master toggle (Phase-2 screen agent). When false,
-    /// locate answers are spoken but no marker is ever shown.
-    /// Default: true.
+    /// Ghost FIFO queue: speak "Queued, sir." once per session when queue
+    /// depth reaches 2+. Default: true. Plans D5/D6.
+    #[serde(default = "default_ghost_depth_ack")]
+    pub ghost_depth_ack: bool,
+    /// Ghost FIFO queue: per-step watchdog timeout in ms. Default: 15000. D7.
+    #[serde(default = "default_ghost_step_timeout_ms")]
+    pub ghost_step_timeout_ms: u64,
+    /// Ghost FIFO queue: inter-command gap τ in ms. Default: 1000. D4.
+    #[serde(default = "default_ghost_turn_gap_ms")]
+    pub ghost_turn_gap_ms: u64,
+    /// OPT-IN open-mic engagement window in seconds: outside it a Ghost hot-mic turn needs the word
+    /// "Nexus". 0 = off (the default: Ghost mode must not make the user say "Nexus" every time).
+    #[serde(default = "default_ghost_engagement_secs")]
+    pub ghost_engagement_secs: u64,
+    /// Directed-speech gate for the Ghost open mic (default on).
     #[serde(default = "default_true")]
-    pub pointer_enabled: bool,
-    /// Screen pointer dwell time in seconds before auto-hide + fade.
-    /// Clamped to 3-15 at read time. Default: 6.
-    #[serde(default = "default_pointer_dwell_seconds")]
-    pub pointer_dwell_seconds: u32,
-    /// Comma-separated foreground app titles the pointer never appears
-    /// over (privacy: banking, password managers, ...). Empty = no
-    /// exclusions. Matching is case-insensitive substring on Windows;
-    /// other OSes have no foreground-title API yet (see pointer.rs).
+    pub directed_gate: bool,
+    /// Hand mode (camera pointer) may be started by voice. The camera is only ever on while the mode is.
+    #[serde(default = "default_true")]
+    pub hand_mode: bool,
+    /// Hand mode is read-only: decisions are only drawn on the overlay and never reach the real mouse.
+    /// Off (default): arming with palm-fist-palm-fist is the confirmation and the cursor follows the hand.
+    /// Voice: "hand mouse preview" / "hand mouse live" (this session only).
     #[serde(default)]
-    pub pointer_excluded_apps: String,
-    /// Suppress the pointer while a fullscreen app (game/video) is in
-    /// the foreground. Default: true. Detection is Windows-only for now.
+    pub hand_mouse_preview: bool,
+    /// Debug: show the camera picture and skeleton in a small window. Off (default): nothing visible.
+    #[serde(default)]
+    pub hand_show_camera: bool,
+    /// Where the hand window gets camera frames: "auto" (track reader if available), "track", "rvfc".
+    #[serde(default = "default_hand_frame_source")]
+    pub hand_frame_source: String,
+    /// Record landmark numbers (no video) to hand_trace.jsonl for tuning.
+    #[serde(default)]
+    pub hand_trace: bool,
+    /// Start hand mode together with Ghost mode (ends with it). Default off.
+    #[serde(default)]
+    pub hand_with_ghost: bool,
+    /// A hand click just outside a control snaps to the nearest control. Default on.
     #[serde(default = "default_true")]
-    pub pointer_suppress_fullscreen: bool,
+    pub hand_snap: bool,
+    /// Touchpad-style gestures with 3 fingers: flick = next/previous tab, flick up = window switcher. Default on.
+    #[serde(default = "default_true")]
+    pub hand_gestures: bool,
+    /// 4 fingers together: virtual desktops, Task View, show desktop. Default off until the finger-spread
+    /// threshold has been checked on the user's own hand (see the `[HAND] pose ... spread=` log).
+    #[serde(default)]
+    pub hand_gestures_desktop: bool,
+    /// Pointer speed multiplier for hand mode. 0 (default) = follow the Windows pointer speed setting.
+    #[serde(default)]
+    pub hand_sensitivity: f64,
+    /// Ghost waves placement (ghost sessions reposition the orb window to
+    /// this rect — the waves own the visual then). Defaults = orb defaults.
+    #[serde(default)]
+    pub waves_horizontal_pct: f64,
+    #[serde(default = "default_waves_vertical_pct")]
+    pub waves_vertical_pct: f64,
+    #[serde(default = "default_waves_size")]
+    pub waves_size: u32,
+    /// Loading indicator placement (center-anchored fractions + logical px).
+    /// Defaults ≈ the historical top-right corner.
+    #[serde(default = "default_loading_horizontal_pct")]
+    pub loading_horizontal_pct: f64,
+    #[serde(default = "default_loading_vertical_pct")]
+    pub loading_vertical_pct: f64,
+    #[serde(default = "default_loading_size")]
+    pub loading_size: u32,
+    /// Narrated screen tour ("analyse my screen"): pointers + callouts synced
+    /// to TTS. Default true; false = legacy spatial/OCR chain only. Must live
+    /// in this struct — `save_settings` rewrites settings.json from it, so a
+    /// hand-added key outside the struct would be erased on the next save.
+    #[serde(default = "default_screen_tour")]
+    pub screen_tour: bool,
+    /// Log Whisper's per-segment confidence (`avg_logprob`, `no_speech_prob`) for every
+    /// command turn as `[STT-CONF]` lines (P0 measurement for docs/features/103). Default off:
+    /// it switches the Groq request to `verbose_json` (same model, larger response).
+    /// Must live in this struct or `save_settings` erases it.
+    #[serde(default)]
+    pub stt_log_confidence: bool,
+    /// Vision model for the screen tour (empty = built-in ladder:
+    /// gemini-3.8-flash → gemini-3.5-flash → gemini-3.5-flash-lite → 2.5).
+    #[serde(default)]
+    pub tour_model: String,
+    /// Daily Gemini vision request cap NEXUS enforces for itself (shared by
+    /// ghost clicks, spatial analysis and the tour). Google's real per-model
+    /// free limits are only visible in AI Studio (aistudio.google.com/rate-limit);
+    /// enter that figure here. Default 500.
+    #[serde(default = "default_gemini_vision_daily_limit")]
+    pub gemini_vision_daily_limit: u32,
+    /// Personality tone: "butler" (default — formal, "sir") or "friend"
+    /// (first-name, contractions, situational lightness, honest counsel).
+    /// Voice-switchable ("talk like a friend" / "be formal"). Must live
+    /// in this struct — `save_settings` rewrites settings.json from it.
+    #[serde(default = "default_persona_mode")]
+    pub persona_mode: String,
+    /// Command Hub theme: "dark" (default, opaque) or "light" (opaque).
+    /// Transparency is out (user directive) — both themes are solid.
+    /// Must live in this struct — `save_settings` rewrites settings.json.
+    #[serde(default = "default_theme_mode")]
+    pub theme_mode: String,
+    /// Memory Core (SQLite, ranked recall) on/off. Off = legacy JSON files
+    /// only. Must live in this struct — `save_settings` rewrites settings.json.
+    #[serde(default = "default_memcore")]
+    pub memcore: bool,
+    /// Swap locally known people's names for "Person A/B…" in text sent to
+    /// cloud models (and back in replies). Off by default.
+    #[serde(default)]
+    pub memcore_redact_names: bool,
+    /// Record which window the user is working in (30 s samples, local only,
+    /// 7-day ring) so NEXUS can say where they left off. Voice/Memory-page switch.
+    #[serde(default = "default_memcore")]
+    pub memcore_activity: bool,
+    /// Once-a-day spoken "where you left off" shortly after startup.
+    #[serde(default = "default_memcore")]
+    pub memcore_briefing: bool,
+    /// Timetable slot reminders ("It's time for DSA. Shall I start?").
+    #[serde(default = "default_memcore")]
+    pub memcore_timetable: bool,
+    /// Watch Gmail for important mail (exams, hackathons, GitHub, database
+    /// notices, deadlines) and read today's calendar. Runs only while a
+    /// Google account with the right access is connected.
+    #[serde(default = "default_memcore")]
+    pub memcore_mail: bool,
+    /// Read-only WhatsApp watcher (priority people). OFF until the
+    /// read-receipt check in docs/testing/whatsapp-read-receipt-test.md is done.
+    #[serde(default)]
+    pub memcore_whatsapp: bool,
+    /// Speak WhatsApp message text aloud. OFF by default: the voice service is
+    /// a cloud service and would receive the text (the sidebar card is local).
+    #[serde(default)]
+    pub memcore_whatsapp_speak: bool,
+    /// "Time to leave for ..." reminders from calendar + traffic + remembered home.
+    #[serde(default = "default_memcore")]
+    pub memcore_leave_by: bool,
+    /// Remember which apps/folders/browser windows are open so NEXUS can offer
+    /// to reopen them after a restart. Must live in this struct (save_settings rewrites the file).
+    #[serde(default = "default_memcore")]
+    pub memcore_session: bool,
+    /// Check the connections NEXUS relies on at startup and mention problems in the greeting.
+    #[serde(default = "default_memcore")]
+    pub memcore_health: bool,
+    /// Voice power commands ("shut down my laptop"). Kill switch.
+    #[serde(default = "default_memcore")]
+    pub power_commands: bool,
+    /// Default music player: "spotify" (default) or "apple_music".
+    #[serde(default = "default_music_player")]
+    pub default_music_player: String,
+    /// Extra unknown settings preserved across saves so frontend/plugins never get wiped.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
-fn default_true() -> bool {
+fn default_music_player() -> String {
+    "spotify".to_string()
+}
+
+fn default_memcore() -> bool {
     true
 }
 
-fn default_pointer_dwell_seconds() -> u32 {
-    6
+fn default_persona_mode() -> String {
+    "butler".to_string()
+}
+
+fn default_theme_mode() -> String {
+    "dark".to_string()
+}
+
+fn default_screen_tour() -> bool {
+    true
+}
+
+fn default_gemini_vision_daily_limit() -> u32 {
+    crate::vision::GEMINI_VISION_RPD
 }
 
 fn default_tts_provider() -> String {
-    "piper".to_string()
+    "kokoro".to_string()
 }
 
 fn default_tts_volume() -> u8 {
@@ -1631,7 +1901,7 @@ fn default_tts_volume() -> u8 {
 }
 
 fn default_edge_tts_voice() -> String {
-    "en-US-AvaNeural".to_string()
+    "en-GB-RyanNeural".to_string()
 }
 
 fn default_orb_horizontal_pct() -> f64 {
@@ -1639,7 +1909,7 @@ fn default_orb_horizontal_pct() -> f64 {
 }
 
 fn default_orb_vertical_pct() -> f64 {
-    1.0
+    0.0
 }
 
 fn default_orb_size() -> u32 {
@@ -1658,11 +1928,135 @@ fn default_mic_keep_alive() -> bool {
     true
 }
 
+fn default_tts_emotion() -> String {
+    "auto".to_string()
+}
+
+fn default_selected_voice() -> String {
+    crate::voice_catalog::DEFAULT_VOICE_KEY.to_string()
+}
+
+fn default_offline_voice_model() -> String {
+    crate::voice_catalog::FALLBACK_KOKORO_VOICE.to_string()
+}
+
+fn default_vision_provider() -> String {
+    "auto".to_string()
+}
+
+fn default_vision_race() -> String {
+    "sequential".to_string()
+}
+
+fn default_ghost_depth_ack() -> bool {
+    true
+}
+
+fn default_ghost_step_timeout_ms() -> u64 {
+    15000
+}
+
+fn default_ghost_turn_gap_ms() -> u64 {
+    1000
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_hand_frame_source() -> String {
+    "auto".to_string()
+}
+
+fn default_ghost_engagement_secs() -> u64 {
+    0
+}
+
+fn default_waves_vertical_pct() -> f64 {
+    0.0
+}
+
+fn default_waves_size() -> u32 {
+    200
+}
+
+fn default_loading_horizontal_pct() -> f64 {
+    0.95
+}
+
+fn default_loading_vertical_pct() -> f64 {
+    0.05
+}
+
+fn default_loading_size() -> u32 {
+    80
+}
+
+fn default_orb_color() -> String {
+    "#f2b859".to_string()
+}
+
+fn default_orb_position() -> String {
+    "top".to_string()
+}
+
+fn default_orb_capsule_style() -> String {
+    // Linux: the redesign's bare orb ringed by the audio-reactive aura.
+    #[cfg(target_os = "linux")]
+    return "aura".to_string();
+    #[cfg(not(target_os = "linux"))]
+    "classic".to_string()
+}
+
+fn default_orb_wakeup_mode() -> u32 {
+    1
+}
+
+fn default_orb_interior_genesis() -> u32 {
+    2
+}
+
+fn default_orb_scoop_width() -> u32 {
+    301
+}
+
+fn default_orb_scoop_height() -> u32 {
+    105
+}
+
+fn default_orb_wing_rim_opacity() -> u32 {
+    0
+}
+
+fn default_orb_base_rim_opacity() -> u32 {
+    25
+}
+
+fn default_orb_wing_glow_spread() -> u32 {
+    120
+}
+
+fn default_orb_stiffness() -> u32 {
+    103
+}
+
+fn default_orb_think_mode() -> u32 {
+    6
+}
+
+fn default_orb_speak_mode() -> u32 {
+    2
+}
+
+fn default_orb_listen_mode() -> u32 {
+    1
+}
+
 impl Default for NexusSettings {
     fn default() -> Self {
         Self {
             autostart: true,
-            hotkey: "Ctrl+Super+Space".to_string(),
+            hotkey: "Ctrl+Space".to_string(),
             auto_hide_delay: 8,
             wake_word_enabled: true,
             wake_phrase: "NEXUS".to_string(),
@@ -1676,25 +2070,84 @@ impl Default for NexusSettings {
                 .to_string(),
             user_id: String::new(),
             device_id: String::new(),
-            tts_voice: "en_US-amy-medium".to_string(),
+            tts_voice: "af_sky".to_string(),
             speech_rate: 1.15,
-            tts_provider: "piper".to_string(),
+            tts_provider: "kokoro".to_string(),
             tts_volume: 75,
             groq_api_key: String::new(),
             edge_tts_voice: "en-US-AvaNeural".to_string(),
+            selected_voice: default_selected_voice(),
+            offline_voice_model: default_offline_voice_model(),
             orb_horizontal_pct: 0.5,
-            orb_vertical_pct: 1.0,
+            orb_vertical_pct: 0.0,
             orb_size: 200,
+            orb_color: default_orb_color(),
+            orb_position: default_orb_position(),
+            orb_capsule_style: default_orb_capsule_style(),
+            orb_wakeup_mode: default_orb_wakeup_mode(),
+            orb_interior_genesis: default_orb_interior_genesis(),
+            orb_scoop_width: default_orb_scoop_width(),
+            orb_scoop_height: default_orb_scoop_height(),
+            orb_wing_rim_opacity: default_orb_wing_rim_opacity(),
+            orb_base_rim_opacity: default_orb_base_rim_opacity(),
+            orb_wing_glow_spread: default_orb_wing_glow_spread(),
+            orb_stiffness: default_orb_stiffness(),
+            orb_think_mode: default_orb_think_mode(),
+            orb_speak_mode: default_orb_speak_mode(),
+            orb_listen_mode: default_orb_listen_mode(),
             gemini_api_key: String::new(),
             cerebras_api_key: String::new(),
+            deepgram_api_key: String::new(),
+            routes_api_key: String::new(),
+            places_api_key: String::new(),
             moonshine_model: "medium_streaming".to_string(),
+            tts_emotion: "auto".to_string(),
+            vision_provider: "auto".to_string(),
+            vision_race: "sequential".to_string(),
             verify_wake: true,
             mic_keep_alive: true,
             telegram_chat_id: String::new(),
-            pointer_enabled: true,
-            pointer_dwell_seconds: 6,
-            pointer_excluded_apps: String::new(),
-            pointer_suppress_fullscreen: true,
+            ghost_depth_ack: true,
+            ghost_step_timeout_ms: 15000,
+            ghost_turn_gap_ms: 1000,
+            ghost_engagement_secs: 0,
+            directed_gate: true,
+            hand_mode: true,
+            hand_mouse_preview: false,
+            hand_frame_source: default_hand_frame_source(),
+            hand_show_camera: false,
+            hand_trace: false,
+            hand_with_ghost: false,
+            hand_snap: true,
+            hand_gestures: true,
+            hand_gestures_desktop: false,
+            hand_sensitivity: 0.0,
+            waves_horizontal_pct: 0.5,
+            waves_vertical_pct: 1.0,
+            waves_size: 200,
+            loading_horizontal_pct: 0.95,
+            loading_vertical_pct: 0.05,
+            loading_size: 80,
+            screen_tour: true,
+            stt_log_confidence: false,
+            tour_model: String::new(),
+            gemini_vision_daily_limit: default_gemini_vision_daily_limit(),
+            persona_mode: default_persona_mode(),
+            theme_mode: default_theme_mode(),
+            memcore: default_memcore(),
+            memcore_redact_names: false,
+            memcore_activity: default_memcore(),
+            memcore_briefing: default_memcore(),
+            memcore_timetable: default_memcore(),
+            memcore_mail: default_memcore(),
+            memcore_whatsapp: false,
+            memcore_whatsapp_speak: false,
+            memcore_leave_by: default_memcore(),
+            memcore_session: default_memcore(),
+            memcore_health: default_memcore(),
+            power_commands: default_memcore(),
+            default_music_player: default_music_player(),
+            extra: std::collections::HashMap::new(),
         }
     }
 }
@@ -1710,7 +2163,8 @@ pub struct TtsVoiceInfo {
     pub language: String,
 }
 
-/// IPC: List all available TTS voices (Edge TTS cloud + Piper local).
+/// IPC: List the cloud TTS voices (Edge TTS). The offline Kokoro voice follows the equipped persona
+/// (Feature 83), so it is not a separate picker entry.
 /// Returns a curated list of en-US voices. The full Edge TTS catalog has
 /// 400+ voices across 140+ locales — we surface the most useful en-US ones
 /// to keep the settings UI manageable.
@@ -1743,7 +2197,7 @@ pub fn list_tts_voices() -> Result<Vec<TtsVoiceInfo>, String> {
         ("en-US-SoniaNeural",      "Sonia",     "Female"),
     ];
 
-    let mut voices: Vec<TtsVoiceInfo> = edge_voices
+    let voices: Vec<TtsVoiceInfo> = edge_voices
         .iter()
         .map(|(id, name, gender)| TtsVoiceInfo {
             id: id.to_string(),
@@ -1753,15 +2207,6 @@ pub fn list_tts_voices() -> Result<Vec<TtsVoiceInfo>, String> {
             language: "en-US".to_string(),
         })
         .collect();
-
-    // Add local Piper voice (always available offline)
-    voices.push(TtsVoiceInfo {
-        id: "piper-amy".to_string(),
-        name: "Amy (Offline)".to_string(),
-        gender: "Female".to_string(),
-        provider: "piper".to_string(),
-        language: "en-US".to_string(),
-    });
 
     Ok(voices)
 }
@@ -1806,11 +2251,31 @@ pub fn get_settings<R: Runtime>(
 #[tauri::command]
 pub fn save_settings<R: Runtime>(
     app: tauri::AppHandle<R>,
-    settings: NexusSettings,
+    mut settings: NexusSettings,
 ) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("settings.json");
+    // API keys are managed by `api_keys::*`: an EMPTY key in the payload never
+    // wipes what is on disk (and a deleted key cannot be resurrected by a
+    // stale form state — delete clears the disk copy first).
+    let existing = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    settings.groq_api_key = crate::api_keys::merge_key(&existing, "groqApiKey", &settings.groq_api_key);
+    settings.gemini_api_key = crate::api_keys::merge_key(&existing, "geminiApiKey", &settings.gemini_api_key);
+    settings.cerebras_api_key = crate::api_keys::merge_key(&existing, "cerebrasApiKey", &settings.cerebras_api_key);
+    settings.deepgram_api_key = crate::api_keys::merge_key(&existing, "deepgramApiKey", &settings.deepgram_api_key);
+    settings.routes_api_key = crate::api_keys::merge_key(&existing, "routesApiKey", &settings.routes_api_key);
+    settings.places_api_key = crate::api_keys::merge_key(&existing, "placesApiKey", &settings.places_api_key);
+    normalize_voice_fields(&mut settings);
+    if !settings.edge_tts_voice.is_empty() {
+        settings.tts_voice = settings.edge_tts_voice.clone();
+        if settings.tts_provider.is_empty() || settings.tts_provider == "kokoro" {
+            settings.tts_provider = "edge".to_string();
+        }
+    }
     let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
 
@@ -1856,13 +2321,129 @@ pub fn save_settings<R: Runtime>(
         "deviceId": device_id,
     });
     std::fs::write(&config_path, config.to_string()).map_err(|e| e.to_string())?;
+    let _ = app.emit("settings:updated", &settings);
+    let _ = app.emit("orb:morphology_changed", serde_json::json!({
+        "think": settings.orb_think_mode,
+        "speak": settings.orb_speak_mode,
+        "listen": settings.orb_listen_mode,
+    }));
+    let _ = app.emit("orb:capsule_style", serde_json::json!({
+        "style": settings.orb_capsule_style,
+        "mode": settings.orb_wakeup_mode,
+        "genesis": settings.orb_interior_genesis,
+    }));
     tracing::info!("settings saved to {:?}", path);
     Ok(())
+}
+
+/// One fact, many fields: the online voice IS the persona. When `edgeTtsVoice` is one of the catalog voices,
+/// `selectedVoice`, `ttsVoice` and `offlineVoiceModel` are derived from it, so a window holding a stale copy of
+/// the other fields can no longer write a mixed record (2026-10-15 23:02:44: the hub saved `bm_george` back over
+/// the freshly equipped `af_heart`). A custom (non-catalog) voice is left exactly as the user set it.
+pub fn normalize_voice_fields(s: &mut NexusSettings) {
+    if let Some(p) = crate::voice_catalog::find_by_cloud_id(&s.edge_tts_voice) {
+        s.selected_voice = p.key.to_string();
+        s.tts_voice = p.cloud_id.to_string();
+        s.offline_voice_model = p.kokoro_voice.to_string();
+    }
+}
+
+/// Merge `patch` (camelCase keys) into the current settings and validate the result as a whole.
+pub fn apply_settings_patch(
+    current: &NexusSettings,
+    patch: &serde_json::Map<String, serde_json::Value>,
+) -> Result<NexusSettings, String> {
+    let mut v = serde_json::to_value(current).map_err(|e| e.to_string())?;
+    let obj = v.as_object_mut().ok_or_else(|| "settings are not an object".to_string())?;
+    for (k, val) in patch {
+        obj.insert(k.clone(), val.clone());
+    }
+    serde_json::from_value(v).map_err(|e| format!("invalid settings patch: {e}"))
+}
+
+/// IPC: change only the given settings (e.g. `{ "themeMode": "light" }`). Unlike `save_settings`, which replaces
+/// the whole file from the caller's possibly stale snapshot, this starts from the CURRENT settings, so a toggle
+/// in one window can never revert something another window or an IPC changed meanwhile.
+#[tauri::command]
+pub fn settings_patch<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    patch: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let current = get_settings(app.clone())?;
+    let merged = apply_settings_patch(&current, &patch)?;
+    save_settings(app, merged)
+}
+
+#[cfg(test)]
+mod settings_voice_tests {
+    use super::*;
+
+    fn with_voice(edge: &str, selected: &str, offline: &str) -> NexusSettings {
+        let mut s = NexusSettings::default();
+        s.edge_tts_voice = edge.to_string();
+        s.selected_voice = selected.to_string();
+        s.offline_voice_model = offline.to_string();
+        s
+    }
+
+    #[test]
+    fn the_2026_10_15_stale_offline_voice_is_repaired_from_the_online_voice() {
+        // Hub equipped NEXUS (Ava), then saved a snapshot that still held JARVIS's twin.
+        let mut s = with_voice("en-US-AvaNeural", "nexus", "bm_george");
+        normalize_voice_fields(&mut s);
+        assert_eq!(s.offline_voice_model, "af_heart");
+        assert_eq!(s.selected_voice, "nexus");
+        assert_eq!(s.tts_voice, "en-US-AvaNeural");
+    }
+
+    #[test]
+    fn a_stale_persona_key_follows_the_online_voice_not_the_other_way_round() {
+        let mut s = with_voice("en-GB-RyanNeural", "nexus", "af_heart");
+        normalize_voice_fields(&mut s);
+        assert_eq!((s.selected_voice.as_str(), s.offline_voice_model.as_str()), ("jarvis", "bm_george"));
+    }
+
+    #[test]
+    fn a_custom_voice_is_never_overwritten() {
+        let mut s = with_voice("en-IN-NeerjaNeural", "nexus", "af_heart");
+        s.tts_voice = "en-IN-NeerjaNeural".to_string();
+        normalize_voice_fields(&mut s);
+        assert_eq!(s.selected_voice, "nexus");
+        assert_eq!(s.tts_voice, "en-IN-NeerjaNeural");
+        assert_eq!(s.edge_tts_voice, "en-IN-NeerjaNeural");
+    }
+
+    #[test]
+    fn a_patch_changes_only_the_named_fields() {
+        let mut cur = NexusSettings::default();
+        cur.theme_mode = "dark".to_string();
+        cur.edge_tts_voice = "en-US-AvaNeural".to_string();
+        cur.selected_voice = "nexus".to_string();
+        let patch: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"themeMode":"light"}"#).unwrap();
+        let out = apply_settings_patch(&cur, &patch).unwrap();
+        assert_eq!(out.theme_mode, "light");
+        assert_eq!(out.edge_tts_voice, "en-US-AvaNeural", "a theme toggle must not touch the voice");
+        assert_eq!(out.selected_voice, "nexus");
+    }
+
+    #[test]
+    fn a_patch_with_the_wrong_type_is_rejected_whole() {
+        let cur = NexusSettings::default();
+        let patch: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"themeMode":42}"#).unwrap();
+        assert!(apply_settings_patch(&cur, &patch).is_err());
+    }
 }
 
 /// Read the Groq API key from settings.json (non-IPC helper for stt.rs).
 /// Returns empty string if no key is set or settings file doesn't exist.
 pub fn read_groq_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    if let Some(k) = crate::auth_vault::get_api_key("groq") {
+        if !k.is_empty() {
+            return k;
+        }
+    }
     let dir = app.path().app_data_dir();
     let Ok(dir) = dir else { return String::new(); };
     let path = dir.join("settings.json");
@@ -1892,6 +2473,54 @@ pub fn read_local_stt_only<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool
         .unwrap_or(false)
 }
 
+/// Read the sttLogConfidence flag (P0 measurement): log Whisper confidence per command turn.
+pub fn read_stt_log_confidence<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return false; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
+    json.get("sttLogConfidence").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// Read an API key by service name: keychain first, settings.json fallback.
+/// Used by ghost.rs (vision keys) and the health panel. `service` is the
+/// vault service id ("groq" | "gemini" | "cerebras").
+pub fn read_api_key<R: tauri::Runtime>(app: &tauri::AppHandle<R>, service: &str) -> String {
+    if let Some(k) = crate::auth_vault::get_api_key(service) {
+        if !k.is_empty() {
+            return k;
+        }
+    }
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return String::new(); };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else {
+        return String::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return String::new();
+    };
+    let camel = match service {
+        "gemini" => "geminiApiKey",
+        "cerebras" => "cerebrasApiKey",
+        "deepgram" => "deepgramApiKey",
+        "google_maps" => "routesApiKey",
+        "google_places" => "placesApiKey",
+        _ => "groqApiKey",
+    };
+    let snake = match service {
+        "gemini" => "gemini_api_key",
+        "cerebras" => "cerebras_api_key",
+        "deepgram" => "deepgram_api_key",
+        "google_maps" => "routes_api_key",
+        "google_places" => "places_api_key",
+        _ => "groq_api_key",
+    };
+    json.get(camel)
+        .or_else(|| json.get(snake))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Read the verifyWake flag from settings.json (non-IPC helper for wakeword_oww.rs).
 /// Stage-2 verifier: cross-check stage-1 acoustic candidates with STT before
 /// firing the wake. Defaults to TRUE (fail-open default: verification on).
@@ -1906,6 +2535,43 @@ pub fn read_verify_wake<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
         .or_else(|| json.get("verify_wake"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true)
+}
+
+/// Read the vadSilero flag from settings.json (non-IPC helper for wakeword_oww.rs).
+/// Neural (Silero v4) voice gate for the STT capture loop. Defaults to FALSE — the RMS gate is
+/// the proven path; flip to true only after the evaluation in docs/research/jarvis-landscape/07.
+pub fn read_vad_silero<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return false; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
+    json.get("vadSilero")
+        .or_else(|| json.get("vad_silero"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Read the smartTurn flag from settings.json (non-IPC helper for wakeword_oww.rs).
+/// Smart Turn v3.2 end-of-turn model for the STT capture loop. Defaults to FALSE (unproven).
+pub fn read_smart_turn<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return false; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
+    json.get("smartTurn")
+        .or_else(|| json.get("smart_turn"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Read turnEagerness ("low" | "medium" | "high") from settings.json. Unknown -> "medium".
+pub fn read_turn_eagerness<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let Ok(dir) = app.path().app_data_dir() else { return "medium".into(); };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return "medium".into(); };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return "medium".into(); };
+    json.get("turnEagerness")
+        .or_else(|| json.get("turn_eagerness"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("medium")
+        .to_string()
 }
 
 /// Read the micKeepAlive flag from settings.json (non-IPC helper for wakeword_oww.rs).
@@ -1923,9 +2589,28 @@ pub fn read_mic_keep_alive<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool
         .unwrap_or(true)
 }
 
+/// Read the selected iconic voice persona key from settings.json
+/// (Feature 83 catalog key, e.g. "jarvis"). Defaults to "nexus".
+pub fn read_selected_voice<R: Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return default_selected_voice() };
+    let path = dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else { return default_selected_voice() };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return default_selected_voice() };
+    let key = json.get("selectedVoice")
+        .or_else(|| json.get("selected_voice"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if crate::voice_catalog::find_by_key(key).is_some() {
+        key.to_string()
+    } else {
+        default_selected_voice()
+    }
+}
+
 /// Read the edge-tts voice from settings.json (non-IPC helper for tts.rs).
 /// Returns default voice if not set.
-pub fn read_edge_tts_voice(app: &tauri::AppHandle) -> String {
+pub fn read_edge_tts_voice<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
     let dir = app.path().app_data_dir();
     let Ok(dir) = dir else { return "en-US-AvaNeural".to_string(); };
     let path = dir.join("settings.json");
@@ -1965,7 +2650,7 @@ pub fn set_autostart<R: Runtime>(
                 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name;
                 $action = New-ScheduledTaskAction -Execute $exe -Argument '--background';
                 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user;
-                $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0);
+                $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -Priority 4 -ExecutionTimeLimit (New-TimeSpan -Seconds 0);
                 $result = Register-ScheduledTask -TaskName 'NEXUS' -Action $action -Trigger $trigger -Settings $settings -User $user -Force;
                 if ($result) {{ Write-Output 'NEXUS_TASK_OK' }} else {{ Write-Output 'NEXUS_TASK_FAIL' }}"#,
                 exe_path
@@ -2213,7 +2898,799 @@ pub fn mic_self_test() -> Result<crate::wakeword_oww::MicSelfTestReport, String>
 /// no getUserMedia, no baton pass. This fixes the Intel SST driver issue
 /// where getUserMedia returns silence but cpal is still working.
 #[tauri::command]
-pub fn start_stt_capture() -> Result<(), String> {
-    crate::wakeword_oww::start_stt_capture();
+pub fn start_stt_capture(origin: Option<String>) -> Result<(), String> {
+    // `origin: "hot_mic"` = the ghost hot-mic loop re-opened the mic (Phase 8 gate applies);
+    // anything else (confirm window, clarification, follow-up question) is an explicit turn.
+    let origin = crate::directed::Origin::parse(origin.as_deref().unwrap_or("direct"));
+    crate::wakeword_oww::start_stt_capture_with_origin(origin);
     Ok(())
 }
+
+/// Abort an in-flight Rust-side STT capture (hotkey second-press cancel).
+/// Returns whether voice was already underway + capture length so the
+/// frontend can decide: hide the orb (no speech) vs let the turn finish.
+#[tauri::command]
+pub fn stop_stt_capture() -> Result<crate::wakeword_oww::SttAbortResult, String> {
+    Ok(crate::wakeword_oww::abort_stt_capture())
+}
+
+/// Non-destructive voice check (no-input timeout): true once real voice
+/// chunks landed. No state touched — slow-starter turns stay intact.
+#[tauri::command]
+pub fn stt_capture_had_speech() -> Result<bool, String> {
+    Ok(crate::wakeword_oww::stt_capture_had_speech())
+}
+
+// ─── Ghost FIFO queue readers (loose settings.json parse) ───────────────
+
+/// Read the ghostDepthAck flag (ghost FIFO queue depth-ACK, D5/D6).
+pub fn read_ghost_depth_ack<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return true; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return true; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return true; };
+    json.get("ghostDepthAck")
+        .or_else(|| json.get("ghost_depth_ack"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
+/// Read the persona tone mode ("butler" default, "friend" opt-in).
+/// Unknown values fall back to butler — tone must never break on a typo.
+pub fn read_persona_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return default_persona_mode() };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else {
+        return default_persona_mode();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return default_persona_mode();
+    };
+    match json
+        .get("personaMode")
+        .or_else(|| json.get("persona_mode"))
+        .and_then(|v| v.as_str())
+    {
+        Some("friend") => "friend".to_string(),
+        _ => default_persona_mode(),
+    }
+}
+
+/// Voice-switch the persona tone (read-modify-write — unknown fields survive).
+/// Returns the stored mode ("friend" or "butler").
+pub fn set_persona_mode<R: tauri::Runtime>(app: &tauri::AppHandle<R>, mode: &str) -> String {
+    let stored = if mode == "friend" { "friend" } else { "butler" }.to_string();
+    if let Ok(dir) = app.path().app_data_dir() {
+        let path = dir.join("settings.json");
+        let mut json: serde_json::Value =
+            std::fs::read_to_string(&path).ok().and_then(|c| serde_json::from_str(&c).ok()).unwrap_or(
+                serde_json::json!({}),
+            );
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert("personaMode".to_string(), serde_json::Value::String(stored.clone()));
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap_or_default());
+        }
+    }
+    stored
+}
+
+/// Read the ghostStepTimeoutMs per-step watchdog value (D7). Floor 1000ms.
+pub fn read_ghost_step_timeout_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u64 {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return 15000; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return 15000; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return 15000; };
+    json.get("ghostStepTimeoutMs")
+        .or_else(|| json.get("ghost_step_timeout_ms"))
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v >= 1000)
+        .unwrap_or(15000)
+}
+
+/// Read the ghostTurnGapMs inter-step gap τ (D4). Ceiling 5000ms.
+pub fn read_ghost_turn_gap_ms<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> u64 {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return 1000; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return 1000; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return 1000; };
+    json.get("ghostTurnGapMs")
+        .or_else(|| json.get("ghost_turn_gap_ms"))
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v <= 5000)
+        .unwrap_or(1000)
+}
+
+/// Read the speakerVerification flag from settings.json (wakeword_oww.rs).
+/// Defaults to FALSE. Set `"speakerVerification": true` to enable.
+pub fn read_speaker_verification<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
+    let dir = app.path().app_data_dir();
+    let Ok(dir) = dir else { return false; };
+    let Ok(content) = std::fs::read_to_string(dir.join("settings.json")) else { return false; };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else { return false; };
+    json.get("speakerVerification")
+        .or_else(|| json.get("speaker_verification"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+// ─── Restored IPC commands (clobbered by a stale commands.rs rewrite) ───
+
+/// IPC: Temporary ghost-pipeline tracer (p0–p4 stamps from recorder.ts).
+/// Prints to the unified console so a silent death downstream is provable.
+#[tauri::command]
+pub fn debug_trace(msg: String) -> Result<(), String> {
+    println!("[TRACE] {msg}");
+    tracing::info!("debug_trace: {msg}");
+    Ok(())
+}
+
+/// Checked emit (log-completeness P3): turn-critical events log their
+/// emission at debug level (file-complete for cross-check grep,
+/// console-quiet by default) so a missing frontend reaction is
+/// distinguishable from a never-sent event. Backend emit failures
+/// surface as warn. Use for turn-critical events only — never for
+/// per-frame hot paths (audio:level etc).
+pub fn emit_logged<R: Runtime, S: serde::Serialize + Clone>(app: &AppHandle<R>, event: &str, payload: S) {
+    tracing::debug!("emit: {event}");
+    if let Err(e) = app.emit(event, payload) {
+        tracing::warn!("emit: '{event}' backend failure ({e})");
+    }
+}
+
+// ─── Google multi-account commands ──────────────────────────────────────
+
+/// IPC: Retrieve all connected Google account profiles.
+#[tauri::command]
+pub fn google_get_accounts() -> Vec<crate::google::types::GoogleAccountProfile> {
+    crate::google::accounts::list_accounts()
+}
+
+/// IPC: Trigger direct RFC 8252 loopback OAuth sign-in to connect a Google account.
+#[tauri::command]
+pub async fn google_connect_account() -> Result<crate::google::types::GoogleAccountProfile, String> {
+    crate::google::accounts::connect_account().await
+}
+
+/// IPC: Progressive re-consent for phone + address (settings "Add phone &
+/// address"). Opens the same loopback flow with 2 extra sensitive scopes
+/// and merges the result into the existing profile. Absence is normal.
+#[tauri::command]
+pub async fn google_connect_extended() -> Result<crate::google::types::GoogleAccountProfile, String> {
+    crate::google::accounts::connect_extended().await
+}
+
+/// IPC: Promote an account to primary (avatar badge + default token).
+#[tauri::command]
+pub fn google_set_primary_account(email: String) -> Result<(), String> {
+    crate::google::accounts::set_primary_account(&email)
+}
+
+/// IPC: Disconnect a Google account (registry + keyring cleanup).
+#[tauri::command]
+pub fn google_disconnect_account(email: String) -> Result<(), String> {
+    crate::google::accounts::disconnect_account(&email)
+}
+
+/// IPC: Seed identity from the setup installer (Worker-OAuth connect).
+/// Worker-held tokens must NEVER enter the engine registry — this fills
+/// user.json gaps only (name/email/photo), never overwrites confirmed data.
+#[tauri::command]
+pub fn memory_seed_setup_identity<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    name: Option<String>,
+    email: Option<String>,
+    picture: Option<String>,
+) -> Result<bool, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir: {e}"))?;
+    Ok(crate::memory::seed_setup_identity(
+        &dir,
+        name.as_deref(),
+        email.as_deref(),
+        picture.as_deref(),
+    ))
+}
+
+/// IPC: Save custom developer Google OAuth credentials (override built-ins).
+#[tauri::command]
+pub fn google_save_custom_credentials(
+    client_id: String,
+    client_secret: Option<String>,
+) -> Result<(), String> {
+    crate::google::accounts::save_custom_credentials(&client_id, client_secret.as_deref())
+}
+
+/// IPC: Can Google sign-in start? (Client ID + Secret present and well-formed;
+/// never returns the secret.)
+#[tauri::command]
+pub fn google_credentials_status() -> crate::google::oauth::CredentialsStatus {
+    crate::google::accounts::credentials_status()
+}
+
+// ─── Memory / diary / webhook / improvement / health / settings IO ──────
+
+/// IPC: Recall stored personal memories ("what is my X" support).
+#[tauri::command]
+pub fn memory_recall<R: Runtime>(app: AppHandle<R>, query: String) -> Vec<(String, String)> {
+    let Ok(dir) = app.path().app_data_dir() else { return vec![] };
+    crate::memory::recall(&dir, &query)
+}
+
+/// IPC: Memory Core status (enabled, encrypted at rest, counts, egress).
+#[tauri::command]
+pub fn memcore_status<R: Runtime>(app: AppHandle<R>) -> Result<crate::memcore::Status, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::status(&dir))
+}
+
+/// IPC: How long to keep the mic open for the answer to a question NEXUS
+/// just asked ("Shall I start?"). `None` = no question is waiting.
+#[tauri::command]
+pub fn offer_pending() -> Option<u64> {
+    crate::memcore::offer::listen_window_ms()
+}
+
+/// One filed important email for the Memory page.
+#[derive(serde::Serialize)]
+pub struct MailRowOut {
+    pub key: String,
+    #[serde(flatten)]
+    pub mail: crate::memcore::mailtriage::StoredMail,
+}
+
+/// IPC: Important emails the inbox watcher filed (7 days, newest first).
+#[tauri::command]
+pub fn memcore_mail_list<R: Runtime>(app: AppHandle<R>) -> Result<Vec<MailRowOut>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let rows = crate::memcore::with_store(&dir, |s| {
+        s.recent(crate::memcore::store::Tier::Mail, 60)
+            .into_iter()
+            .filter_map(|h| {
+                serde_json::from_str::<crate::memcore::mailtriage::StoredMail>(&h.value)
+                    .ok()
+                    .map(|mail| MailRowOut { key: h.key, mail })
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    Ok(rows)
+}
+
+/// IPC: Stop alerts from one sender (stored as a visible, forgettable fact).
+#[tauri::command]
+pub fn memcore_mail_mute<R: Runtime>(app: AppHandle<R>, email: String) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    Ok(crate::memcore::with_store(&dir, |s| crate::memcore::mailwatch::mute_sender(s, &email, now)).unwrap_or(false))
+}
+
+
+/// One learned WhatsApp person for the Memory page.
+#[derive(serde::Serialize)]
+pub struct PersonOut {
+    pub jid: String,
+    pub name: String,
+    pub score: u8,
+    pub why: String,
+    pub vip: bool,
+    pub muted: bool,
+}
+
+/// IPC: People NEXUS has learned from WhatsApp patterns (best first). Counts
+/// and timestamps only — no message text is kept for this list.
+#[tauri::command]
+pub fn memcore_people<R: Runtime>(app: AppHandle<R>) -> Result<Vec<PersonOut>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    Ok(crate::memcore::with_store(&dir, |s| {
+        crate::memcore::people::ranked(&crate::memcore::people::load_all(s), now)
+            .into_iter()
+            .take(40)
+            .map(|(p, sc)| PersonOut { jid: p.jid, name: p.name, score: sc.value, why: sc.why, vip: p.vip, muted: p.muted })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default())
+}
+
+/// IPC: Pin (VIP) or mute a learned person. `kind` = "vip" | "mute".
+#[tauri::command]
+pub fn memcore_person_flag<R: Runtime>(app: AppHandle<R>, jid: String, kind: String, on: bool) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    let flag = match kind.as_str() {
+        "vip" => crate::memcore::wa::PersonFlag::Vip,
+        "mute" => crate::memcore::wa::PersonFlag::Mute,
+        _ => return Err("kind must be vip or mute".into()),
+    };
+    Ok(crate::memcore::with_store(&dir, |s| match crate::memcore::people::get(s, &jid) {
+        Some(p) => matches!(crate::memcore::wa::set_flag(s, &p.name, flag, on, now), crate::memcore::wa::FlagOutcome::Done(_)) || {
+            // Two people can share a name: fall back to the exact id.
+            let mut p = p;
+            match flag {
+                crate::memcore::wa::PersonFlag::Vip => {
+                    p.vip = on;
+                    if on { p.muted = false; }
+                }
+                crate::memcore::wa::PersonFlag::Mute => {
+                    p.muted = on;
+                    if on { p.vip = false; }
+                }
+            }
+            crate::memcore::people::save_user_choice(s, &p, now);
+            true
+        },
+        None => false,
+    })
+    .unwrap_or(false))
+}
+
+/// IPC: Check the WhatsApp bridge (running? paired? list format understood?
+/// which receipt/presence tools does it offer — NEXUS refuses to call them).
+#[tauri::command]
+pub async fn whatsapp_selftest() -> crate::memcore::wa::SelfTest {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    crate::memcore::wa::selftest(&client).await
+}
+
+/// Parse a spoken/IPC travel mode ("driving" | "walking" | "bicycling" | "transit"); default driving.
+pub fn parse_travel_mode(mode: Option<&str>) -> crate::google::types::TravelMode {
+    use crate::google::types::TravelMode;
+    match mode.map(|m| m.trim().to_lowercase()).as_deref() {
+        Some("walking") | Some("walk") => TravelMode::Walking,
+        Some("bicycling") | Some("cycling") | Some("bike") => TravelMode::Bicycling,
+        Some("transit") | Some("bus") | Some("train") => TravelMode::Transit,
+        _ => TravelMode::Driving,
+    }
+}
+
+/// Open the real Google Maps app (directions) in its own window, sized and
+/// placed exactly like the Architecture Mapper (960 wide, centered, y = 40).
+pub fn open_maps<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    destination: &str,
+    origin: Option<&str>,
+    mode: crate::google::types::TravelMode,
+) -> Result<(), String> {
+    if destination.trim().is_empty() {
+        return Err("no destination".into());
+    }
+    let url = crate::google::maps::MapsService::build_directions_url(origin, destination, mode);
+    open_maps_url(app, &url)
+}
+
+/// Open any Google Maps https URL in the Architecture-Mapper-sized window.
+pub fn open_maps_url<R: Runtime>(app: &tauri::AppHandle<R>, url: &str) -> Result<(), String> {
+    let (mw, mh) = match app.primary_monitor() {
+        Ok(Some(m)) => (m.size().width as f64 / m.scale_factor(), m.size().height as f64 / m.scale_factor()),
+        _ => (1920.0, 1080.0),
+    };
+    let geom = sidebar_geometry("maps", None, mw, mh);
+    crate::dyn_windows::open_external_window(app, "maps", url, "Google Maps", geom)
+}
+
+/// IPC: open Google Maps directions to `destination` (optionally from `origin`).
+#[tauri::command]
+pub async fn open_maps_window<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    destination: String,
+    origin: Option<String>,
+    mode: Option<String>,
+) -> Result<(), String> {
+    open_maps(&app, &destination, origin.as_deref(), parse_travel_mode(mode.as_deref()))
+}
+
+/// IPC: The saved timetable.
+#[tauri::command]
+pub fn memcore_timetable<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore::timetable::Slot>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::with_store(&dir, crate::memcore::timetable::load_slots).unwrap_or_default())
+}
+
+/// IPC: Remove one timetable slot.
+#[tauri::command]
+pub fn memcore_timetable_delete<R: Runtime>(app: AppHandle<R>, id: String) -> Result<bool, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    Ok(crate::memcore::with_store(&dir, |s| crate::memcore::timetable::delete_slot(s, &id, now)).unwrap_or(false))
+}
+
+/// IPC: Erase the recorded activity history (resume points) only.
+#[tauri::command]
+pub fn memcore_clear_activity<R: Runtime>(app: AppHandle<R>) -> Result<usize, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::clear_activity(&dir))
+}
+
+/// IPC: Everything NEXUS remembers, with provenance ("what do you remember").
+#[tauri::command]
+pub fn memcore_list<R: Runtime>(app: AppHandle<R>) -> Result<Vec<crate::memcore::store::Row>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::list_rows(&dir, 500))
+}
+
+/// IPC: The last 7 days of what was sent to cloud models.
+#[tauri::command]
+pub fn memcore_egress_log<R: Runtime>(
+    app: AppHandle<R>,
+    limit: Option<usize>,
+) -> Result<Vec<crate::memcore::store::EgressEntry>, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::memcore::egress_log(&dir, limit.unwrap_or(50).min(200)))
+}
+
+/// IPC: Forget a stored memory key.
+#[tauri::command]
+pub fn memory_forget<R: Runtime>(app: AppHandle<R>, key: String) -> bool {
+    let Ok(dir) = app.path().app_data_dir() else { return false };
+    crate::memory::forget(&dir, &key)
+}
+
+/// IPC: Diary rollup for UI — recent events + a one-line summary label.
+#[tauri::command]
+pub fn diary_summary<R: Runtime>(app: AppHandle<R>) -> Result<serde_json::Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let events = crate::diary::recent_events(&dir, 50);
+    let label = crate::diary::rollup_label(&events, std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64);
+    Ok(serde_json::json!({ "label": label, "events": events }))
+}
+
+/// IPC: Current webhook bearer token (Connections tab display).
+#[tauri::command]
+pub fn webhook_token() -> String {
+    crate::webhook::webhook_token()
+}
+
+/// IPC: Rotate the webhook bearer token; returns the new one.
+#[tauri::command]
+pub fn webhook_rotate_token() -> String {
+    crate::webhook::rotate_webhook_token()
+}
+
+/// IPC: Edge-case miner report (miss/failure clusters → suggestions).
+#[tauri::command]
+pub fn improvement_report<R: Runtime>(app: AppHandle<R>) -> Result<serde_json::Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let clusters = crate::improve::run_miner(&dir);
+    Ok(serde_json::json!({ "suggestions": crate::improve::top_suggestions(&clusters, 20) }))
+}
+
+/// IPC: Ghost vision provider daily-quota counters (Accounts tab UI).
+#[tauri::command]
+pub fn vision_quota_status<R: Runtime>(app: AppHandle<R>) -> Result<serde_json::Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(crate::vision::quota_status(&dir))
+}
+
+/// IPC: Vision key presence + Gemini quota in one call (Feature 83 P5 —
+/// drives the Gemini card status pill; presence only, never key values).
+#[tauri::command]
+pub fn vision_key_status<R: Runtime>(app: AppHandle<R>) -> Result<serde_json::Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let quota = crate::vision::quota_status(&dir);
+    Ok(serde_json::json!({
+        "gemini_present": !read_api_key(&app, "gemini").is_empty(),
+        "groq_present": !read_api_key(&app, "groq").is_empty(),
+        "gemini_used": quota.get("gemini").and_then(|g| g.get("used")),
+        "gemini_limit": quota.get("gemini").and_then(|g| g.get("limit")),
+    }))
+}
+
+/// IPC: Validate the stored Gemini key with a quota-free models/list call
+/// (Feature 83 P5 — the hub "Test" button; retrieval costs no quota).
+#[tauri::command]
+pub async fn vision_test_key<R: Runtime>(app: AppHandle<R>) -> Result<serde_json::Value, String> {
+    let key = read_api_key(&app, "gemini");
+    if key.is_empty() {
+        return Ok(serde_json::json!({ "ok": false, "detail": "no-key" }));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+    match client
+        .get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1")
+        .header("x-goog-api-key", &key)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            Ok(serde_json::json!({ "ok": true, "detail": "valid" }))
+        }
+        Ok(resp) if resp.status().as_u16() == 429 => {
+            Ok(serde_json::json!({ "ok": false, "detail": "quota-exhausted" }))
+        }
+        Ok(_) => Ok(serde_json::json!({ "ok": false, "detail": "rejected" })),
+        Err(_) => Ok(serde_json::json!({ "ok": false, "detail": "network-error" })),
+    }
+}
+
+/// IPC: Runtime health snapshot (Connections tab System Status panel).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthStatus {
+    pub memory_mb: u64,
+    pub uptime_sec: u64,
+    pub stt_port: bool,
+    pub nlu_port: bool,
+    pub worker_reachable: bool,
+    pub groq_key: bool,
+    pub gemini_key: bool,
+}
+
+#[tauri::command]
+pub async fn get_health_status<R: Runtime>(app: AppHandle<R>) -> HealthStatus {
+    let memory_mb = process_memory_mb();
+    let uptime_sec = BOOT_INSTANT
+        .get()
+        .map(|b| b.elapsed().as_secs())
+        .unwrap_or(0);
+    let stt_port = crate::lazy_stt::is_stt_responsive();
+    // In-process model now (nlu_local.rs) — "responsive" means "loaded",
+    // not "sidecar port open". First call may load from disk, so run it
+    // off the async executor thread like any other blocking I/O here.
+    let nlu_port = tokio::task::spawn_blocking(crate::nlu_local::is_loaded)
+        .await
+        .unwrap_or(false);
+    let worker_reachable = crate::tts_network::check_network().await;
+    let groq_key = !read_groq_api_key(&app).is_empty() || !read_api_key(&app, "groq").is_empty();
+    let gemini_key = !read_api_key(&app, "gemini").is_empty();
+    HealthStatus {
+        memory_mb,
+        uptime_sec,
+        stt_port,
+        nlu_port,
+        worker_reachable,
+        groq_key,
+        gemini_key,
+    }
+}
+
+static BOOT_INSTANT: once_cell::sync::OnceCell<std::time::Instant> = once_cell::sync::OnceCell::new();
+
+/// Record boot time (called from lib.rs setup) for the health panel.
+pub fn note_boot() {
+    let _ = BOOT_INSTANT.set(std::time::Instant::now());
+}
+
+/// Best-effort process working-set via sysinfo (matches app_registry usage).
+/// All failures map to 0 and the UI just shows "—".
+fn process_memory_mb() -> u64 {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    let pid = std::process::id();
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+        true,
+        ProcessRefreshKind::new().with_memory(),
+    );
+    sys.process(sysinfo::Pid::from_u32(pid))
+        .map(|p| p.memory() / (1024 * 1024))
+        .unwrap_or(0)
+}
+
+/// IPC: Export settings (secrets stay in the OS keychain — never in the file).
+#[tauri::command]
+pub fn export_settings<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let path = dir.join("settings.json");
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
+    let mut json: serde_json::Value =
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}));
+    // Secrets live in the keychain — strip any legacy disk copies.
+    for key in ["groqApiKey", "geminiApiKey", "cerebrasApiKey", "deepgramApiKey", "routesApiKey", "placesApiKey"] {
+        json[key] = serde_json::json!("");
+    }
+    serde_json::to_string_pretty(&json).map_err(|e| e.to_string())
+}
+
+/// IPC: Import settings from a JSON string (writes settings.json + keychain).
+#[tauri::command]
+pub fn import_settings<R: Runtime>(app: AppHandle<R>, json_str: String) -> Result<(), String> {
+    let json: serde_json::Value =
+        serde_json::from_str(&json_str).map_err(|e| format!("invalid settings JSON: {e}"))?;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("settings.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    // Heal API keys into the OS keychain (best-effort).
+    if let Some(k) = json.get("groqApiKey").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            crate::auth_vault::set_api_key("groq", k);
+        }
+    }
+    if let Some(k) = json.get("geminiApiKey").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            crate::auth_vault::set_api_key("gemini", k);
+        }
+    }
+    if let Some(k) = json.get("cerebrasApiKey").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            crate::auth_vault::set_api_key("cerebras", k);
+        }
+    }
+    if let Some(k) = json.get("deepgramApiKey").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            crate::auth_vault::set_api_key("deepgram", k);
+        }
+    }
+    if let Some(k) = json.get("routesApiKey").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            crate::auth_vault::set_api_key("google_maps", k);
+        }
+    }
+    if let Some(k) = json.get("placesApiKey").and_then(|v| v.as_str()) {
+        if !k.is_empty() {
+            crate::auth_vault::set_api_key("google_places", k);
+        }
+    }
+    Ok(())
+}
+
+// ─── Unified sidebar geometry tests ─────────────────────────────────
+
+#[cfg(test)]
+mod sidebar_geometry_tests {
+    use super::sidebar_geometry;
+
+    #[test]
+    fn assistant_defaults_to_right_dock() {
+        // 1920x1080: x = 1920 - 520 - 10 = 1390, y = 20,
+        // h = min(1040, 1080-40) = 1040
+        let (x, y, w, h) = sidebar_geometry("assistant", None, 1920.0, 1080.0);
+        assert_eq!((x, y, w, h), (1390.0, 20.0, 520.0, 1040.0));
+    }
+
+    #[test]
+    fn assistant_left_dock_mirrors() {
+        let (x, y, w, h) = sidebar_geometry("assistant", Some("left"), 1920.0, 1080.0);
+        assert_eq!((x, y, w, h), (10.0, 20.0, 520.0, 1040.0));
+    }
+
+    #[test]
+    fn assistant_center_float() {
+        // center: x = (1920-520)/2 = 700, y = (1080-1040)/2 = 20
+        let (x, y, w, h) = sidebar_geometry("assistant", Some("center"), 1920.0, 1080.0);
+        assert_eq!((x, y, w, h), (700.0, 20.0, 520.0, 1040.0));
+    }
+
+    #[test]
+    fn assistant_height_clamps_on_short_monitor() {
+        // mh - 40 < 1040 → clamp; h never below 400
+        let (_, _, _, h) = sidebar_geometry("assistant", None, 1920.0, 600.0);
+        assert_eq!(h, 560.0);
+        let (_, _, _, h) = sidebar_geometry("assistant", None, 1920.0, 300.0);
+        assert_eq!(h, 400.0);
+    }
+
+    #[test]
+    fn pr_list_uses_right_dock() {
+        // x = 1920 - 520 - 10 = 1390, y = 20, h = 1040
+        let (x, y, w, h) = sidebar_geometry("pr-list", None, 1920.0, 1080.0);
+        assert_eq!((x, y, w, h), (1390.0, 20.0, 520.0, 1040.0));
+    }
+
+    #[test]
+    fn settings_right_docked() {
+        // h = min(1040, 1080-40) = 1040; x = 1920 - 400 - 10 = 1510; y = 20
+        let (x, y, w, h) = sidebar_geometry("settings", None, 1920.0, 1080.0);
+        assert_eq!((x, y, w, h), (1510.0, 20.0, 400.0, 1040.0));
+    }
+
+    #[test]
+    fn settings_docked_goes_right() {
+        let (x, y, w, h) = sidebar_geometry("settings", Some("right"), 1920.0, 1080.0);
+        assert_eq!((x, y, w, h), (1510.0, 20.0, 400.0, 1040.0));
+    }
+
+    #[test]
+    fn settings_height_clamps_on_short_monitor() {
+        let (_, _, _, h) = sidebar_geometry("settings", None, 1920.0, 800.0);
+        assert_eq!(h, 760.0);
+        let (_, _, _, h) = sidebar_geometry("settings", None, 1920.0, 300.0);
+        assert_eq!(h, 400.0);
+    }
+
+    #[test]
+    fn architect_centers_with_top_pin() {
+        // h = min(1040, 1080-40) = 1040; x = (1920-960)/2 = 480; y = 40 (pinned)
+        let (x, y, w, h) = sidebar_geometry("architect", None, 1920.0, 1080.0);
+        assert_eq!((x, y, w, h), (480.0, 40.0, 960.0, 1040.0));
+    }
+
+    #[test]
+    fn maps_window_matches_architect_geometry() {
+        for (mw, mh) in [(1920.0, 1080.0), (2560.0, 1440.0), (1366.0, 768.0), (500.0, 500.0)] {
+            assert_eq!(sidebar_geometry("maps", None, mw, mh), sidebar_geometry("architect", None, mw, mh));
+        }
+        assert_eq!(sidebar_geometry("maps", None, 1920.0, 1080.0), (480.0, 40.0, 960.0, 1040.0));
+    }
+
+    #[test]
+    fn travel_mode_parsing() {
+        use crate::google::types::TravelMode as T;
+        assert_eq!(super::parse_travel_mode(None), T::Driving);
+        assert_eq!(super::parse_travel_mode(Some("Walking")), T::Walking);
+        assert_eq!(super::parse_travel_mode(Some("bus")), T::Transit);
+        assert_eq!(super::parse_travel_mode(Some("cycling")), T::Bicycling);
+        assert_eq!(super::parse_travel_mode(Some("???")), T::Driving);
+    }
+
+    #[test]
+    fn architect_docked_goes_right() {
+        // x = 1920 - 960 - 10 = 950; y = 20; h = 1040
+        let (x, y, w, h) = sidebar_geometry("architect", Some("right"), 1920.0, 1080.0);
+        assert_eq!((x, y, w, h), (950.0, 20.0, 960.0, 1040.0));
+    }
+
+    #[test]
+    fn architect_height_clamps_on_short_monitor() {
+        let (_, _, _, h) = sidebar_geometry("architect", None, 1920.0, 500.0);
+        assert_eq!(h, 460.0);
+    }
+
+    #[test]
+    fn unknown_view_falls_back_to_assistant() {
+        let (x, y, w, h) = sidebar_geometry("nonsense", None, 1920.0, 1080.0);
+        assert_eq!((x, y, w, h), (1390.0, 20.0, 520.0, 1040.0));
+    }
+
+    #[test]
+    fn small_monitor_x_never_negative() {
+        let (x, _, _, _) = sidebar_geometry("architect", None, 500.0, 1080.0);
+        assert_eq!(x, 0.0);
+        let (x, _, _, _) = sidebar_geometry("assistant", None, 100.0, 1080.0);
+        // 100 - 520 - 10 = -430 → clamp to 0
+        assert_eq!(x, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod nexus_settings_tests {
+    use super::NexusSettings;
+
+    #[test]
+    fn settings_round_trip_preserves_unknown_fields() {
+        let raw = serde_json::json!({
+            "autostart": true,
+            "hotkey": "Ctrl+Space",
+            "autoHideDelay": 8,
+            "wakeWordEnabled": true,
+            "wakePhrase": "NEXUS",
+            "wakeSensitivity": "medium",
+            "speakerVerification": false,
+            "meetingModeAuto": true,
+            "suppressTtsInMeetings": true,
+            "localSttOnly": true,
+            "serverUrl": "https://example.com",
+            "userId": "u123",
+            "deviceId": "d456",
+            "ttsVoice": "af_sky",
+            "speechRate": 1.15,
+            // Unknown keys that must NOT be wiped on save
+            "vadSilero": true,
+            "smartTurn": false,
+            "turnEagerness": 0.85,
+            "directedGate": true,
+            "proactiveCriticalInMeeting": false,
+            "calibrationDevPersist": "custom_val"
+        });
+
+        let parsed: NexusSettings = serde_json::from_value(raw).expect("deserialization should succeed");
+        assert_eq!(parsed.extra.get("vadSilero"), Some(&serde_json::json!(true)));
+        assert_eq!(parsed.extra.get("calibrationDevPersist"), Some(&serde_json::json!("custom_val")));
+
+        let reserialized = serde_json::to_value(&parsed).expect("serialization should succeed");
+        assert_eq!(reserialized.get("vadSilero"), Some(&serde_json::json!(true)));
+        assert_eq!(reserialized.get("turnEagerness"), Some(&serde_json::json!(0.85)));
+        assert_eq!(reserialized.get("calibrationDevPersist"), Some(&serde_json::json!("custom_val")));
+    }
+}
+

@@ -22,6 +22,15 @@ SERVERS = [
 
 TIMEOUT = 8
 
+# Fix hints for the local bridges (P3.3): a DOWN local bridge gets the
+# exact command to start it, not just a red line.
+FIXES = {
+    "whatsapp": "run the WhatsApp bridge binary, then scan the QR in the "
+                "Connections tab (session persists).",
+    "amazon": "run the Amazon product-search bridge binary "
+              "(127.0.0.1:8766, read-only).",
+}
+
 
 def rpc(url, method, params, req_id=1):
     body = json.dumps(
@@ -56,6 +65,9 @@ def main():
         status, body = rpc(url, "tools/list", {})
         if status == -1:
             print(f"{red}DOWN {reset} {name} ({url}): {body[:120]}")
+            fix = FIXES.get(name)
+            if fix:
+                print(f"       fix: {fix}")
             all_ok = False
             continue
         if status in (401, 403):

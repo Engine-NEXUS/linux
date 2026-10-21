@@ -1,0 +1,71 @@
+name: Build Linux Package
+
+# The Linux counterpart of WINDOWS' build-windows.yml: every push and PR
+# builds the shipped package the same way release.yml does
+# (scripts/build-prod.sh), then installs it on a clean runner to prove the
+# declared .deb dependencies are complete.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    name: Build Linux package (.deb)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22 & Cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev libdbus-1-dev pkg-config
+
+      - name: Cache Rust Cargo Dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Build .deb (scripts/build-prod.sh, as release.yml)
+        env:
+          CARGO_INCREMENTAL: 0
+        run: ./scripts/build-prod.sh
+
+      # Install with apt so every package in the .deb's Depends must resolve on
+      # a stock Ubuntu 24.04, then check the installed binary links fully.
+      - name: Install the .deb and check its libraries
+        run: |
+          deb=$(ls src-tauri/target/release/bundle/deb/*.deb)
+          dpkg-deb --info "$deb"
+          sudo apt-get install -y "./$deb"
+          pkg=$(dpkg-deb -f "$deb" Package)
+          bin=$(dpkg -L "$pkg" | grep '^/usr/bin/' | head -1)
+          echo "installed $pkg -> $bin ($(du -h "$deb" | cut -f1))"
+          if ldd "$bin" | grep 'not found'; then
+            echo "::error::$bin has unresolved shared libraries"
+            exit 1
+          fi
+          for r in oww vad smart_turn server/nlu/model; do
+            dpkg -L "$pkg" | grep -q "/resources/$r/" || { echo "::error::resources/$r missing from the package"; exit 1; }
+          done
+
+      - name: Upload Linux package (.deb) artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NEXUS-Linux-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          retention-days: 7

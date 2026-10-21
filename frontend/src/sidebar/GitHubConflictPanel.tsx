@@ -154,5 +154,4 @@ export function GitHubConflictPanel({
     </div>
   );
 }
-
-export default GitHubConflictPanel;
+// NOTE: default export removed (audit M5) — SidebarApp uses the named import.

@@ -72,7 +72,7 @@ import logging
 import os
 import sys
 import time
-from typing import Any
+from typing import Any, NamedTuple, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
@@ -219,7 +219,7 @@ def states_of(node: Any) -> list[str]:
     for name in (
         "STATE_CHECKED", "STATE_PRESSED", "STATE_EXPANDED", "STATE_SELECTED",
         "STATE_SENSITIVE", "STATE_SHOWING", "STATE_FOCUSED", "STATE_ENABLED",
-        "STATE_ACTIVE", "STATE_EDITABLE", "STATE_READ_ONLY",
+        "STATE_ACTIVE", "STATE_EDITABLE", "STATE_READ_ONLY", "STATE_VISIBLE",
     ):
         enum = _safe(lambda n=name: getattr(A.StateType, n))
         if enum is None:
@@ -809,12 +809,21 @@ async def focused() -> JSONResponse:
 
     Resolution order, cheapest first:
       1. An application whose accessible carries STATE_ACTIVE.
-      2. A top-level frame containing a node with STATE_FOCUSED.
-      3. The focused frame of the only application that has one.
+      2. A top-level frame carrying STATE_ACTIVE — but ONLY when exactly one
+         application claims to be active. Several claims is ambiguity, and
+         ambiguity is answered with "I could not tell", not with the first
+         match. (The audit of the Linux build on the target machine found two
+         applications reporting an ACTIVE frame at once.)
+      3. A top-level frame containing a node with STATE_FOCUSED.
+      4. The compositor (COSMIC only — its applications are not on the bus).
+      5. The focused frame of the only application that has one.
 
     Returns `{"known": false, ...}` rather than a 404 when nothing can be
     identified. The caller must treat that as "refuse", never as "no match" —
-    the same distinction ExclusionVerdict exists to preserve in Rust.
+    the same distinction ExclusionVerdict exists to preserve in Rust. The
+    `candidates` list is always present, so the client can apply the
+    "exactly one" rule itself and does not have to trust this endpoint's
+    judgement for a safety-relevant conclusion.
 
     KNOWN LIMITATION, observed on this machine: not every session reports focus
     through AT-SPI. In a nested or virtual display with no window manager
@@ -837,6 +846,90 @@ async def focused() -> JSONResponse:
     return JSONResponse(result)
 
 
+class WindowIdentity(NamedTuple):
+    """The foreground window, as the platform reports it.
+
+    `app` is the accessibility bus' application name, `title` the top-level
+    frame's accessible name.
+    """
+
+    app: str
+    title: str
+
+
+# Roles that must never be actuated.
+#
+# A password entry is an EDITABLE node, so the "actionable" filter offers it —
+# and a click on a password field is an action on a secret. The rule is the
+# role, not the name: a vault that renames its window still renders a
+# "password text" role. Mirrors `policy::CREDENTIAL_ROLES` in the Rust tree.
+CREDENTIAL_ROLES: tuple[str, ...] = (
+    "password text",
+    "password",
+    "otp input",
+    "pin entry",
+    "secure text",
+)
+
+
+def is_credential_role(role: str) -> bool:
+    """Whether an element's role denotes a credential field."""
+    r = (role or "").lower()
+    return any(r == c or c in r for c in CREDENTIAL_ROLES)
+
+
+def is_cosmic_session() -> bool:
+    """True on the COSMIC desktop (Pop!_OS)."""
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
+    return "COSMIC" in desktop.upper()
+
+
+def cosmic_active_toplevel() -> Optional[WindowIdentity]:
+    """TODO — ask the COSMIC compositor which toplevel is activated.
+
+    COSMIC's own applications are not published on the accessibility bus, so
+    on that desktop AT-SPI cannot name the foreground at all: the compositor
+    is the only source. The protocols involved are:
+
+      * `ext-foreign-toplevel-list-v1` — the list of exported toplevels.
+      * `zcosmic_toplevel_info_v1` — per-toplevel state, including whether it
+        is the *activated* one.
+
+    Reading them needs a Wayland client that can bind those globals.
+    `pywayland` is not installed on the target machine, and the
+    `wlrctl`-style helpers do not expose the activated state, so this returns
+    None rather than guessing.
+
+    Until it is implemented, the honest outcome on COSMIC is "the foreground is
+    unknown" — which the policy gate treats as a refusal (see `pointer.rs` in
+    the Rust tree). That is the correct failure mode: a wrong identity would
+    mean the wrong window is compared against the privacy deny-list.
+    """
+    return None
+
+
+def foreground_from_compositor() -> Optional[WindowIdentity]:
+    """The foreground window, according to the compositor.
+
+    Only COSMIC can be asked at the moment (see `cosmic_active_toplevel`).
+    """
+    if not is_cosmic_session():
+        return None
+    return cosmic_active_toplevel()
+
+
+def pick_foreground(candidates: list[WindowIdentity]) -> Optional[WindowIdentity]:
+    """Exactly one candidate, or nothing.
+
+    More than one candidate is NOT resolved by taking the first: two
+    applications reporting an ACTIVE frame is ambiguity, and the caller has to
+    be able to tell "I could not tell" from "it is this one".
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def _focused_blocking() -> dict:
     t0 = time.monotonic()
     A = atspi()
@@ -852,17 +945,55 @@ def _focused_blocking() -> dict:
     def has_state(node, wanted: str) -> bool:
         return wanted.lower() in states_of(node)
 
+    def ident(app, frame) -> WindowIdentity:
+        return WindowIdentity(
+            app=_safe(lambda a=app: a.get_name(), "") or "",
+            title=(_safe(lambda n=frame: n.get_name(), "") or "") if frame is not None else "",
+        )
+
     apps = applications()
     best = None
+    how = ""
 
     # 1. STATE_ACTIVE on the application itself.
     for app in apps:
         if has_state(app, "ACTIVE"):
             frame = frame_of(app)
-            best = (app, frame, "application STATE_ACTIVE")
+            best = (app, frame)
+            how = "application STATE_ACTIVE"
             break
 
-    # 2. A focused node somewhere under an application's frame.
+    # 2. A top-level frame carrying STATE_ACTIVE.
+    #
+    #    More than one such frame is AMBIGUITY. The audit of the Linux build
+    #    on the target machine found two applications reporting an ACTIVE
+    #    frame at the same time, and the old first-match rule then compared
+    #    the wrong window against the privacy deny-list. The honest answer is
+    #    "I could not tell", and the Rust gate treats that as a refusal.
+    if best is None:
+        active_frames = []
+        for app in apps:
+            frame = frame_of(app)
+            if frame is not None and has_state(frame, "ACTIVE"):
+                active_frames.append((app, frame))
+        candidates = [ident(a, f) for a, f in active_frames]
+        if pick_foreground(candidates) is not None:
+            best = active_frames[0]
+            how = "frame STATE_ACTIVE"
+        elif len(candidates) > 1:
+            return {
+                "known": False,
+                "how": "several ACTIVE frames",
+                "reason": (
+                    f"{len(candidates)} windows report an active frame — "
+                    "the foreground is ambiguous"
+                ),
+                "candidates": [{"app": c.app, "title": c.title} for c in candidates],
+                "applications": len(apps),
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+            }
+
+    # 3. A focused node somewhere under an application's frame.
     if best is None:
         for app in apps:
             frame = frame_of(app)
@@ -872,14 +1003,30 @@ def _focused_blocking() -> dict:
             try:
                 for node, _ in iter_nodes(frame, limit=800, deadline=deadline):
                     if has_state(node, "FOCUSED") and node is not frame:
-                        best = (app, frame, "descendant STATE_FOCUSED")
+                        best = (app, frame)
+                        how = "descendant STATE_FOCUSED"
                         break
             except SearchTimeout:
                 pass
             if best is not None:
                 break
 
-    # 3. Single foreground-ish application.
+    # 4. The compositor — the only source on COSMIC, whose applications are
+    #    not on the accessibility bus at all.
+    if best is None:
+        cosmic = foreground_from_compositor()
+        if cosmic is not None:
+            return {
+                "known": True,
+                "how": "compositor activated toplevel",
+                "app": cosmic.app,
+                "title": cosmic.title,
+                "candidates": [{"app": cosmic.app, "title": cosmic.title}],
+                "applications": len(apps),
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+            }
+
+    # 5. Single foreground-ish application.
     if best is None:
         with_frames = []
         for app in apps:
@@ -887,24 +1034,108 @@ def _focused_blocking() -> dict:
             if f is not None and (extents_of(f) or {}).get("w", 0) > 0:
                 with_frames.append((app, f))
         if len(with_frames) == 1:
-            best = (with_frames[0][0], with_frames[0][1], "only visible application")
+            best = with_frames[0]
+            how = "only visible application"
 
     if best is None:
         return {
             "known": False,
             "reason": "no application reported an active or focused window",
+            "candidates": [],
             "applications": len(apps),
             "latency_ms": int((time.monotonic() - t0) * 1000),
         }
 
-    app, frame, how = best
+    app, frame = best
+    who = ident(app, frame)
     return {
         "known": True,
         "how": how,
-        "app": _safe(lambda a=app: a.get_name(), "") or "",
-        "title": _safe(lambda f=frame: f.get_name(), "") or "",
+        "app": who.app,
+        "title": who.title,
+        "candidates": [{"app": who.app, "title": who.title}],
         "bounds": extents_of(frame) if frame is not None else None,
         "chromium_skeleton_risk": is_chromium(app),
+        "latency_ms": int((time.monotonic() - t0) * 1000),
+    }
+
+
+@app.get("/actionables")
+async def actionables(request: Request) -> JSONResponse:
+    """The actionable elements of the foreground window (or of one app).
+
+    "Actionable" means the toolkit says the element can be invoked or edited.
+    The list is flat and every entry carries the element's own geometry, so
+    the caller can point at it without a second round trip.
+
+    Without `?app=`, this walks the FOREGROUND window's tree — not every
+    application on the bus. A blind cross-application walk is what made
+    lookups hang for minutes on a developer machine, and the foreground window
+    is the one the user is actually looking at.
+    """
+    if atspi() is None:
+        return _err("atspi unavailable", 503, reason=_atspi_error)
+    q = request.query_params
+    app_name = q.get("app") or None
+    result = await run_in_threadpool(_actionables_blocking, app_name)
+    if result.get("error"):
+        return JSONResponse(result, status_code=404)
+    return JSONResponse(result)
+
+
+def _actionables_blocking(app_name: str | None) -> dict:
+    t0 = time.monotonic()
+    A = atspi()
+
+    if app_name:
+        root = app_named(app_name)
+        if root is None:
+            return {"error": f"no such application: {app_name}"}
+        roots = [root]
+    else:
+        # The foreground window's own tree.
+        fg = _focused_blocking()
+        if not fg.get("known"):
+            return {
+                "known": False,
+                "reason": fg.get("reason", "the foreground window is unknown"),
+                "elements": [],
+                "count": 0,
+            }
+        root = app_named(fg.get("app", "") or "")
+        roots = [root] if root is not None else []
+
+    out = []
+    for root in roots:
+        if root is None:
+            continue
+        app = _safe(lambda a=root: a.get_name(), "") or ""
+        skeleton = is_chromium(root)
+        deadline = time.monotonic() + 1.5
+        try:
+            for node, _ in iter_nodes(root, limit=1500, deadline=deadline):
+                snap = NodeSnapshot(node, A)
+                if not snap.actionable:
+                    continue
+                if not snap.name.strip():
+                    continue
+                out.append(
+                    {
+                        "app": app,
+                        "role": snap.role,
+                        "name": snap.name,
+                        "bounds": snap.bounds,
+                        "states": snap.states,
+                        "actions": snap.actions,
+                        "chromium_skeleton_risk": skeleton,
+                    }
+                )
+        except SearchTimeout:
+            pass
+    return {
+        "known": True,
+        "elements": out,
+        "count": len(out),
         "latency_ms": int((time.monotonic() - t0) * 1000),
     }
 
@@ -1041,6 +1272,22 @@ def _activate_blocking(name: str, role: str | None, app_name: str | None, action
         return _err(f"not found: {name}", 404, name=name)
     root, node = hit if isinstance(hit, tuple) else (hit, hit)
 
+    # The matched node's ROLE, checked before anything is actuated. A password
+    # entry is an editable node, so it passes the "actionable" filter, and a
+    # click on a credential field is an action on a secret. The role is the
+    # trustworthy signal: a vault that renames its window still renders a
+    # "password text" role.
+    node_role = _safe(lambda n=node: n.get_role_name(), "") or ""
+    if is_credential_role(node_role):
+        log.warning("activate %r refused: credential role %r", name, node_role)
+        return _err(
+            "refusing to act on a credential field",
+            409,
+            role=node_role,
+            name=name,
+            app=_safe(lambda a=root: a.get_name(), "") or "",
+        )
+
     target = find_invokeable(node, action)
     if target is None:
         # GtkMenuButton exposes an outer button with NActions=0 and the real
@@ -1051,7 +1298,7 @@ def _activate_blocking(name: str, role: str | None, app_name: str | None, action
             409,
             requested=action,
             available=action_names(node),
-            role=_safe(lambda n=node: n.get_role_name(), "") or "",
+            role=node_role,
             app=_safe(lambda a=root: a.get_name(), "") or "",
             hint="Chromium/Electron expose actions as 'doDefault'; try action=doDefault",
         )
@@ -1075,6 +1322,9 @@ def _activate_blocking(name: str, role: str | None, app_name: str | None, action
         "ok": ok,
         "app": _safe(lambda a=root: a.get_name(), "") or "",
         "name": name,
+        # The matched node's role, so the client can re-check it against the
+        # policy before treating the action as done.
+        "role": _safe(lambda n=target: n.get_role_name(), "") or "",
         "action": names[idx] if ok and idx < len(names) else action,
         "states_before": before,
         "states_after": after,

@@ -40,8 +40,10 @@ import time
 import io
 import struct
 import wave
+import array
+import json
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 log = logging.getLogger("NEXUS.stt")
@@ -72,13 +74,28 @@ _transcriber = None
 _model_path = None
 _model_arch = None
 _model_arch_name = MODEL_ARCH_NAME
+# Why the model could not be loaded (missing python package, no network, …).
+# Surfaced by /health and /transcribe so the Rust client can report the real
+# reason instead of a bare "server did not become ready".
+_load_error = None
 
 
 def _load_model():
     """Load the Moonshine model. Called eagerly at startup."""
-    global _transcriber, _model_path, _model_arch, _model_arch_name
+    global _transcriber, _model_path, _model_arch, _model_arch_name, _load_error
 
-    from moonshine_voice import Transcriber, ModelArch, get_model_for_language
+    try:
+        from moonshine_voice import Transcriber, ModelArch, get_model_for_language
+    except ImportError as e:
+        # The most common failure on a fresh Linux box: the package is simply
+        # not installed. Say exactly that — a raw traceback here used to look
+        # like "NEXUS did not hear you".
+        _load_error = (
+            "moonshine-voice is not installed — "
+            f"pip install moonshine-voice fastapi uvicorn python-multipart ({e})"
+        )
+        log.error("local STT unavailable: %s", _load_error)
+        raise
 
     # Map string names to ModelArch enum
     arch_map = {
@@ -115,12 +132,19 @@ def _load_model():
     )
     _model_path = model_path
     _model_arch = model_arch_enum
+    _load_error = None
 
 
 def _get_transcriber():
     """Get the loaded transcriber instance."""
+    global _load_error
     if _transcriber is None:
-        _load_model()
+        try:
+            _load_model()
+        except Exception as e:
+            if _load_error is None:
+                _load_error = str(e)
+            raise
     return _transcriber
 
 
@@ -129,6 +153,20 @@ def _get_transcriber():
 
 @app.get("/health")
 async def health() -> JSONResponse:
+    # A server that cannot transcribe is NOT healthy. Answering 503 makes the
+    # Rust client stop waiting for it and report the real reason, instead of
+    # burning the full 20 s startup budget on a sidecar that will never work.
+    if _transcriber is None and _load_error is not None:
+        return JSONResponse(
+            {
+                "ok": False,
+                "model": f"moonshine-{_model_arch_name}",
+                "language": LANGUAGE,
+                "engine": "moonshine-voice (ONNX Runtime)",
+                "error": _load_error,
+            },
+            status_code=503,
+        )
     return JSONResponse({
         "ok": True,
         "model": f"moonshine-{_model_arch_name}",
@@ -185,7 +223,12 @@ async def transcribe(audio: UploadFile = File(...)) -> JSONResponse:
         return JSONResponse({"text": ""})
 
     # Transcribe using Moonshine
-    transcriber = _get_transcriber()
+    try:
+        transcriber = _get_transcriber()
+    except Exception as e:
+        reason = _load_error or str(e)
+        log.error("local STT unavailable: %s", reason)
+        return JSONResponse({"text": "", "error": reason}, status_code=503)
     _transcribe_start = time.monotonic()
     try:
         transcript = transcriber.transcribe_without_streaming(
@@ -204,6 +247,98 @@ async def transcribe(audio: UploadFile = File(...)) -> JSONResponse:
         len(audio_data), len(text), _elapsed, text,
     )
     return JSONResponse({"text": text})
+
+
+@app.websocket("/stream")
+async def stream(websocket: WebSocket) -> None:
+    """Live partial-transcript stream (plan Phase 4 — additive, best-effort).
+
+    Runs ENTIRELY PARALLEL to /transcribe: this is for the on-screen live
+    caption only (the user's own words growing while they still talk) and
+    never feeds intent parsing/NLU/brain — that stays the batch /transcribe
+    path, untouched. A dropped or failed connection here must never affect
+    command execution; the Rust client treats every error as a silent no-op.
+
+    Protocol: client sends raw 16-bit LE mono PCM @ 16kHz binary frames
+    (same convention as /transcribe's raw-PCM branch); server pushes
+    {"text": "<growing line>"} whenever Moonshine's LineTextChanged fires
+    (the full current line, not a delta — Moonshine's own semantics).
+    A text frame {"cmd": "stop"} or a client disconnect ends the stream.
+
+    Uses a FRESH `Stream` per connection (one per NEXUS turn) off the
+    existing global transcriber (reuses the already-loaded model — never
+    loads a second one), so no text state bleeds between turns.
+    """
+    await websocket.accept()
+    try:
+        transcriber = _get_transcriber()
+    except Exception as e:
+        reason = _load_error or str(e)
+        log.error("stream: local STT unavailable: %s", reason)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+        return
+    stream_handle = transcriber.create_stream()
+    pending_texts: list[str] = []
+
+    def _on_event(event) -> None:
+        from moonshine_voice import LineTextChanged
+        if isinstance(event, LineTextChanged):
+            pending_texts.append(event.line.text)
+
+    stream_handle.add_listener(_on_event)
+    stream_handle.start()
+    log.info("stream: client connected")
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+            audio_bytes = message.get("bytes")
+            if audio_bytes:
+                try:
+                    samples = array.array("h", audio_bytes)
+                    float_samples = [s / 32768.0 for s in samples]
+                    stream_handle.add_audio(float_samples, sample_rate=16000)
+                except Exception as e:
+                    log.warning("stream: add_audio failed — %s", e)
+                for text in pending_texts:
+                    await websocket.send_json({"text": text})
+                pending_texts.clear()
+                continue
+            text_msg = message.get("text")
+            if text_msg:
+                try:
+                    payload = json.loads(text_msg)
+                except Exception:
+                    payload = {}
+                if payload.get("cmd") == "stop":
+                    break
+    except WebSocketDisconnect:
+        log.info("stream: client disconnected")
+    except Exception as e:
+        log.warning("stream: unexpected error — %s", e)
+    finally:
+        try:
+            # stop() transcribes whatever audio is left and fires the final
+            # LineTextChanged/LineCompleted events into pending_texts via
+            # _on_event — without flushing those here, the LAST (often most
+            # complete) partial would be silently dropped.
+            stream_handle.stop()
+        except Exception:
+            pass
+        try:
+            for text in pending_texts:
+                await websocket.send_json({"text": text})
+        except Exception:
+            pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        log.info("stream: closed")
 
 
 def _wav_to_float_samples(wav_bytes: bytes):
@@ -253,8 +388,19 @@ def _wav_to_float_samples(wav_bytes: bytes):
 
 @app.on_event("startup")
 async def _startup():
-    """Eagerly load the model at startup so the first transcription is fast."""
-    _load_model()
+    """Eagerly load the model at startup so the first transcription is fast.
+
+    A missing dependency must NOT kill the server: the Rust client polls
+    /health, and a dead process looks like "no STT at all". Stay up and
+    report the reason through /health (503) instead.
+    """
+    global _load_error
+    try:
+        _load_model()
+    except Exception as e:
+        if _load_error is None:
+            _load_error = str(e)
+        log.error("local STT unavailable at startup: %s", e)
 
 
 if __name__ == "__main__":

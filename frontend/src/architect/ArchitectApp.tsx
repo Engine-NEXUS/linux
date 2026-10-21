@@ -23,7 +23,7 @@ class MapErrorBoundary extends Component<{ children: ReactNode }, { hasError: bo
   }
 }
 
-export function ArchitectApp() {
+export function ArchitectApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
   const loading = useArchitect((s) => s.loading);
   const deepScanning = useArchitect((s) => s.deepScanning);
   const progressMessage = useArchitect((s) => s.progressMessage);
@@ -250,6 +250,19 @@ export function ArchitectApp() {
 
   return (
     <div className="architect-app">
+      {/* ── Header row: drag region + dock controls (Left/Right) ────── */}
+      <header className="sidebar-header-row" data-tauri-drag-region>
+        <div className="sidebar-header-spacer" data-tauri-drag-region />
+        <div className="sidebar-dock-controls">
+          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
+            ◧
+          </button>
+          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
+            ◨
+          </button>
+        </div>
+      </header>
+
       {/* ── Top Navigation Bar ─────────────────────────────────────── */}
       <header className="architect-header">
         {/* Repo search / input bar */}

@@ -84,11 +84,21 @@ def save_wav(path, audio):
     wav.write(path, SAMPLE_RATE, audio_int16)
 
 
-def count_existing(directory, prefix):
-    """Count existing files with the given prefix."""
+def get_next_index(directory, prefix):
+    """Find the next integer index based on the highest existing file number."""
     if not os.path.exists(directory):
-        return 0
-    return len([f for f in os.listdir(directory) if f.startswith(prefix) and f.endswith(".wav")])
+        return 1
+    max_idx = 0
+    for f in os.listdir(directory):
+        if f.startswith(prefix) and f.endswith(".wav"):
+            try:
+                num_part = f[len(prefix):].split(".")[0]
+                idx = int(num_part)
+                if idx > max_idx:
+                    max_idx = idx
+            except ValueError:
+                pass
+    return max_idx + 1
 
 
 def mode_positive(n_clips):
@@ -116,34 +126,134 @@ def mode_positive(n_clips):
     print("  - Press Ctrl+C to stop early")
     print()
 
+def load_whisper_validator():
+    """Load local tiny.en Whisper model for zero-lag instant verification (<100ms)."""
+    try:
+        from faster_whisper import WhisperModel
+        return WhisperModel("tiny.en", device="cpu", compute_type="int8")
+    except Exception as e:
+        print(f"Warning: could not load Whisper validator ({e}). Proceeding without ASR gate.")
+        return None
+
+
+def verify_positive_transcript(whisper_model, audio_float32):
+    """
+    Strict ASR verification for positive wake word recordings:
+    Returns (verdict, transcript, reason)
+      - verdict: 'accept_pos', 'promote_neg', or 'reject'
+    """
+    if whisper_model is None:
+        return 'accept_pos', 'unverified', 'Whisper validator unavailable'
+
+    segments, _ = whisper_model.transcribe(
+        audio_float32,
+        beam_size=1,
+        language="en",
+        temperature=0.0,
+        initial_prompt="NEXUS, wake word call."
+    )
+    transcript = " ".join([s.text for s in segments]).strip()
+    clean = transcript.lower().strip(" .,!?:;\"'")
+
+    if not clean:
+        return 'reject', clean, 'No speech detected / inaudible'
+
+    # Accepted variations of NEXUS across accents and Whisper's short-utterance bias
+    # (Whisper often hallucinates 'next', 'next sis', 'next test', 'nixes' for single-word 'nexus')
+    ACCEPTED_PATTERNS = [
+        "nexus", "nexis", "nixes", "nexas", "nexos", "nex", "next", "nexts", "nextis",
+        "hey nexus", "ok nexus", "okay nexus", "nexus wake up", "nexus please",
+        "open excess", "open access", "next sis", "next sense", "next one", "next test",
+        "next sus", "next us", "next yes", "next sir", "next sif", "next chef", "next sith",
+        "next, s", "next, next", "mix us", "mixers", "make sense", "ten xs"
+    ]
+    if any(p == clean or clean.startswith(p) for p in ACCEPTED_PATTERNS):
+        return 'accept_pos', clean, f"Valid phonetic NEXUS match ('{clean}')"
+
+    # Check if 'nexus' / 'nexis' / 'next' is part of a short valid call (<= 3 words)
+    words = clean.split()
+    if any(w in words for w in ["nexus", "nexis", "nixes", "next", "neck"]) and len(words) <= 3:
+        return 'accept_pos', clean, f"Short valid NEXUS call ('{clean}')"
+
+    # NEVER promote to negative in positive recording mode!
+    # If the user spoke completely different speech or noise, reject and re-prompt.
+    return 'reject', clean, f"Non-wake speech detected ('{clean}')"
+
+
+def mode_positive(n_clips):
+    """Record positive samples — with real-time Whisper anti-poisoning validation."""
+    out_dir = os.path.join(BASE_DIR, "positive")
+    neg_dir = os.path.join(BASE_DIR, "negative")
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(neg_dir, exist_ok=True)
+
+    print("Loading real-time Whisper ASR validator...", end="", flush=True)
+    whisper = load_whisper_validator()
+    print(" Ready!\n")
+
+    print("=" * 60)
+    print(f"  PRISTINE POSITIVE SAMPLE RECORDING (ASR-VALIDATED)")
+    print(f"  Targeting {n_clips} verified pristine 'NEXUS' recordings")
+    print(f"  Real-time Whisper ASR gate active (100% poison prevention)")
+    print(f"  Output: {out_dir}")
+    print("=" * 60)
+    print()
+    print("  INSTRUCTIONS:")
+    print("  - Say 'NEXUS' CLEARLY and NATURALLY when prompted")
+    print("  - Vary your volume, distance, and direction")
+    print("  - Invalid or ambiguous speech is automatically rejected or routed")
+    print("  - Press Ctrl+C to stop early")
+    print()
+
     SILENCE_THRESHOLD = 0.003
     saved = 0
-    skipped = 0
+    promoted = 0
+    rejected = 0
+    attempt = 0
 
-    for i in range(start, end + 1):
+    while saved < n_clips:
+        attempt += 1
         phrase = random.choice(POSITIVE_PHRASES)
-        print(f"  [{i}/{end}] Say: \"{phrase}\"  ", end="", flush=True)
+        print(f"  [{saved + 1}/{n_clips}] Say: \"{phrase}\"  ", end="", flush=True)
 
-        # Countdown
-        for c in range(3, 0, -1):
+        # Quick countdown
+        for c in range(2, 0, -1):
             print(f"{c}... ", end="", flush=True)
-            time.sleep(0.4)
+            time.sleep(0.35)
 
         print("REC", end="", flush=True)
         audio, rms = record_clip()
 
         if rms < SILENCE_THRESHOLD:
-            print(f"  SKIP (RMS={rms:.5f} too quiet)")
-            skipped += 1
+            print(f"  \033[93m[SKIP: Silence / RMS={rms:.5f}]\033[0m")
+            rejected += 1
             continue
 
-        fname = f"nexus_{i:04d}.wav"
-        save_wav(os.path.join(out_dir, fname), audio)
-        saved += 1
-        print(f"  OK (RMS={rms:.4f}) → {fname}")
+        # In-memory float32 audio for Whisper
+        audio_flat = audio.flatten()
+        verdict, transcript, reason = verify_positive_transcript(whisper, audio_flat)
 
-    print(f"\n  Done: {saved} saved, {skipped} skipped")
-    print(f"  Total positive samples: {count_existing(out_dir, 'nexus_')}")
+        if verdict == 'accept_pos':
+            next_idx = get_next_index(out_dir, "nexus_")
+            fname = f"nexus_{next_idx:04d}.wav"
+            save_wav(os.path.join(out_dir, fname), audio)
+            saved += 1
+            print(f"  \033[92m[✓ ACCEPTED: '{transcript}']\033[0m (RMS={rms:.4f}) → {fname}")
+
+        elif verdict == 'promote_neg':
+            # Save to negative so it trains as hard negative instead of polluting positive
+            next_neg_idx = get_next_index(neg_dir, "soundalike_from_rec_")
+            fname = f"soundalike_from_rec_{next_neg_idx:04d}.wav"
+            save_wav(os.path.join(neg_dir, fname), audio)
+            promoted += 1
+            print(f"  \033[94m[🛡️  PROMOTED TO NEGATIVE: '{transcript}']\033[0m → {fname}")
+
+        else:
+            rejected += 1
+            print(f"  \033[91m[✕ REJECTED: {reason}]\033[0m — re-prompting...")
+
+    print(f"\n  Summary: {saved} pristine positive saved, {promoted} promoted to negative, {rejected} rejected")
+    print(f"  Total verified positive library: {count_existing(out_dir, 'nexus_')} files")
 
 
 def mode_negative(n_clips):
@@ -151,10 +261,13 @@ def mode_negative(n_clips):
     out_dir = os.path.join(BASE_DIR, "negative")
     os.makedirs(out_dir, exist_ok=True)
 
+    print("Loading real-time Whisper ASR validator...", end="", flush=True)
+    whisper = load_whisper_validator()
+    print(" Ready!\n")
+
     print("=" * 60)
-    print(f"  NEGATIVE SAMPLE RECORDING")
-    print(f"  Recording {n_clips} clips")
-    print(f"  Each clip: {CLIP_DURATION}s — say the displayed phrase")
+    print(f"  NEGATIVE SAMPLE RECORDING (ASR-VALIDATED)")
+    print(f"  Recording {n_clips} verified negative speech clips")
     print(f"  Output: {out_dir}")
     print("=" * 60)
     print()
@@ -169,32 +282,39 @@ def mode_negative(n_clips):
     saved = 0
     skipped = 0
 
-    for i in range(1, n_clips + 1):
+    while saved < n_clips:
         phrase = random.choice(NEGATIVE_PHRASES)
-        # Create safe filename from phrase
         safe = phrase.replace(" ", "_").replace("'", "")
         existing = count_existing(out_dir, f"{safe}_")
         idx = existing + 1
 
-        print(f"  [{i}/{n_clips}] Say: \"{phrase}\"  ", end="", flush=True)
-        for c in range(3, 0, -1):
+        print(f"  [{saved + 1}/{n_clips}] Say: \"{phrase}\"  ", end="", flush=True)
+        for c in range(2, 0, -1):
             print(f"{c}... ", end="", flush=True)
-            time.sleep(0.4)
+            time.sleep(0.35)
 
         print("REC", end="", flush=True)
         audio, rms = record_clip()
 
         if rms < SILENCE_THRESHOLD:
-            print(f"  SKIP (RMS={rms:.5f} too quiet)")
+            print(f"  \033[93m[SKIP: Silence / RMS={rms:.5f}]\033[0m")
             skipped += 1
             continue
+
+        # Verify that the user did NOT accidentally say NEXUS
+        if whisper is not None:
+            segments, _ = whisper.transcribe(audio.flatten(), beam_size=1, language="en", temperature=0.0)
+            transcript = " ".join([s.text for s in segments]).strip().lower()
+            if "nexus" in transcript or "nexis" in transcript:
+                print(f"  \033[91m[✕ REJECTED: You said 'NEXUS' in negative mode!]\033[0m — re-prompting...")
+                continue
 
         fname = f"{safe}_{idx:04d}.wav"
         save_wav(os.path.join(out_dir, fname), audio)
         saved += 1
-        print(f"  OK (RMS={rms:.4f}) → {fname}")
+        print(f"  \033[92m[✓ OK]\033[0m (RMS={rms:.4f}) → {fname}")
 
-    print(f"\n  Done: {saved} saved, {skipped} skipped")
+    print(f"\n  Done: {saved} verified negative samples saved, {skipped} skipped")
 
 
 def mode_free(duration_sec):

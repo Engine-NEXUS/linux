@@ -54,6 +54,7 @@ impl LiveState {
     }
 
     /// Whether the current state implies an app is focused.
+    #[allow(dead_code)]
     pub fn app_context(&self) -> Option<&str> {
         match self {
             LiveState::AppOpen { app }
@@ -64,6 +65,7 @@ impl LiveState {
     }
 
     /// Whether there's unsent text that a "send" command would dispatch.
+    #[allow(dead_code)]
     pub fn has_pending_text(&self) -> bool {
         matches!(self, LiveState::TextTyped { .. })
     }

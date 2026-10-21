@@ -1,0 +1,11 @@
+# Modules that lib.rs may declare `pub mod` (scripts/dead-code-audit.mjs enforces this).
+# Every other module is `pub(crate)` so rustc can see unused items inside it.
+# A module belongs here only if code OUTSIDE the lib crate imports it
+# (src-tauri/tests, src-tauri/dev_tools, src/main.rs). Say who uses it.
+intent_parser   # tests/e2e_voice_fixture.rs, offline_commands.rs, test_user_commands.rs
+stt_groq        # tests/phase2_integration.rs
+tts_edge        # tests/phase2_integration.rs
+screen          # dev_tools/uia_probe.rs
+shortcuts       # dev_tools/shortcut_live.rs
+wake_eval       # dev_tools/wake_replay.rs
+gdk_backend_linux # src/main.rs (picks the GTK backend before Tauri starts; Linux only)

@@ -1,0 +1,19 @@
+:root { color-scheme: dark; }
+html, body { margin: 0; height: 100%; background: #07090d; overflow: hidden; font: 12px/1.3 "Segoe UI", system-ui, sans-serif; color: #e6edf6; user-select: none; }
+#hand-root { display: flex; flex-direction: column; height: 100%; }
+.stage { position: relative; flex: 1; min-height: 0; background: #000; }
+video, #skeleton { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+#skeleton { pointer-events: none; }
+.badge { position: absolute; left: 8px; top: 8px; padding: 2px 8px; border-radius: 10px; font-weight: 700; letter-spacing: .04em; background: rgba(255,255,255,.14); }
+.badge.armed { background: #1f9d55; }
+.badge.live { background: #d64545; }
+.flash { position: absolute; right: 8px; top: 8px; padding: 2px 8px; border-radius: 10px; font-weight: 700; background: #f0b429; color: #111; opacity: 0; transition: opacity .35s; }
+.flash.on { opacity: 1; transition: none; }
+.bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: #0e131b; border-top: 1px solid rgba(255,255,255,.08); }
+.dots { display: flex; gap: 3px; }
+.dots i { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,.18); }
+.dots i.on { background: #f0b429; }
+.status { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: .9; }
+#map { width: 64px; height: 36px; border: 1px solid rgba(255,255,255,.25); border-radius: 3px; background: #05070a; }
+.fpsnote { position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 10px; font-weight: 700; background: #b45309; color: #fff; display: none; }
+.fpsnote.on { display: block; }

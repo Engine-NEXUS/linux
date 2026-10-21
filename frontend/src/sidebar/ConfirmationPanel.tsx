@@ -230,5 +230,4 @@ export function ConfirmationPanel({ data, onClose }: ConfirmationPanelProps) {
     </div>
   );
 }
-
-export default ConfirmationPanel;
+// NOTE: default export removed (audit M5) — SidebarApp uses the named import.

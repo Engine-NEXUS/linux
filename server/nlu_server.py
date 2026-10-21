@@ -117,6 +117,18 @@ INTENTS = [
     "order_food",
     "search_product",
     "send_whatsapp_message",
+    # Ghost mode & voice control (8) — synced with train.py (was stale:
+    # this block was missing entirely — 55 vs 63 labels desync)
+    "ghost_mode_enter",
+    "ghost_mode_exit",
+    "start_dictation",
+    "stop_dictation",
+    "watch_screen_email",
+    "browser_tab",
+    "browser_close_tab",
+    "browser_search_focus",
+    # Spatial screen analysis (Feature 86) — NEW (must match train.py order)
+    "screen_analysis",
     # Fallback (1)
     "unknown",
 ]

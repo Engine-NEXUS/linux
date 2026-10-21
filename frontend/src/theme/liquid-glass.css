@@ -1,0 +1,110 @@
+/* ═══════════════════════════════════════════════════════════════
+   NEXUS Liquid Glass Design System
+   Live Optical Frosted Glass & Zero-Touch Adaptive Luminance
+
+   Reference: Apple Liquid Glass +Button demo (media_1790832308311.png)
+   - Real-time 60-144Hz DWM composition pass-through blur
+   - Automatic light/dark adaptation based on background luminance
+   - Text stays 100% crisp pure white (#FFFFFF) in both states
+   ═══════════════════════════════════════════════════════════════ */
+
+:root,
+[data-glass-luminance="dark"] {
+  --liquid-glass-bg: rgba(0, 0, 0, 0.40);
+  --liquid-glass-border: 1.5px solid rgba(255, 255, 255, 0.20);
+  --liquid-glass-shadow:
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.35),
+    0 16px 40px rgba(0, 0, 0, 0.45);
+  --liquid-glass-text-shadow:
+    0 0 14px rgba(255, 255, 255, 0.32),
+    0 1px 2px rgba(0, 0, 0, 0.60);
+  --liquid-glass-hover-bg: rgba(0, 0, 0, 0.50);
+  --liquid-glass-hover-border: 1.5px solid rgba(255, 255, 255, 0.32);
+}
+
+[data-glass-luminance="light"] {
+  --liquid-glass-bg: rgba(255, 255, 255, 0.22);
+  --liquid-glass-border: 1.5px solid rgba(255, 255, 255, 0.65);
+  --liquid-glass-shadow:
+    inset 0 1px 2px rgba(255, 255, 255, 0.85),
+    inset 0 -1.5px 3px rgba(0, 0, 0, 0.12),
+    0 16px 40px rgba(0, 0, 0, 0.14);
+  --liquid-glass-text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.52),
+    0 2px 8px rgba(0, 0, 0, 0.24);
+  --liquid-glass-hover-bg: rgba(255, 255, 255, 0.32);
+  --liquid-glass-hover-border: 1.5px solid rgba(255, 255, 255, 0.85);
+}
+
+/* Base class for liquid glass containers */
+.liquid-glass-panel {
+  background: var(--liquid-glass-bg) !important;
+  border: var(--liquid-glass-border) !important;
+  box-shadow: var(--liquid-glass-shadow) !important;
+  transition:
+    background 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+    border 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* High-contrast crisp white text styling across all backgrounds */
+.liquid-glass-text,
+.liquid-glass-button {
+  color: #ffffff !important;
+  text-shadow: var(--liquid-glass-text-shadow) !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Interactive Floating Pill Button matching media_1790832308311.png */
+.liquid-glass-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 28px;
+  border-radius: 9999px;
+  background: var(--liquid-glass-bg);
+  border: var(--liquid-glass-border);
+  box-shadow: var(--liquid-glass-shadow);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", sans-serif;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  cursor: pointer;
+  outline: none;
+  user-select: text;
+  pointer-events: auto;
+  position: relative;
+  transition:
+    transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+    background 0.25s ease,
+    border 0.25s ease,
+    box-shadow 0.25s ease,
+    filter 0.2s ease;
+}
+
+.liquid-glass-button:hover {
+  transform: scale(1.025);
+  background: var(--liquid-glass-hover-bg);
+  border: var(--liquid-glass-hover-border);
+}
+
+.liquid-glass-button:active {
+  transform: scale(0.975);
+}
+
+.liquid-glass-button .button-icon {
+  font-size: 20px;
+  font-weight: 400;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+
+.liquid-glass-button .button-label {
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}

@@ -7,4 +7,4 @@
 -r requirements.txt
 torch>=2.2,<3.0
 transformers>=4.40,<5.0
-onnx>=1.14
+scipy>=1.11

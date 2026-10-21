@@ -33,17 +33,66 @@ jobs:
       - name: Run frontend tests
         run: npm test
 
-  rust-check-linux:
+      - name: Turn-end choke-point gate (ghost hot-mic loop)
+        run: node ../scripts/check-turn-ends.mjs
+
+      - name: Repo hygiene gate self-test (secret rules fire on synthetic samples)
+        run: node ../scripts/check-repo-hygiene.mjs --selftest
+
+      - name: Repo hygiene gate (no tracked secrets, databases, logs, key files)
+        run: node ../scripts/check-repo-hygiene.mjs
+
+      # Commands defined/registered/invoked and events emitted/listened must agree;
+      # the one-sided leftovers are frozen in scripts/baselines/ and may only shrink.
+      - name: IPC + event contract gate
+        run: node ../scripts/check-ipc-contract.mjs
+
+  worker-check:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/worker
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/worker/package-lock.json
+
+      - name: Install Worker deps
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Worker tests
+        run: npm test
+
+  rust-check-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # tauri::generate_context!() needs `frontendDist` (../frontend/dist) to
+      # exist at compile time. This job checks Rust only and never builds the
+      # frontend, so an empty placeholder is enough.
+      - name: Placeholder frontend dist for tauri::generate_context!
+        run: mkdir -p frontend/dist && touch frontend/dist/index.html
+
       - uses: dtolnay/rust-toolchain@stable
 
+      # gtk-layer-shell is not here on purpose: overlay_linux loads it at
+      # runtime (libloading), so the build never links it.
       - name: Install Linux deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev libdbus-1-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
 
       - name: Cargo check (default)
         working-directory: src-tauri
@@ -53,9 +102,23 @@ jobs:
         working-directory: src-tauri
         run: cargo check --features mock-wake
 
-      - name: Cargo test (lib)
+      # The shipped binary is built with these features (nexus build).
+      - name: Cargo check (shipped features, ALL targets incl. tests, examples, dev_tools)
         working-directory: src-tauri
-        run: cargo test --lib -- --test-threads=1
+        run: cargo check --all-targets --features custom-protocol,admin-brain
+
+      # rustc --force-warn dead_code sees through #[allow(dead_code)]; lib.rs only
+      # publishes the modules in scripts/baselines/external-api.txt so unused pub
+      # items are visible. New dead code fails; the baseline may only shrink.
+      # On Linux the baseline is scripts/baselines/dead-code-linux.txt.
+      - name: Dead-code ratchet
+        run: node scripts/dead-code-audit.mjs
+
+      # --tests = lib unit tests + everything in src-tauri/tests (the 50-command
+      # voice fixture, offline commands, user commands).
+      - name: Cargo test (lib + integration tests)
+        working-directory: src-tauri
+        run: cargo test --tests --features custom-protocol,admin-brain -- --test-threads=1
 
   python-check:
     runs-on: ubuntu-latest
@@ -82,10 +145,21 @@ jobs:
         working-directory: server/nlu
         run: python -c "import ast; ast.parse(open('train.py').read()); print('train.py parses OK')"
 
-      # NOTE (2026-09-27): the legacy sidecar (server/sidecar/) and n8n
-      # blueprints (server/n8n/) were removed with the serverless migration
-      # (Worker + lazy Python sidecars). Their parse/validate steps are
-      # intentionally gone — do not re-add without restoring the dirs.
+      - name: Check sidecar modules parse
+        working-directory: server/sidecar
+        run: |
+          python -c "import ast; [ast.parse(open(f).read()) for f in ['sidecar.py','tts.py','oauth.py','db.py','n8n_client.py']]; print('All sidecar modules parse OK')"
+
+      - name: Validate n8n blueprints
+        working-directory: server/n8n
+        run: |
+          python -c "import json; [json.load(open(f)) for f in ['master_supervisor.blueprint.json','email_summarize.blueprint.json','github_pr_check.blueprint.json','calendar_peek.blueprint.json','general_chat.blueprint.json']]; print('All blueprints are valid JSON')"
 
       - name: Validate NLU Data Foundation
         run: python server/nlu/data_foundation.py validate
+
+      - name: Agent + memory unit tests
+        working-directory: server
+        run: |
+          pip install pytest -r agent/requirements.txt
+          python -m pytest agent/tests memory/tests -q

@@ -7,18 +7,22 @@
  */
 
 // ---- Per-user daily limits (configurable) ----
-// Tuned for 10 users × 150 requests/day on Workers Paid ($5/mo) plan.
-// PR analysis uses GLM-4.7-flash (Cloudflare neurons).
+// Tuned for 5–6 simultaneous users on the Workers Free plan (10K neurons/day
+// free on BOTH plans — the $5 Paid plan only matters past 10K/day).
+// Per-user neuron cap sums below the global hard stop: 6 × 1200 = 7200 < 9500,
+// so one heavy user cannot starve the rest (audit: 8000/user was the bug).
+// PR analysis uses GLM-flash (Cloudflare neurons).
 // Architecture + research routed to free external providers (Gemini/Groq).
 export const LIMITS = {
   requests_per_day: 150,        // 50 PR + 50 research + 50 architecture
-  ai_neurons_per_day: 8000,     // PR analysis only (arch/research go external)
+  ai_neurons_per_day: 1200,     // PR analysis only (arch/research go external)
   deep_calls_per_day: 15,       // GLM-5.3-flash deep reviews
   search_calls_per_day: 50,     // Wikipedia/Wikidata + Gemini synthesis
 };
 
-// Global neuron budget — 10K free/day on Workers Paid, then $0.011/1K neurons.
-// PR analysis is the only neuron consumer now (architecture + research are free).
+// Global neuron budget — 10K free/day (free AND paid plans), then $0.011/1K
+// neurons on Paid. PR analysis is the only neuron consumer now
+// (architecture + research are free).
 // Warn at 8K (switch to cheaper model), hard reject deep at 9.5K.
 const GLOBAL_NEURON_WARN = 8000; // switch to cheap model
 const GLOBAL_NEURON_HARD = 9500; // reject deep analysis
@@ -186,7 +190,6 @@ export interface Env {
   GOOGLE_CLIENT_SECRET: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
-  NEXUS_ENCRYPTION_KEY: string;
   // Research API keys (Cloudflare secrets)
   TAVILY_API_KEY?: string;
   SEARCHX_API_KEY?: string;

@@ -48,7 +48,49 @@ export type Intent =
   | { action: "enter_ghostwriter"; contact?: string }
   | { action: "screen_click"; ordinal: number }
   | { action: "screen_read"; ordinal: number }
+  // The screen agent: locate a named target, silence, replay the last
+  // screen answer, re-show the last point. Parsed on the Rust side.
+  | { action: "screen_locate"; target: string }
+  | { action: "stop_speech" }
+  | { action: "repeat_screen" }
+  | { action: "point_again" }
   | { action: "browser_tab"; index: number }
+  | { action: "browser_new_tab" }
+  | { action: "browser_close_tab"; index?: number }
+  | { action: "enter_ghost_control" }
+  | { action: "enter_hand_mode" }
+  | { action: "exit_hand_mode" }
+  | { action: "hand_mouse_live"; live: boolean }
+  | { action: "pointer_click"; kind: string }
+  | { action: "exit_ghost_control" }
+  | { action: "browser_search"; query: string }
+  | { action: "browser_search_focus" }
+  | { action: "start_dictation" }
+  | { action: "stop_dictation" }
+  | { action: "watch_screen_email" }
+  | { action: "memory_audit" }
+  | { action: "briefing" }
+  | { action: "import_contacts" }
+  | { action: "timetable_add"; source: string; section?: number | null }
+  | { action: "timetable_show" }
+  | { action: "timetable_clear" }
+  | { action: "timetable_commit" }
+  | { action: "study_pref"; activity: string; choice: string }
+  | { action: "mail_digest" }
+  | { action: "mail_mute" }
+  | { action: "directions"; destination: string; origin?: string | null; mode: string }
+  | { action: "places_search"; query: string; near?: string | null }
+  | { action: "whatsapp_read"; name?: string | null }
+  | { action: "people_flag"; name: string; kind: string; on: boolean }
+  | { action: "people_list" }
+  | { action: "calendar_agenda"; day: string }
+  | { action: "calendar_add"; text: string }
+  | { action: "memory_forget"; key: string }
+  | { action: "memory_forget_all" }
+  | { action: "memory_forget_all_confirm" }
+  | { action: "persona_friend" }
+  | { action: "persona_butler" }
+  | { action: "share_concern"; story?: string }
   | { action: "greeting"; reply: string }
   | { action: "nlu_result"; intent: string; slots: unknown; confidence: number }
   | { action: "unknown"; raw: string };
@@ -596,6 +638,51 @@ export function parseIntent(transcript: string): Intent {
   //          "fire up chrome", "bring up notepad", "show calculator"
   // All "open" commands go through the 3-tier resolution in Rust:
   //   running → installed → browser fallback → not found
+
+  // --- "new tab" guard — MUST precede the open catch-all: "open a new tab"
+  // would otherwise become open_app{target:"a new tab"} and Windows-search
+  // for it (Rust has the real Ctrl+T path).
+  const newTabMatch = text.match(
+    /^(?:(?:can|could|would)\s+you\s+|please\s+|just\s+)?(?:open|create|make|start)\s+(?:a\s+|the\s+)?(?:new\s+)?tab$/i,
+  ) || /^(?:a\s+)?new\s+tab$/i.test(text) || /^open\s+(?:a\s+|the\s+)?tab$/i.test(text);
+  if (newTabMatch) {
+    return { action: "browser_new_tab" };
+  }
+
+  // --- "close/delete (this/the/Nth) tab" guard — MUST precede the close
+  // catch-all: "close tab 5" would otherwise taskkill an app named "tab 5".
+  const closeTabMatch = text.match(
+    /^(?:close|delete)\s+(?:(?:this|the|current|active)\s+)?tab$/i,
+  );
+  if (closeTabMatch) {
+    return { action: "browser_close_tab" };
+  }
+  const closeTabNumMatch = text.match(
+    /^(?:close|delete)\s+(?:(?:this|the|current|active)\s+)?tab\s+(\d+)$/i,
+  );
+  if (closeTabNumMatch) {
+    const n = parseInt(closeTabNumMatch[1], 10);
+    if (n >= 1 && n <= 9) {
+      return { action: "browser_close_tab", index: n };
+    }
+  }
+
+  // --- WhatsApp chat OPEN guard - MUST precede the open catch-all: "open chat with mummy"
+  // / "open mummy chat in whatsapp" would otherwise become open_app{target:"chat with mummy"}.
+  // (Chat-open only; anything with "saying" is send-shaped and left to the Rust orchestrator.)
+  if (!/\bsaying\b/i.test(text)) {
+    const waEarly =
+      text.match(/^(?:open|show|go\s+to)\s+(?:my\s+|the\s+)?(?:whatsapp\s+)?chat\s+with\s+(.+?)(?:\s+(?:on|in)\s+(?:the\s+)?whatsapp(?:\s+app)?)?(?:\s+please)?$/i) ||
+      text.match(/^(?:open|show|go\s+to)\s+(?:my\s+)?(.+?)(?:'s)?\s+chat\s+(?:on|in)\s+(?:the\s+)?whatsapp(?:\s+app)?(?:\s+please)?$/i) ||
+      text.match(/^(?:open|show)\s+(?!whatsapp\b)(.+?)\s+(?:on|in)\s+(?:the\s+)?whatsapp(?:\s+app)?(?:\s+please)?$/i);
+    if (waEarly) {
+      const contact = waEarly[1].trim().replace(/^(?:my|the)\s+/i, "");
+      if (contact && !/^(?:web|desktop|app|status|settings)$/i.test(contact)) {
+        return { action: "whatsapp_chat", contact };
+      }
+    }
+  }
+
   const openMatch = text.match(
     /^(?:open|launch|start|run|fire\s+up|bring\s+up|show|pull\s+up|go\s+to|visit|browse\s+to|navigate\s+to)\s+(.+)$/i,
   );

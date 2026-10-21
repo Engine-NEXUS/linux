@@ -103,12 +103,4 @@ export async function cacheSet(env: Env, key: string, value: unknown, ttlSeconds
     "INSERT OR REPLACE INTO cache_entries (cache_key, cache_value, expires_at, created_at) VALUES (?, ?, ?, ?)"
   ).bind(key, raw, expiresAt, now).run();
 }
-
-// ---- Cache delete ----
-
-export async function cacheDelete(env: Env, key: string): Promise<void> {
-  if (env.CACHE) {
-    try { await env.CACHE.delete(key); } catch { /* ignore */ }
-  }
-  await env.DB.prepare("DELETE FROM cache_entries WHERE cache_key = ?").bind(key).run();
-}
+// NOTE: cacheDelete was deleted (audit M4) — defined but never imported.

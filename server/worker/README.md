@@ -156,12 +156,19 @@ npx wrangler d1 execute nexus-db --file=schema.sql --local
 
 ## Security
 
+- **Deny-by-default device gate** — every route except the public allowlist
+  (`/health`, `/v1/profiles/claim`, `GET /oauth/callback`, `/models/nlu/*`,
+  `/v1/admin/*` which carries its own admin token) requires a valid device
+  bearer. The owner of a request is the device's canonical `profile_id`; a
+  `user_id` in the query or body is ignored. See
+  [`docs/changes/linux-port-j1-worker-deny-by-default-device-gate.md`](../../docs/changes/linux-port-j1-worker-deny-by-default-device-gate.md).
 - OAuth tokens stored in D1 (encrypted at rest by Cloudflare)
 - OAuth client secrets stored as Worker secrets (never in code)
 - Worker is stateless (V8 isolate) — no data persists between requests
 - HTTPS end-to-end (Cloudflare terminates TLS)
 - D1 access only via the Worker binding (no external DB access)
-- CORS enabled for all origins (the Worker URL is unguessable)
+- CORS reflects an allowlisted origin (never `*`) and varies on `Origin`; the
+  device credential — not the origin — is what authorises a request
 
 ## Adding new intents
 

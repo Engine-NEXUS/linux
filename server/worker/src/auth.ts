@@ -9,12 +9,39 @@
  * These helpers make the device credential real:
  *   - the bearer token is presented per-request and only its SHA-256 is stored,
  *     so a database leak does not yield replayable credentials;
- *   - every non-public route requires a valid, unrevoked, unexpired device;
+ *   - every non-public route requires a valid, unrevoked device;
  *   - OAuth `state` is 32 random bytes, hashed at rest, single-use, and TTL'd,
  *     so it stops doubling as a `user_id` disclosure channel.
+ *
+ * ── BRANCH ADAPTATION (Linux port J1, 2026-10-20) ────────────────────────────
+ *
+ * This module was written against a `user_devices` table that the branch
+ * dropped in favour of the Feature-88 `devices` table (`schema.sql`: one
+ * canonical profile per laptop installation, Worker-issued `profile_id` +
+ * `device_id` + a one-time device token whose SHA-256 is the only thing D1
+ * keeps). It is re-pointed here rather than copied:
+ *
+ *   - the credential lives in `devices.device_token_hash` (hashed, as before);
+ *   - the OWNER of a device is its `profile_id` — the canonical, Worker-issued
+ *     identity. It is the only key a gated route may read or write, and it is
+ *     the same key `handleTranscript` already uses for canonical devices
+ *     (`credentialKey = gate.legacy ? userId : gate.profileId`);
+ *   - `profiles.provision_hint` is deliberately NOT used as an owner key: it is
+ *     a client-chosen hint, so anybody could claim a profile carrying somebody
+ *     else's hint and inherit that person's tokens. The hint stays audit-only.
+ *
+ * The hash + constant-time compare are the Feature-88 primitives in
+ * `./identity` — re-used rather than re-implemented, so the Worker has exactly
+ * one implementation of both.
  */
 
-const DEVICE_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 365; // 1 year
+import { sha256Hex, timingSafeEqualHex } from "./identity";
+
+export { sha256Hex };
+
+/** Constant-time comparison of two equal-length hex strings. */
+export const safeEqualHex = timingSafeEqualHex;
+
 export const OAUTH_STATE_TTL_SECONDS = 60 * 10; // 10 minutes, per MCP guidance
 
 /**
@@ -27,15 +54,6 @@ export interface AuthEnv {
   DB: D1Database;
 }
 
-/** Hex-encoded SHA-256 of `input`. */
-export async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 /** Cryptographically random hex string of `byteLength` bytes. */
 export function randomHex(byteLength: number): string {
   const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
@@ -44,43 +62,66 @@ export function randomHex(byteLength: number): string {
     .join("");
 }
 
-/** Constant-time comparison of two equal-length hex strings. */
-export function safeEqualHex(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
 /**
  * Routes that must stay reachable without a device credential.
  *
  * - `/health` — liveness probe.
- * - `/api/register` — device bootstrap. This is the one route that *creates* a
- *   credential; it cannot require one. It is safe because it only ever writes a
- *   hash of a caller-chosen token for a caller-chosen device_id. An attacker can
- *   squat on a device_id, but gains nothing: they cannot read another device's
- *   row, and OAuth tokens are keyed by user_id, which they still cannot guess
- *   (and no longer need, since the token endpoints now authenticate by
- *   device, not by user_id).
+ * - `/v1/profiles/claim` — device bootstrap. This is the one route that
+ *   *creates* a credential; it cannot require one. It is safe because it only
+ *   ever writes a hash of a caller-chosen token for a caller-chosen device_id.
+ *   An attacker can squat on a device_id, but gains nothing: they cannot read
+ *   another device's row, and the OAuth token endpoints authenticate by
+ *   device, never by a client-supplied user id.
  * - `/oauth/callback` — the provider redirects the *browser* here, which cannot
  *   attach an Authorization header. It is protected instead by the single-use
  *   hashed `state` issued by `/oauth/auth-url`.
- * - `/config/check` — returns only booleans and scope lists, no secrets.
- * - `/models/nlu/*` — public model distribution; the blobs are already public.
- *   (`/models/nlu/publish` keeps its separate admin-token gate.)
+ * - `/models/nlu/latest` + `/models/nlu/download` — public model distribution;
+ *   the blobs are already public and the family client polls them
+ *   unauthenticated (`src-tauri/src/nlu_update.rs`).
+ * - `/models/nlu/publish` — admin-token gated inside the handler, so it must
+ *   stay reachable by the admin tooling that has no device credential.
  */
 export const PUBLIC_ROUTES = new Set([
   "GET /health",
-  "POST /api/register",
+  "POST /v1/profiles/claim",
   "GET /oauth/callback",
-  "GET /config/check",
   "GET /models/nlu/latest",
   "GET /models/nlu/download",
+  "POST /models/nlu/publish",
 ]);
 
+/**
+ * Route prefixes that carry their own credential and therefore never need a
+ * device bearer. The admin plane authenticates with the admin token
+ * (`NEXUS_ADMIN_IDENTITY_TOKEN`), not with a device.
+ */
+export const SELF_AUTH_ROUTE_PREFIXES = ["/v1/admin/"];
+
+/** `"GET /health"` — the key form used by {@link PUBLIC_ROUTES}. */
+export function routeKey(method: string, path: string): string {
+  return `${method.toUpperCase()} ${path}`;
+}
+
+/**
+ * True when the route may be reached without a device credential.
+ *
+ * Everything else is deny-by-default: it needs a valid, unrevoked device.
+ */
+export function isPublicRoute(method: string, path: string): boolean {
+  if (SELF_AUTH_ROUTE_PREFIXES.some((prefix) => path.startsWith(prefix))) return true;
+  return PUBLIC_ROUTES.has(routeKey(method, path));
+}
+
 export interface DeviceRecord {
+  /**
+   * The canonical owner of this device — the Feature-88 `profile_id` of the
+   * `devices` row, renamed.
+   *
+   * This is the ONLY identity a gated route may use. It is Worker-issued, so
+   * it cannot be chosen, guessed or forged by the caller.
+   */
   user_id: string;
+  /** The device row id (`dev_…`). */
   device_id: string;
 }
 
@@ -114,36 +155,65 @@ export async function authenticateDevice(
   const tokenHash = await sha256Hex(token);
 
   // Looked up by hash so the plaintext token is never compared against, stored,
-  // or logged. `revoked_at IS NULL` and `expires_at` are part of the predicate so
-  // a revoked or expired device cannot authenticate even with a valid token.
+  // or logged. The Feature-88 `devices` row carries the credential; `status`
+  // and `revoked_at` are part of the predicate so a revoked device cannot
+  // authenticate even with a valid token.
+  //
+  // The owner is the device's `profile_id`. The column is selected under its
+  // real name and renamed in TypeScript below, next to `DeviceRecord` — not
+  // through a SQL alias — so a wrong column name is a compile error instead of
+  // a silent `undefined` owner. (An alias here once hid exactly that: the
+  // hand-rolled D1 doubles return the table's real columns, and the owner
+  // came back undefined.)
   const row = await env.DB.prepare(
-    `SELECT user_id, device_id
-       FROM user_devices
-      WHERE device_token_hash = ?
-        AND device_revoked_at IS NULL
-        AND (device_token_expires_at IS NULL OR device_token_expires_at > ?)
+    `SELECT d.profile_id, d.device_id, d.device_token_hash
+       FROM devices d
+      WHERE d.device_token_hash = ?
+        AND d.status = 'active'
+        AND d.revoked_at IS NULL
       LIMIT 1`,
   )
-    .bind(tokenHash, Date.now() / 1000)
-    .first<DeviceRecord>();
+    .bind(tokenHash)
+    .first<{ profile_id: string; device_id: string; device_token_hash: string }>();
 
   if (!row) {
     return { error: json({ error: "unauthorized: invalid device credential" }, 401) };
   }
 
-  return { device: row };
+  // Constant-time re-check of the value the row was matched on, so the
+  // comparison never short-circuits on the first differing character.
+  if (!timingSafeEqualHex(row.device_token_hash, tokenHash)) {
+    return { error: json({ error: "unauthorized: invalid device credential" }, 401) };
+  }
+
+  return { device: { user_id: row.profile_id, device_id: row.device_id } };
 }
 
 /**
- * Register (or re-key) a device. Returns the hash to persist.
+ * The owner key a gated route may use — always the authenticated device's
+ * owner, never a client-supplied id.
  *
- * A device may re-register to rotate its token. This is also the migration path
- * for any row created before the hashing change, which would have a plaintext
- * `device_token` instead of a hash.
+ * Transition rule: during the grace period a client may still send a
+ * `user_id` (query parameter or body field) alongside its device bearer. The
+ * id is accepted but IGNORED — the device credential is the only thing that
+ * decides who the caller is. A request that carries only a `user_id` never
+ * reaches this function: the gate already refused it with 401.
+ */
+export function resolveAuthUserId(device: DeviceRecord, requestedUserId: string | null): string {
+  void requestedUserId;
+  return device.user_id;
+}
+
+/**
+ * Register (or re-key) a device against the Feature-88 `devices` table.
+ * Returns the plaintext token once, to the registering client only.
+ *
+ * A device may re-register to rotate its token. The credential is stored only
+ * as its SHA-256 hash; the plaintext never touches the database.
  */
 export async function registerDevice(
   env: AuthEnv,
-  userId: string,
+  profileId: string,
   deviceId: string,
   deviceName: string | null,
   os: string | null,
@@ -151,21 +221,22 @@ export async function registerDevice(
 ): Promise<string> {
   const token = randomHex(32);
   const tokenHash = await sha256Hex(token);
-  const expiresAt = nowSeconds + DEVICE_TOKEN_TTL_SECONDS;
 
   await env.DB.prepare(
-    `INSERT INTO user_devices
-       (user_id, device_id, device_name, os, device_token_hash,
-        device_token_expires_at, device_revoked_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
-     ON CONFLICT(user_id, device_id) DO UPDATE SET
+    `INSERT INTO devices
+       (device_id, profile_id, device_token_hash, device_name, os, app_version,
+        status, created_at, last_seen_at, revoked_at)
+     VALUES (?, ?, ?, ?, ?, NULL, 'active', ?, ?, NULL)
+     ON CONFLICT(device_id) DO UPDATE SET
+       profile_id = excluded.profile_id,
        device_name = excluded.device_name,
        os = excluded.os,
        device_token_hash = excluded.device_token_hash,
-       device_token_expires_at = excluded.device_token_expires_at,
-       device_revoked_at = NULL`,
+       status = 'active',
+       last_seen_at = excluded.last_seen_at,
+       revoked_at = NULL`,
   )
-    .bind(userId, deviceId, deviceName, os, tokenHash, expiresAt, nowSeconds)
+    .bind(deviceId, profileId, tokenHash, deviceName, os, nowSeconds, nowSeconds)
     .run();
 
   // Returned once, to the registering client only. Never persisted in plaintext,
@@ -178,7 +249,8 @@ export async function registerDevice(
  *
  * Returns the opaque state value to hand to the provider. Only its hash is
  * stored, so the value cannot be recovered from the database — and it carries no
- * user_id, so it no longer leaks one through the redirect URL.
+ * user id, so it no longer leaks one through the redirect URL. The user is
+ * bound to the state ROW, which is what the callback redeems.
  */
 export async function createOAuthState(
   env: AuthEnv,
@@ -246,4 +318,58 @@ export async function consumeOAuthState(
     .first<{ user_id: string; provider: string }>();
 
   return row ?? null;
+}
+
+// ---- CORS ----
+
+/**
+ * The origins the Worker's own clients use.
+ *
+ * - `tauri://localhost` — packaged Tauri app on Windows.
+ * - `http(s)://tauri.localhost` — packaged Tauri app on Linux/macOS.
+ */
+export const DEFAULT_ALLOWED_ORIGINS = [
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+];
+
+/** Loopback dev origins (`vite dev`, `tauri dev`) — never a public origin. */
+const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+
+/**
+ * The allowlist: the built-in origins plus any extra ones configured through
+ * the `ALLOWED_ORIGINS` environment variable (comma-separated).
+ */
+export function parseAllowedOrigins(raw?: string | null): string[] {
+  const extra = (raw || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return [...DEFAULT_ALLOWED_ORIGINS, ...extra];
+}
+
+/** True when the origin may be reflected back in an `Access-Control-Allow-Origin`. */
+export function isAllowedOrigin(origin: string, allowed: string[]): boolean {
+  if (!origin) return false;
+  if (allowed.includes(origin)) return true;
+  return LOOPBACK_ORIGIN.test(origin);
+}
+
+/**
+ * CORS headers for a response.
+ *
+ * The origin is REFLECTED — never `*` — and only when it is on the allowlist.
+ * `*` let any web page read the token routes cross-origin. `Vary: Origin` is
+ * always set so a shared cache never serves one origin's response to another.
+ */
+export function corsHeaders(
+  origin: string | null,
+  allowed: string[],
+): Record<string, string> {
+  const headers: Record<string, string> = { Vary: "Origin" };
+  if (origin && isAllowedOrigin(origin, allowed)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  return headers;
 }

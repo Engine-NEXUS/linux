@@ -18,9 +18,9 @@
 //!                 └── execute()               → octocrab API call
 //! ```
 //!
-//! Token: fetched from the Worker via `GET /oauth/github-token?user_id=...`
-//! and cached in memory for the session. The client_secret never leaves
-//! the Worker.
+//! Token: fetched from the Worker with the device bearer credential and the
+//! temporary legacy `user_id` migration parameter, then cached in memory for
+//! the session. The client_secret never leaves the Worker.
 //!
 //! Why octocrab: 16.8M downloads, actively maintained, typed semantic API
 //! + low-level HTTP fallback for endpoints not yet covered.
@@ -37,13 +37,10 @@ use tokio::sync::RwLock;
 static GITHUB_TOKEN: once_cell::sync::Lazy<Arc<RwLock<Option<CachedToken>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(None)));
 
-#[allow(dead_code)]
 struct CachedToken {
     token: String,
     /// When the token expires (unix timestamp). 0 = no expiry (classic OAuth).
     expires_at: f64,
-    /// When we fetched the token (unix timestamp).
-    fetched_at: f64,
 }
 
 impl CachedToken {
@@ -62,22 +59,22 @@ impl CachedToken {
 /// The Worker handles refresh logic internally — we just get a valid token.
 async fn fetch_token_from_worker(
     worker_url: &str,
-    _user_id: &str,
+    user_id: &str,
 ) -> Result<String, String> {
-    // Security (2026-10-02): no `user_id` query parameter. The Worker derives
-    // the account from the authenticated device credential.
-    let url = format!(
-        "{}/oauth/github-token",
-        worker_url.trim_end_matches('/')
-    );
-    tracing::info!("github_cmd: fetching token from worker: {}", url);
+    let url = crate::worker_proxy::build_worker_url(
+        worker_url,
+        "/oauth/github-token",
+        None,
+        Some(user_id),
+    )?;
+    tracing::info!("github_cmd: fetching token from Worker");
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
-    let resp = crate::device_auth::apply_to(client.get(&url))
+    let resp = crate::worker_proxy::apply_to(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("token fetch: {e}"))?;
@@ -86,10 +83,7 @@ async fn fetch_token_from_worker(
         return Err("GitHub not connected. Please connect GitHub in the NEXUS setup.".into());
     }
     if resp.status() == 401 || resp.status() == 403 {
-        return Err(
-            "Device not authorized with the Worker. Reconnect NEXUS or check settings."
-                .into(),
-        );
+        return Err(crate::worker_proxy::DEVICE_NOT_AUTHORIZED_MESSAGE.into());
     }
     if !resp.status().is_success() {
         let status = resp.status();
@@ -135,7 +129,6 @@ pub async fn get_github_token(worker_url: &str, user_id: &str) -> Result<String,
         *guard = Some(CachedToken {
             token: token.clone(),
             expires_at: now + 3600.0, // 1 hour
-            fetched_at: now,
         });
     }
 
@@ -508,6 +501,7 @@ pub trait GitHubExecutable {
     fn confirmation_prompt(&self) -> Option<String>;
 
     /// Required OAuth scopes for this command.
+    #[allow(dead_code)]
     fn required_scopes(&self) -> &'static [&'static str] {
         &["repo"]
     }
@@ -1125,30 +1119,6 @@ async fn execute_list_prs_account_wide(
         state: state.to_string(),
         prs: all_prs,
     }
-}
-
-/// Extract "owner/repo" from a GitHub API repository_url.
-/// Input: "https://api.github.com/repos/owner/repo"
-/// Output: "owner/repo"
-#[allow(dead_code)]
-fn extract_repo_from_url(url: &str) -> String {
-    // Parse the URL string to extract the path after /repos/
-    // URL format: https://api.github.com/repos/{owner}/{repo}
-    if let Some(pos) = url.find("/repos/") {
-        let after_repos = &url[pos + 7..]; // skip "/repos/"
-        // after_repos = "owner/repo" (possibly with trailing slash or query)
-        // Take everything up to the first '?' or end
-        let repo_part = after_repos.split('?').next().unwrap_or(after_repos);
-        // Remove trailing slash
-        let repo_part = repo_part.trim_end_matches('/');
-        // Now we have "owner/repo" — take the first two path segments
-        let parts: Vec<&str> = repo_part.splitn(3, '/').collect();
-        if parts.len() >= 2 {
-            return format!("{}/{}", parts[0], parts[1]);
-        }
-    }
-    // Fallback: use the full URL as the repo identifier
-    url.to_string()
 }
 
 async fn execute_list_prs(
@@ -2483,7 +2453,6 @@ mod tests {
         let classic = CachedToken {
             token: "abc".into(),
             expires_at: 0.0,
-            fetched_at: now,
         };
         assert!(classic.is_valid());
 
@@ -2491,7 +2460,6 @@ mod tests {
         let valid = CachedToken {
             token: "abc".into(),
             expires_at: now + 3600.0,
-            fetched_at: now,
         };
         assert!(valid.is_valid());
 
@@ -2499,7 +2467,6 @@ mod tests {
         let expired = CachedToken {
             token: "abc".into(),
             expires_at: now - 600.0,
-            fetched_at: now - 4200.0,
         };
         assert!(!expired.is_valid());
 
@@ -2507,7 +2474,6 @@ mod tests {
         let soon_expire = CachedToken {
             token: "abc".into(),
             expires_at: now + 180.0,
-            fetched_at: now - 3420.0,
         };
         assert!(!soon_expire.is_valid());
     }

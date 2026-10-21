@@ -137,6 +137,14 @@ def canonical_intent(text, intents):
         if text.startswith(("focus ", "switch ", "bring ", "activate ", "restore ")) and "focus_app" in labels:
             return "focus_app"
         return "whatsapp_open"
+    if labels == {"send_whatsapp_message", "whatsapp_search"}:
+        return "send_whatsapp_message"
+    if "send_whatsapp_message" in labels:
+        return "send_whatsapp_message"
+    if "nlu_result" in labels:
+        labels = {l for l in labels if l != "nlu_result"}
+        if len(labels) == 1:
+            return next(iter(labels))
     raise ValueError(f"No canonical policy for {text!r}: {sorted(labels)}")
 
 

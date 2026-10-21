@@ -1,14 +1,15 @@
-//! Lazy STT server manager ΓÇö starts the local faster-whisper STT server
+﻿//! Lazy STT server manager Î“Ã‡Ã¶ starts the local faster-whisper STT server
 //! on-demand when the wake word fires, and kills it after idle to save
 //! ~340 MB of RAM at idle.
 //!
-//! The STT server (server/stt_server.py) uses faster-whisper tiny.en and
+//! The STT server (server/stt_server.py) uses Moonshine Streaming local
 //! takes ~340 MB of RAM. Instead of running it constantly, we:
 //!   1. Spawn it when the wake word is detected
 //!   2. Kill it after 60 seconds of no transcription requests
 //!
 //! This saves ~340 MB of RAM at idle (the vast majority of the time).
 
+use std::io::BufRead;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 
 static STT_CHILD: Mutex<Option<Child>> = Mutex::new(None);
 static STT_RUNNING: AtomicBool = AtomicBool::new(false);
-/// Guard against concurrent ensure_stt_running calls — set to true atomically
+/// Guard against concurrent ensure_stt_running calls â€” set to true atomically
 /// before spawning, so a second caller sees it and returns immediately.
 static STT_STARTING: AtomicBool = AtomicBool::new(false);
 static LAST_REQUEST: Mutex<Option<Instant>> = Mutex::new(None);
@@ -70,12 +71,12 @@ fn stt_script_path() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Check if the STT server is already running (external or our child).
-/// Uses a raw TCP connection to avoid tokio runtime dependency ΓÇö this
+/// Probe the local STT sidecar with a raw HTTP GET and return the response
+/// body, or `None` when nothing is listening on the port.
+///
+/// Uses a raw TCP connection to avoid tokio runtime dependency — this
 /// function is called from non-tokio threads (wake-word thread, hotkey handler).
-fn is_stt_responsive() -> bool {
-    // Use a simple TCP connection + HTTP GET instead of reqwest, which
-    // requires a tokio runtime that may not be available on the calling thread.
+fn stt_http_probe() -> Option<String> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
@@ -87,24 +88,46 @@ fn is_stt_responsive() -> bool {
         timeout,
     );
 
-    match stream_result {
-        Ok(mut stream) => {
-            stream.set_read_timeout(Some(timeout)).ok();
-            stream.set_write_timeout(Some(timeout)).ok();
-            let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
-            if stream.write_all(request.as_bytes()).is_err() {
-                return false;
-            }
-            let mut response = Vec::new();
-            if stream.read_to_end(&mut response).is_err() {
-                return false;
-            }
-            let response_str = String::from_utf8_lossy(&response);
-            // Check for HTTP 200
-            response_str.contains("200 OK") || response_str.contains("\"ok\":true")
-        }
-        Err(_) => false,
+    let mut stream = stream_result.ok()?;
+    stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
+    let request = "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request.as_bytes()).is_err() {
+        return None;
     }
+    let mut response = Vec::new();
+    if stream.read_to_end(&mut response).is_err() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&response).to_string())
+}
+
+/// Check if the STT server is running AND healthy (it can transcribe).
+pub(crate) fn is_stt_responsive() -> bool {
+    let Some(response) = stt_http_probe() else {
+        return false;
+    };
+    // "200 OK" / "ok":true = healthy.
+    response.contains("200 OK") || response.contains("\"ok\":true")
+}
+
+/// True when a sidecar is listening on the port at all — even when it reports
+/// that it cannot transcribe (e.g. `moonshine-voice` is not installed, answer
+/// /health with 503 + "ok":false). The manager must not spawn a SECOND copy
+/// over a running-but-broken sidecar; the real reason travels with the
+/// transcription error instead.
+fn stt_server_present() -> bool {
+    stt_http_probe().is_some()
+}
+
+/// Environment for the local STT child process. Moonshine language is locked
+/// here rather than inherited from the operator shell: English-only operation
+/// must not depend on ambient process configuration.
+fn stt_child_env() -> Vec<(String, String)> {
+    vec![
+        ("MOONSHINE_MODEL".to_string(), read_moonshine_model()),
+        ("MOONSHINE_LANG".to_string(), "en".to_string()),
+    ]
 }
 
 /// Find a working Python interpreter.
@@ -114,7 +137,7 @@ fn is_stt_responsive() -> bool {
 /// 2. Windows registry: HKCU/HKLM PythonCore\3.13, 3.12, 3.11, 3.10
 /// 3. Common per-user and system install locations
 pub fn find_python() -> Option<String> {
-    // 1. Try PATH-based commands — verify each actually works
+    // 1. Try PATH-based commands â€” verify each actually works
     for cmd in &["python", "python3", "py"] {
         if let Ok(output) = std::process::Command::new(cmd).arg("--version").output() {
             if output.status.success() {
@@ -188,14 +211,14 @@ pub fn ensure_stt_running() {
         return;
     }
 
-    // Atomically claim the "starting" slot — prevents concurrent spawns
+    // Atomically claim the "starting" slot â€” prevents concurrent spawns
     if STT_STARTING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         tracing::debug!("lazy_stt: another thread is already starting STT, skipping");
         return;
     }
 
     // Check if an external STT server is already running (e.g. started by run.ps1)
-    if is_stt_responsive() {
+    if stt_server_present() {
         STT_RUNNING.store(true, Ordering::Relaxed);
         STT_STARTING.store(false, Ordering::SeqCst);
         tracing::info!("lazy_stt: external STT server already running on port {STT_PORT}");
@@ -207,7 +230,7 @@ pub fn ensure_stt_running() {
         Some(p) => p,
         None => {
             STT_STARTING.store(false, Ordering::SeqCst);
-            tracing::warn!("lazy_stt: stt_server.py not found — skipping (external server may be used)");
+            tracing::warn!("lazy_stt: stt_server.py not found â€” skipping (external server may be used)");
             return;
         }
     };
@@ -228,14 +251,39 @@ pub fn ensure_stt_running() {
 
     let child = Command::new(&python_cmd)
         .arg(&script)
-        .env("MOONSHINE_MODEL", read_moonshine_model())
+        .envs(stt_child_env())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn();
 
     match child {
-        Ok(c) => {
+        Ok(mut c) => {
             let pid = c.id();
+            // Drain the child's stderr on a dedicated thread: the pipe is
+            // otherwise never read (Moonshine/uvicorn tracebacks lost) and
+            // a filled 64KB pipe can block the child mid-transcription with
+            // zero log evidence. Lines surface as [STT-PY] in the unified
+            // console; traceback/error lines escalate to warn.
+            if let Some(stderr) = c.stderr.take() {
+                std::thread::Builder::new()
+                    .name("stt-stderr-drain".into())
+                    .spawn(move || {
+                        for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+                            let msg = format!("[STT-PY] {line}");
+                            let low = line.to_lowercase();
+                            if low.contains("traceback")
+                                || low.contains("error")
+                                || low.contains("exception")
+                                || low.contains("warn")
+                            {
+                                tracing::warn!("{msg}");
+                            } else {
+                                tracing::info!("{msg}");
+                            }
+                        }
+                    })
+                    .ok();
+            }
             *STT_CHILD.lock().unwrap() = Some(c);
             STT_RUNNING.store(true, Ordering::Relaxed);
             STT_STARTING.store(false, Ordering::SeqCst);
@@ -274,7 +322,7 @@ pub fn mark_stt_request() {
 /// future use but is a no-op.
 pub fn check_stt_idle() {
     if STT_KEEP_ALIVE {
-        return; // Never kill — keep STT always ready for zero delay
+        return; // Never kill â€” keep STT always ready for zero delay
     }
 
     if !STT_RUNNING.load(Ordering::Relaxed) {
@@ -290,7 +338,7 @@ pub fn check_stt_idle() {
     };
 
     if should_kill {
-        tracing::info!("lazy_stt: STT server idle for {}s ΓÇö killing to save RAM", STT_IDLE_TIMEOUT.as_secs());
+        tracing::info!("lazy_stt: STT server idle for {}s Î“Ã‡Ã¶ killing to save RAM", STT_IDLE_TIMEOUT.as_secs());
         let mut child_guard = STT_CHILD.lock().unwrap();
         if let Some(mut child) = child_guard.take() {
             let _ = child.kill();
@@ -315,7 +363,7 @@ pub fn start_idle_monitor() {
 /// command has zero cold-start delay (cold model load is 10-15s).
 ///
 /// Only spawns when cloud STT won't be used (no Groq key or localSttOnly),
-/// mirroring the wake-word path's decision in wakeword_oww.rs — Groq users
+/// mirroring the wake-word path's decision in wakeword_oww.rs â€” Groq users
 /// pay no RAM. Runs on a background thread; never blocks startup or paint.
 pub fn spawn_prewarm(app_data_dir: std::path::PathBuf) {
     std::thread::Builder::new()
@@ -328,12 +376,15 @@ pub fn spawn_prewarm(app_data_dir: std::path::PathBuf) {
                 Ok(content) => {
                     let json: serde_json::Value =
                         serde_json::from_str(&content).unwrap_or_default();
-                    let key = json
-                        .get("groqApiKey")
-                        .or_else(|| json.get("groq_api_key"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let key = crate::auth_vault::get_api_key("groq").unwrap_or_else(|| {
+                        let json: serde_json::Value =
+                            serde_json::from_str(&content).unwrap_or_default();
+                        json.get("groqApiKey")
+                            .or_else(|| json.get("groq_api_key"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    });
                     let local = json
                         .get("localSttOnly")
                         .or_else(|| json.get("local_stt_only"))
@@ -388,4 +439,20 @@ fn read_moonshine_model() -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("medium_streaming")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_local_child_locks_english_model() {
+        let env: HashMap<String, String> = stt_child_env().into_iter().collect();
+        assert_eq!(env.get("MOONSHINE_LANG"), Some(&"en".to_string()));
+        assert!(!env
+            .get("MOONSHINE_MODEL")
+            .map(|model| model.is_empty())
+            .unwrap_or(true));
+    }
 }

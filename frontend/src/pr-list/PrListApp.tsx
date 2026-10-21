@@ -56,8 +56,8 @@ function PrCard({ pr, disabled, onMerge, onAnalyse }: {
   );
 }
 
-export function PrListApp() {
-  const { visible, repo, state, prs, loading, actionInProgress, hide, setActionInProgress, removePr } = usePrList();
+export function PrListApp({ onDock = () => {} }: { onDock?: (d: string) => void }) {
+  const { visible, prs, loading, actionInProgress, hide, setActionInProgress, removePr } = usePrList();
 
   // Listen for orchestrator github_result events with PrList data.
   // This is the FAST PATH for when the sidebar window is already open
@@ -185,21 +185,19 @@ export function PrListApp() {
 
   return (
     <div className="pr-list-container">
-      <div className="pr-list-header">
-        <div className="pr-list-title">
-          {prs.length} {state} PR{prs.length === 1 ? "" : "s"} in {repo}
+      {/* Header row: drag region + dock controls (Left/Right) */}
+      <header className="sidebar-header-row" data-tauri-drag-region>
+        <div className="sidebar-header-spacer" data-tauri-drag-region />
+        <div className="sidebar-dock-controls">
+          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
+            ◧
+          </button>
+          <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
+            ◨
+          </button>
         </div>
-        <button
-          className="pr-list-close"
-          onClick={() => tauriInvoke("show_settings_sidebar").catch(() => {})}
-          title="Settings"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
-        </button>
-      </div>
+      </header>
+
       {loading && <div className="pr-list-loading">Loading PRs...</div>}
       {!loading && prs.length === 0 && (
         <div className="pr-list-empty">No pull requests found.</div>

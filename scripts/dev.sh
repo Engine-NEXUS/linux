@@ -9,7 +9,7 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
 
 MISSING=()
-for pkg in libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config portaudio19-dev; do
+for pkg in libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libssl-dev pkg-config portaudio19-dev libgtk-layer-shell0; do
   dpkg -s "$pkg" &>/dev/null || MISSING+=("$pkg")
 done
 if [ ${#MISSING[@]} -gt 0 ]; then
@@ -22,12 +22,11 @@ command -v cargo &>/dev/null || { echo "Error: Rust/cargo required (https://rust
 
 TAURI_BIN="$ROOT_DIR/frontend/node_modules/.bin/tauri"
 echo "==> tauri dev (HMR on http://localhost:5173)"
-cd src-tauri
+# From the repo root: tauri.conf.json's beforeDevCommand (`npm run dev`)
+# resolves against the root package.json shim, which src-tauri/ lacks.
 if command -v cargo-tauri &>/dev/null; then
   exec cargo tauri dev
 elif [ -x "$TAURI_BIN" ] && "$TAURI_BIN" --version &>/dev/null; then
-  # Direct binary path — `npm exec` would shift cwd and break the
-  # relative `../frontend` paths in tauri.conf.json beforeDevCommand.
   exec "$TAURI_BIN" dev
 else
   echo "==> Installing tauri-cli (one-time, may take a few minutes)"

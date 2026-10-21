@@ -12,6 +12,19 @@
 //!   "you" or "doing" → "doing?"). Clipboard paste is instant and bypasses
 //!   autocomplete entirely. We restore the previous clipboard contents
 //!   after pasting.
+//!
+//! Why there is a session gate (Linux):
+//!   `enigo` is built with the X11 backend only (`Cargo.toml` declares
+//!   `enigo = "0.5"` with no features), so every key NEXUS synthesises goes
+//!   through XTEST on the X server. On a native Wayland session the X server
+//!   only knows XWayland clients, so a key event aimed at a native Wayland
+//!   window goes nowhere — while the old code reported success. The audit of
+//!   the target machine (Pop!_OS, COSMIC, Wayland) found exactly that:
+//!   "type_text returns Ok even when nothing was typed".
+//!
+//!   So the session is asked FIRST, and "we could not tell" is treated as
+//!   "no": the gate refuses with a sentence to say instead of typing into
+//!   the void.
 
 use enigo::{
     Direction::{Click, Press, Release},
@@ -20,32 +33,115 @@ use enigo::{
 use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+mod linux;
+
+/// What we know about the display session, for the input decision.
+///
+/// Plain data with no platform types in it, so [`typing_decision`] reads the
+/// same on every operating system and its tests run everywhere. Linux fills it
+/// in from `crate::session` and the X server; Windows and macOS fill in
+/// "there is a display, it is not Wayland, so the focused window takes the
+/// keys".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InputSession {
+    /// There is a display (X11 or Wayland) to type into.
+    pub display: bool,
+    /// The session is native Wayland: XTEST reaches XWayland windows only.
+    pub wayland: bool,
+    /// The focused window is known to be an XWayland (X11) window, so XTEST
+    /// reaches it. `None` means "we could not tell", which is not the same as
+    /// "no" — and is treated as a refusal.
+    pub xwayland_focus: Option<bool>,
+}
+
+/// Pure decision: may we send synthetic key events right now?
+///
+/// `Err` carries the sentence to say (or log). It never reports success for
+/// an event that will not arrive.
+pub fn typing_decision(session: InputSession) -> Result<(), String> {
+    if !session.display {
+        return Err("There is no display session, sir — I cannot type anything.".to_string());
+    }
+    if !session.wayland {
+        // X11 (and an XWayland session): XTEST reaches the focused window.
+        return Ok(());
+    }
+    match session.xwayland_focus {
+        Some(true) => Ok(()),
+        Some(false) => Err(
+            "That window is a native Wayland app, sir — I cannot type into it. \
+             Run it under XWayland, or let me copy the text to the clipboard."
+                .to_string(),
+        ),
+        None => Err(
+            "I cannot tell whether that window takes typing on Wayland, sir — \
+             I will not type into it blindly."
+                .to_string(),
+        ),
+    }
+}
+
+/// What we know about this session, for the input decision.
+#[cfg(target_os = "linux")]
+pub fn current_session() -> InputSession {
+    linux::current_session()
+}
+
+/// Windows and macOS: there is a display, and it is not Wayland, so the
+/// focused window always takes the keys.
+#[cfg(not(target_os = "linux"))]
+pub fn current_session() -> InputSession {
+    InputSession { display: true, wayland: false, xwayland_focus: None }
+}
+
+/// Refuse synthetic input when this session cannot deliver it.
+fn ensure_input_allowed() -> Result<(), String> {
+    typing_decision(current_session())
+}
+
+/// Put text on the clipboard so the user can paste it.
+///
+/// Linux only: this is the fallback for a native Wayland window, which no
+/// synthetic input can reach. `arboard` first (it is already a dependency),
+/// then `wl-copy` when it is installed.
+#[cfg(target_os = "linux")]
+pub fn copy_to_clipboard(text: &str) -> bool {
+    linux::copy_to_clipboard(text)
+}
+
 /// Build an `Enigo` handle, failing with an actionable message.
 ///
 /// `Cargo.toml` declares `enigo = "0.5"` with no features, so only the `x11rb`
 /// backend is compiled. On native Wayland there is no `$DISPLAY` and
-/// `Enigo::new` cannot connect. Rather than the bare `enigo init: ...` string
-/// that produced, the error now names the session type and the real remedy,
-/// because "couldn't type" with no explanation is the failure mode that made
-/// this look like a working feature.
+/// `Enigo::new` cannot connect. On Linux the error names the session type and
+/// the real remedy, because "couldn't type" with no explanation is the failure
+/// mode that made this look like a working feature.
 ///
 /// Longer-term fix is the semantic tiers in
 /// `docs/features/research/20-…`: `AT-SPI EditableText` and CDP
 /// `Runtime.evaluate` both set field contents with no input synthesis at all,
 /// which sidesteps the Wayland input lockdown rather than fighting it.
 fn init_enigo() -> Result<enigo::Enigo, String> {
-    if !crate::session::has_x11_input() {
-        tracing::warn!(
-            "live: keyboard synthesis attempted on a session without XTEST — {}",
-            crate::session::diagnostic_line()
-        );
+    #[cfg(target_os = "linux")]
+    {
+        if !crate::session::has_x11_input() {
+            tracing::warn!(
+                "live: keyboard synthesis attempted on a session without XTEST — {}",
+                crate::session::diagnostic_line()
+            );
+        }
     }
     Enigo::new(&Settings::default()).map_err(|e| {
-        format!(
+        #[cfg(target_os = "linux")]
+        let msg = format!(
             "keyboard input unavailable: {e} ({}). On Wayland this needs the \
              semantic input path or libei via the RemoteDesktop portal.",
             crate::session::kind().input_capability()
-        )
+        );
+        #[cfg(not(target_os = "linux"))]
+        let msg = format!("enigo init: {e}");
+        msg
     })
 }
 
@@ -55,6 +151,7 @@ fn init_enigo() -> Result<enigo::Enigo, String> {
 /// individual key presses. For longer text, uses clipboard paste
 /// (Ctrl+V) to avoid autocomplete corruption and improve speed.
 pub fn type_text(text: &str) -> Result<(), String> {
+    ensure_input_allowed()?;
     tracing::info!("live: typing {} chars", text.len());
     let mut enigo = init_enigo()?;
 
@@ -118,6 +215,7 @@ fn paste_text(text: &str) -> Result<(), String> {
 
 /// Press a single key (e.g., "enter", "escape", "tab").
 pub fn press_key(key: &str) -> Result<(), String> {
+    ensure_input_allowed()?;
     tracing::info!("live: pressing key: {key}");
     let mut enigo = init_enigo()?;
 
@@ -139,6 +237,7 @@ pub fn press_hotkey(keys: &[&str]) -> Result<(), String> {
 
     tracing::info!("live: pressing hotkey: {:?}", keys);
 
+    ensure_input_allowed()?;
     let mut enigo = init_enigo()?;
 
     // Parse all keys
@@ -293,5 +392,36 @@ mod tests {
         assert_eq!(parse_key("unknown"), None);
         assert_eq!(parse_key("xyz"), None);
         assert_eq!(parse_key(""), None);
+    }
+
+    #[test]
+    fn an_x11_session_can_type() {
+        // XTEST reaches whatever has the focus, so nothing is refused.
+        let s = InputSession { display: true, wayland: false, xwayland_focus: None };
+        assert!(typing_decision(s).is_ok());
+    }
+
+    #[test]
+    fn wayland_only_types_into_a_window_that_is_known_to_be_xwayland() {
+        // Known XWayland window: the X server delivers the key.
+        let s = InputSession { display: true, wayland: true, xwayland_focus: Some(true) };
+        assert!(typing_decision(s).is_ok());
+
+        // Known native Wayland window: refuse instead of typing into the void.
+        let s = InputSession { display: true, wayland: true, xwayland_focus: Some(false) };
+        let err = typing_decision(s).unwrap_err();
+        assert!(err.contains("Wayland"), "{err}");
+
+        // Unknown: "we could not tell" is not "yes".
+        let s = InputSession { display: true, wayland: true, xwayland_focus: None };
+        let err = typing_decision(s).unwrap_err();
+        assert!(err.contains("Wayland"), "{err}");
+    }
+
+    #[test]
+    fn no_display_means_no_typing() {
+        let s = InputSession { display: false, wayland: false, xwayland_focus: None };
+        let err = typing_decision(s).unwrap_err();
+        assert!(err.contains("display"), "{err}");
     }
 }

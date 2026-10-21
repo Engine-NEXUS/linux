@@ -28,6 +28,9 @@ pub const ALLOWED_TOOLS: &[&str] = &[
     "browser_search",
     "confirm_send",
     "cancel_action",
+    "mouse_move",
+    "mouse_click",
+    "ghost_calibrate",
 ];
 
 /// Targets that are never allowed (banking, password managers, etc.).
@@ -172,6 +175,25 @@ mod tests {
         assert_eq!(
             safety_check("confirm_send", None),
             SafetyVerdict::NeedsConfirmation
+        );
+    }
+
+    #[test]
+    fn test_ghost_tools_allowed_but_gated() {
+        // Mouse + calibrate tools exist in the allowlist (refusal comes
+        // from targets/confirm, never from a missing tool entry).
+        assert!(is_tool_allowed("mouse_move"));
+        assert!(is_tool_allowed("mouse_click"));
+        assert!(is_tool_allowed("ghost_calibrate"));
+        assert_eq!(
+            safety_check("mouse_click", Some("1Password")),
+            SafetyVerdict::Blocked(
+                "Target '1Password' is blocked for your safety, sir".to_string()
+            )
+        );
+        assert_eq!(
+            safety_check("ghost_calibrate", None),
+            SafetyVerdict::Allowed
         );
     }
 }

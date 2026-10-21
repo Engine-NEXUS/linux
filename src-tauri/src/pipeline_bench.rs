@@ -320,8 +320,8 @@ mod tests {
             println!("║    Synthesis time: {}                                              ║", fmt_ms(tts_time));
             println!("║    Status: OK (cloud, 0 MB RAM)                                          ║");
         } else {
-            println!("║    Synthesis time: {} (network down → Piper fallback)              ║", fmt_ms(tts_time));
-            println!("║    Status: FALLBACK (Piper local, ~80 MB RAM)                           ║");
+            println!("║    Synthesis time: {} (network down → Kokoro fallback)             ║", fmt_ms(tts_time));
+            println!("║    Status: FALLBACK (Kokoro local, ~260-370 MB RAM)                    ║");
         }
         println!("║                                                                          ║");
 
@@ -355,7 +355,7 @@ mod tests {
         println!("║    TOTAL: ~4,500-9,500 ms (4.5-9.5 seconds)                             ║");
         println!("║                                                                          ║");
         println!("║  Network down (all commands):                                           ║");
-        println!("║    + Piper TTS cold load (~1-2s first time)                             ║");
+        println!("║    + Kokoro TTS cold load (~1-2s first time)                            ║");
         println!("║    + No Worker (offline commands only)                                  ║");
         println!("║                                                                          ║");
         println!("╚══════════════════════════════════════════════════════════════════════════╝");

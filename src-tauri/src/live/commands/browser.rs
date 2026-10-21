@@ -16,9 +16,23 @@ use super::keyboard;
 /// Assumes a browser is currently focused.
 pub fn new_tab() -> Result<(), String> {
     tracing::info!("live: browser new tab");
-    keyboard::press_hotkey(&["ctrl", "t"])?;
-    thread::sleep(Duration::from_millis(300));
+    // Shortcut brain (E1): gated + verified. When the title changed the tab demonstrably exists, so the
+    // fixed settle wait is only kept for the unverified / legacy cases.
+    match crate::shortcuts::run_or_legacy(crate::shortcuts::Action::NewTab, None, || {
+        keyboard::press_hotkey(&["ctrl", "t"])
+    })? {
+        crate::shortcuts::Sent::Router(crate::shortcuts::router::Verified::Yes) => {}
+        _ => thread::sleep(Duration::from_millis(300)),
+    }
     Ok(())
+}
+
+/// Focus the address bar (Ctrl+L) through the shortcut brain, or the legacy hotkey for unknown apps.
+fn address_bar_hotkey() -> Result<(), String> {
+    crate::shortcuts::run_or_legacy(crate::shortcuts::Action::AddressBar, None, || {
+        keyboard::press_hotkey(&["ctrl", "l"])
+    })
+    .map(|_| ())
 }
 
 /// Navigate to a URL in the current browser tab (Ctrl+L → type URL → Enter).
@@ -27,7 +41,7 @@ pub fn navigate(url: &str) -> Result<(), String> {
     tracing::info!("live: browser navigate to: {url}");
 
     // Ctrl+L focuses the address bar
-    keyboard::press_hotkey(&["ctrl", "l"])?;
+    address_bar_hotkey()?;
     thread::sleep(Duration::from_millis(200));
 
     // Type the URL
@@ -42,18 +56,45 @@ pub fn navigate(url: &str) -> Result<(), String> {
 /// Search in the current browser tab (Ctrl+L → type query → Enter).
 /// This uses the browser's default search engine.
 pub fn search(query: &str) -> Result<(), String> {
-    tracing::info!("live: browser search: {query}");
+    let q = query.trim();
+    if q.is_empty() {
+        return Err("empty search".to_string());
+    }
+    let url = search_url(q);
+    tracing::info!("live: browser search: {q}");
 
-    // Ctrl+L focuses the address bar (doubles as search bar in most browsers)
-    keyboard::press_hotkey(&["ctrl", "l"])?;
+    // Open the results page itself. Typing into the address bar (Ctrl+L, text, Enter with fixed
+    // 200 ms gaps) raced with focus and was never verified; a URL cannot land in the wrong box.
+    // Prefer the browser the user is looking at, so the results open in a new tab there.
+    #[cfg(target_os = "windows")]
+    {
+        if let (Some(name), Some(path)) = (
+            crate::browser_url::foreground_process_name(),
+            crate::browser_url::foreground_process_path(),
+        ) {
+            if crate::browser_url::is_browser_process(&name)
+                && std::process::Command::new(&path).arg(&url).spawn().is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+    open::that(&url).map_err(|e| format!("open search: {e}"))
+}
+
+/// Google results URL for a spoken query (percent-encoded). Pure.
+pub fn search_url(query: &str) -> String {
+    format!(
+        "https://www.google.com/search?q={}",
+        crate::memcore::mailtriage::pct_encode(query.trim())
+    )
+}
+
+/// Focus the address bar / search bar in the current browser tab (Ctrl+L).
+pub fn focus_search_bar() -> Result<(), String> {
+    tracing::info!("live: browser focus search bar");
+    address_bar_hotkey()?;
     thread::sleep(Duration::from_millis(200));
-
-    // Type the search query
-    keyboard::type_text(query)?;
-    thread::sleep(Duration::from_millis(200));
-
-    // Press Enter to search
-    keyboard::press_key("enter")?;
     Ok(())
 }
 
@@ -132,5 +173,12 @@ mod tests {
             resolve_site_url("mycustomsite"),
             "https://www.mycustomsite.com"
         );
+    }
+
+    #[test]
+    fn search_url_encodes_the_query() {
+        assert_eq!(search_url("fitness psychology"), "https://www.google.com/search?q=fitness%20psychology");
+        assert_eq!(search_url("  rust & go  "), "https://www.google.com/search?q=rust%20%26%20go");
+        assert!(search_url("a=b&c").contains("a%3Db%26c"));
     }
 }

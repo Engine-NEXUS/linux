@@ -1,0 +1,554 @@
+/* Ghost ring — rides the user's REAL cursor while a ghost session is
+   active. Pure indicator: pointer-events none, excluded from hitboxes
+   explicitly (the stage ignores the cursor everywhere by default). */
+
+#ghost-ring {
+  position: fixed;
+  width: 38px;
+  height: 38px;
+  left: 0;
+  top: 0;
+  border: 2px solid rgba(90, 160, 255, 0.9);
+  border-radius: 50%;
+  box-shadow:
+    0 0 12px rgba(90, 160, 255, 0.55),
+    inset 0 0 8px rgba(90, 160, 255, 0.25);
+  pointer-events: none;
+  display: none !important;
+  animation: none;
+  z-index: 9999;
+}
+
+#ghost-ring.on {
+  display: block !important;
+  animation: ghost-pulse 1.6s ease-in-out infinite;
+}
+
+/* AI dot at 2 o'clock — "who's driving" at a glance. */
+#ghost-ring::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  right: 1px;
+  top: 1px;
+  border-radius: 50%;
+  background: rgba(140, 200, 255, 0.95);
+  box-shadow: 0 0 8px rgba(140, 200, 255, 0.8);
+}
+
+@keyframes ghost-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.12); opacity: 1; }
+}
+
+/* Clicky-style Guidance Pointer — points directly at a UI element */
+#ghost-pointer {
+  position: fixed;
+  width: 24px;
+  height: 24px;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  display: none !important;
+  z-index: 99999;
+  transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+#ghost-pointer.on {
+  display: block !important;
+}
+
+#ghost-pointer-arrow {
+  width: 0;
+  height: 0;
+  border-left: 10px solid transparent;
+  border-right: 10px solid transparent;
+  border-bottom: 20px solid #259ed6;
+  filter: drop-shadow(0 0 8px rgba(37, 158, 214, 0.8));
+  animation: none;
+  transform-origin: center bottom;
+}
+
+#ghost-pointer.on #ghost-pointer-arrow {
+  animation: pointer-bounce 0.8s ease-in-out infinite alternate;
+}
+
+@keyframes pointer-bounce {
+  0% { transform: translateY(0) scale(1); }
+  100% { transform: translateY(-8px) scale(1.15); }
+}
+
+/* Clicky-style Liquid Glass Guidance Speech Bubble */
+#ghost-guide-bubble {
+  position: fixed;
+  left: 0;
+  top: 0;
+  max-width: 280px;
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 12px rgba(37, 158, 214, 0.3);
+  color: #f8fafc;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 500;
+  pointer-events: none;
+  display: none;
+  z-index: 99999;
+  transition: opacity 0.2s ease, transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+  opacity: 0;
+}
+
+#ghost-guide-bubble.on {
+  display: block;
+  opacity: 1;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Feature 86 — Spatial Annotation Overlay
+   Glowing liquid-glass bounding boxes + numbered pins + leader lines
+   drawn over the user's real screen content. Boxes/lines are
+   pointer-events: none (stage stays click-through); only pin badges
+   are clickable (cursor exception via registered hitboxes).
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Glowing bounding box framing a detected element.
+   LIGHT GREY (user directive 2026-10-01): a neutral mid-light tone that
+   reads on BOTH white and black backgrounds — no theme probe needed. */
+.spatial-box {
+  position: fixed;
+  border: 2px solid rgba(210, 213, 220, 0.95);
+  border-radius: 10px;
+  box-shadow:
+    0 0 14px rgba(210, 213, 220, 0.55),
+    0 0 0 1px rgba(60, 63, 70, 0.35),
+    inset 0 0 14px rgba(210, 213, 220, 0.10);
+  background: rgba(210, 213, 220, 0.06);
+  pointer-events: none;
+  animation: spatial-box-breathe 2.8s ease-in-out infinite;
+  z-index: 99997;
+}
+
+/* Active (hovered in sidebar / clicked pin) — brighter pulse */
+.spatial-box--active {
+  border-color: #ffffff;
+  background: rgba(235, 238, 244, 0.10);
+  animation: spatial-box-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes spatial-box-breathe {
+  0%, 100% { box-shadow: 0 0 12px rgba(210, 213, 220, 0.45), 0 0 0 1px rgba(60, 63, 70, 0.35), inset 0 0 12px rgba(210, 213, 220, 0.08); }
+  50% { box-shadow: 0 0 20px rgba(210, 213, 220, 0.70), 0 0 0 1px rgba(60, 63, 70, 0.35), inset 0 0 16px rgba(210, 213, 220, 0.14); }
+}
+
+@keyframes spatial-box-pulse {
+  0%, 100% { box-shadow: 0 0 16px rgba(255, 255, 255, 0.55), 0 0 0 1px rgba(60, 63, 70, 0.35), inset 0 0 14px rgba(255, 255, 255, 0.14); }
+  50% { box-shadow: 0 0 30px rgba(255, 255, 255, 0.90), 0 0 0 1px rgba(60, 63, 70, 0.35), inset 0 0 22px rgba(255, 255, 255, 0.26); }
+}
+
+/* Floating numbered pin badge — [1] Almonds */
+.spatial-pin {
+  position: fixed;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 13px;
+  background: linear-gradient(135deg, #5a9eff, #259ed6);
+  color: #ffffff;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(37, 158, 214, 0.55);
+  z-index: 99999;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.spatial-pin:hover {
+  transform: translateY(-1px) scale(1.04);
+  box-shadow: 0 6px 20px rgba(37, 158, 214, 0.75);
+}
+
+.spatial-pin:active {
+  transform: scale(0.96);
+}
+
+.spatial-pin--active {
+  background: linear-gradient(135deg, #64d2ff, #259ed6);
+  box-shadow:
+    0 0 0 2px rgba(100, 210, 255, 0.45),
+    0 4px 18px rgba(37, 158, 214, 0.8);
+}
+
+.spatial-pin-num {
+  font-weight: 700;
+  opacity: 0.95;
+}
+
+.spatial-pin-label {
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+/* SVG pointer leader line: pin → box corner — light grey (theme-agnostic) */
+.spatial-leader-line {
+  stroke: rgba(210, 213, 220, 0.9);
+  stroke-width: 2;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 5px rgba(210, 213, 220, 0.5));
+}
+
+.spatial-leader-line--active {
+  stroke: #ffffff;
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.75));
+}
+
+/* ─── Feature 87: annotation ink layer ─────────────────────────
+   Ink floats on the transparent stage (no background — blends with
+   any wallpaper in both light and dark themes). Accent blue default;
+   per-stroke color comes from the element. */
+:root {
+  --ink-accent: #259ed6;
+  --ink-primary: #ffffff;
+}
+
+.annot-layer {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 99996;
+}
+
+.annot-stroke {
+  fill: none;
+  stroke: var(--ink-accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 4px rgba(37, 158, 214, 0.6));
+}
+
+.annot-arrow {
+  stroke: var(--ink-accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 4px rgba(37, 158, 214, 0.6));
+}
+
+.annot-arrowhead {
+  fill: var(--ink-accent);
+}
+
+.annot-preview {
+  opacity: 0.65;
+  stroke-dasharray: 8 5;
+}
+
+.annot-checkbox {
+  cursor: pointer;
+}
+
+.annot-checkbox rect {
+  fill: rgba(10, 14, 22, 0.55);
+  stroke: var(--ink-accent);
+  stroke-width: 2;
+  filter: drop-shadow(0 0 5px rgba(37, 158, 214, 0.5));
+}
+
+.annot-checkbox path {
+  fill: none;
+  stroke: #ffffff;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.annot-text {
+  position: fixed;
+  z-index: 99996;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(10, 14, 22, 0.55);
+  border: 1px solid rgba(37, 158, 214, 0.6);
+  color: var(--ink-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(6px);
+  cursor: text;
+}
+
+.annot-text-input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--ink-primary);
+  font: inherit;
+}
+
+/* Response caption (plan Phase 3) — the spoken reply growing word-by-word
+   above the orb. Pure indicator: pointer-events none (never intercepts
+   clicks), opacity-only transition (the transform is applied imperatively
+   per-render — see ResponseCaption.tsx's note — so it must never fight a
+   CSS transform tween). Static layout lives here rather than as a React
+   inline style, for the same CSP reason documented on OrbFrame.tsx. */
+.response-caption {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 520px;
+  opacity: 0;
+  text-align: center;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink-primary);
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.65), 0 0 2px rgba(0, 0, 0, 0.5);
+  z-index: 10000;
+}
+
+.response-caption-word {
+  display: inline-block;
+  animation: response-caption-word-in 260ms ease-out both;
+}
+
+@keyframes response-caption-word-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Line-by-Line Clause Replacement — Serene Sentence Cross-Dissolve */
+.caption-line {
+  display: block;
+  opacity: 0;
+  transform: translateY(4px);
+  filter: blur(2px);
+  transition:
+    opacity 400ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 400ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 400ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, transform, filter;
+}
+
+.caption-line--active {
+  opacity: 1;
+  transform: translateY(0);
+  filter: blur(0px);
+}
+
+.caption-line--prev {
+  opacity: 0.72;
+  font-size: 18px;
+  line-height: 1.35;
+  margin-bottom: 6px;
+  transform: translateY(0);
+  filter: blur(0px);
+}
+
+.caption-line--fading {
+  opacity: 0;
+  transform: translateY(-4px);
+  filter: blur(2px);
+}
+
+/* ─── Pure Black Letter-by-Letter Voice Caption (Matches .orb-capsule) ─── */
+.response-caption--black,
+.response-caption--mercury {
+  width: auto;
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: transparent !important;
+  background-color: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: none !important;
+  border: none !important;
+}
+
+.caption-black-capsule,
+.mercury-pill {
+  background: #000000 !important;
+  background-color: #000000 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  padding: 2px 24px; /* user-tuned via caption-tuner 2026-10-09 */
+  max-width: 620px;
+  min-height: 30px; /* lowered with padding-y so the capsule actually slims */
+  box-shadow:
+    0 16px 44px rgba(0, 0, 0, 0.95),
+    0 4px 14px rgba(0, 0, 0, 0.85);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    opacity 300ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 300ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, transform;
+}
+
+.caption-black-capsule--active,
+.mercury-pill--active {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.caption-black-capsule--fading,
+.mercury-pill--fading {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.caption-black-text,
+.mercury-pill-text {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  font-size: 16.5px; /* user-tuned via caption-tuner 2026-10-09 */
+  font-weight: 550;
+  letter-spacing: -0.2px;
+  line-height: 1.4;
+  color: #ffffff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: center;
+  display: block;
+}
+
+.mercury-word {
+  display: inline;
+}
+
+.mercury-word--active {
+  color: #ffffff;
+  font-weight: 550;
+  transform: none;
+  text-shadow: none;
+  animation: none;
+}
+
+.mercury-word--spoken {
+  color: #ffffff;
+  opacity: 1;
+  transform: none;
+}
+
+/* Per-word karaoke inside the black capsule (real timings only — the
+   schedule's own word data; never an estimator). Spoken words settle to
+   the plain white of a static caption, the currently-sung word glows
+   warm amber, and not-yet-spoken words sit dimmer so the read position
+   is unmistakable. Spans are inline and keep the trail space inside the
+   span (the parent's white-space: pre-wrap renders it), so line
+   re-wrapping is identical to the plain-text render. */
+.caption-word {
+  display: inline;
+  color: #ffffff;
+  opacity: 1;
+  transition: color 140ms ease, opacity 140ms ease;
+}
+
+.caption-word--spoken {
+  color: #ffffff;
+  opacity: 1;
+}
+
+.caption-word--active {
+  color: #ffd479;
+  opacity: 1;
+}
+
+.caption-word--pending {
+  color: #ffffff;
+  opacity: 0.45;
+}
+
+/* Live caption (plan Phase 4) — the user's OWN words, growing while they
+   still talk. Shares .response-caption's position/font/shadow; a touch
+   dimmer than the assistant's reply so the two read as distinct even
+   though they occupy the same screen slot (never shown at the same time —
+   one is listening-only, the other speaking-only). No per-word animation:
+   the whole line replaces wholesale on each partial (Moonshine's own
+   semantics), so an animate-in-per-word would fight itself every update. */
+.live-caption {
+  opacity: 0.82;
+  font-size: 16.5px; /* match user-tuned reply caption size (caption-tuner 2026-10-09) */
+}
+
+/* Loading indicator (plan §1.6) — the top-right Lottie spinner, retired
+ * from its own OS window into a positioned div inside `stage`. Static
+ * layout lives here rather than as a React inline style, for the same
+ * CSP reason documented on OrbFrame.tsx (position/width/height/transform
+ * are still applied imperatively per-render, since they're genuinely
+ * dynamic — see LoadingIndicator.tsx). */
+.loading-indicator {
+  position: fixed;
+  left: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.loading-indicator--calibrating {
+  cursor: grab;
+}
+
+.loading-indicator-lottie {
+  width: 60px;
+  height: 60px;
+}
+
+.loading-indicator-pulse {
+  animation: loading-indicator-pulse 220ms ease-out;
+}
+
+@keyframes loading-indicator-pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.14); }
+  100% { transform: scale(1); }
+}
+
+.loading-indicator-badge {
+  position: absolute;
+  bottom: -4px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: rgba(233, 240, 250, 0.92);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+}

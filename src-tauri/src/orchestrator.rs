@@ -28,14 +28,13 @@
 //! The frontend listens to these events instead of the old "assistant:server"
 //! channel. This centralizes all state transitions in Rust.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use serde::Serialize;use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::intent_parser::{parse_deterministic, ParsedIntent};
+use crate::intent_parser::{parse_deterministic_with, ParsedIntent};
 use crate::network;
 
 // ─── Types ─────────────────────────────────────────────────────────────
@@ -43,6 +42,7 @@ use crate::network;
 /// Orchestrator lifecycle states (mirrors the frontend AssistantState).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
 pub enum OrchestratorState {
     Idle,
     Listening,
@@ -51,7 +51,7 @@ pub enum OrchestratorState {
 }
 
 /// Which subsystem will handle this request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Subsystem {
     /// Local Rust command — open/close app, media, greeting. <5ms, no network.
@@ -110,6 +110,12 @@ pub enum OrchestratorEvent {
     Done {
         request_id: String,
     },
+    Clarify {
+        prompt: String,
+        request_id: String,
+        expected_slot: String,
+        timeout_ms: u64,
+    },
     Error {
         message: String,
         request_id: String,
@@ -125,6 +131,11 @@ pub enum OrchestratorEvent {
     },
     /// GitHub sub-command system: merge conflict detected. The frontend
     /// should display the conflict details with copy-paste options.
+    // NOTE: variant-level `rename` is required — the enum-wide
+    // `rename_all = "lowercase"` would emit "conflictreport"/"githubresult",
+    // and `snake_case` would emit "git_hub_result" (serde splits every camel
+    // hump). The frontend union expects "conflict_report"/"github_result".
+    #[serde(rename = "conflict_report")]
     ConflictReport {
         request_id: String,
         pr_number: u64,
@@ -134,6 +145,7 @@ pub enum OrchestratorEvent {
     },
     /// GitHub sub-command system: operation result. The frontend should
     /// speak the text and/or display structured data.
+    #[serde(rename = "github_result")]
     GitHubResult {
         request_id: String,
         result: serde_json::Value,
@@ -156,25 +168,65 @@ const ACK_PHRASES: &[&str] = &[
     "One moment sir.",
 ];
 
-/// Screen-agent voice flow state (Phase-4a, all LLM-free):
-/// last spoken screen answer, last shown point (x, y, label, when),
-/// last screenshot (when, jpeg, orig_w/h, scaled_w/h) for the 10s cache.
-static LAST_SCREEN_SPEAK: std::sync::Mutex<Option<String>> =
-    std::sync::Mutex::new(None);
-static LAST_POINT: std::sync::Mutex<Option<(f64, f64, String, std::time::Instant)>> =
-    std::sync::Mutex::new(None);
-static LAST_SHOT: std::sync::Mutex<
-    Option<(std::time::Instant, Vec<u8>, u32, u32, u32, u32)>,
-> = std::sync::Mutex::new(None);
+// ─── Dictation Mode ────────────────────────────────────────────────────
+static DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Screenshot cache TTL: rapid describe→locate sequences reuse the frame.
-const SHOT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
-/// Point re-show TTL: "point again" re-emits stored coords within 120s.
-const POINT_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+/// Start a dictation session: fresh undo history, and a watchdog that ends it after 30 s without an
+/// accepted line (a TV must never keep typing into a forgotten document).
+fn start_dictation_session<R: Runtime>(app: &AppHandle<R>) {
+    set_dictation_active(true);
+    crate::dictation::begin_session();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if !is_dictation_active() {
+                return;
+            }
+            if crate::dictation::idle_expired() {
+                set_dictation_active(false);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, "Stopped typing, sir. I heard nothing for thirty seconds.".to_string(), &request_id);
+                clear_active_request(&request_id);
+                return;
+            }
+        }
+    });
+}
 
-/// Pure: is a cached screenshot timestamp still fresh?
-fn cache_fresh(at: std::time::Instant, now: std::time::Instant) -> bool {
-    now.duration_since(at) < SHOT_CACHE_TTL
+pub fn is_dictation_active() -> bool {
+    DICTATION_ACTIVE.load(Ordering::SeqCst)
+}
+
+pub fn set_dictation_active(active: bool) {
+    DICTATION_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+// ─── Counsel Mode (F1b) ─────────────────────────────────────────────
+// Armed by the ShareConcern opener ("i want to share something"): the
+// NEXT command turn runs through the counsel contract instead of normal
+// routing, then disarms. Deadline-based (120s) so a stale arm can never
+// hijack an unrelated later turn; a second opener just re-arms.
+static COUNSEL_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
+const COUNSEL_ARM_TTL_MS: u64 = 120_000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn is_counsel_armed() -> bool {
+    let deadline = COUNSEL_DEADLINE_MS.load(Ordering::SeqCst);
+    deadline > 0 && now_ms() < deadline
+}
+
+pub fn set_counsel_armed(armed: bool) {
+    COUNSEL_DEADLINE_MS.store(
+        if armed { now_ms().saturating_add(COUNSEL_ARM_TTL_MS) } else { 0 },
+        Ordering::SeqCst,
+    );
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────
@@ -187,22 +239,115 @@ fn new_request_id() -> String {
     hex[..12].to_string()
 }
 
+/// Spoken on every ghost exit path (voice, Esc, Ctrl+Space). Single source
+/// so all three say the identical line (pinned by test).
+pub const GHOST_EXIT_LINE: &str = "Ghost mode off, sir.";
+
 /// Pick a random ack phrase.
 fn pick_ack() -> &'static str {
     let idx = network::uuid_v4().as_bytes()[0] as usize % ACK_PHRASES.len();
     ACK_PHRASES[idx]
 }
 
+/// Repeat-back ack for WorkerBackend turns (doc 74, P1): the ack names the
+/// action so the user hears WHAT was understood, not a bare "on it sir".
+/// Unknown/general chat keeps the generic ack (nothing to name).
+fn ack_for(intent: &ParsedIntent) -> String {
+    match intent {
+        ParsedIntent::AnalysePr { pr_number, repo, .. } => {
+            format!("On it sir — analysing PR {pr_number} in {repo}.")
+        }
+        ParsedIntent::AnalyseRepo { repo, .. } => {
+            format!("On it sir — analysing {repo}.")
+        }
+        ParsedIntent::AnalyseLatestPr { .. } => {
+            "On it sir — checking the latest PR.".to_string()
+        }
+        ParsedIntent::CheckBranch { .. } => "On it sir — checking the branch.".to_string(),
+        ParsedIntent::Search { query } => {
+            let q: String = query.chars().take(40).collect();
+            format!("On it sir — searching for {q}.")
+        }
+        _ => pick_ack().to_string(),
+    }
+}
+
+fn clarification_for(intent: &ParsedIntent) -> (String, String) {
+    match intent {
+        ParsedIntent::AnalyseRepo { .. }
+        | ParsedIntent::AnalysePr { .. }
+        | ParsedIntent::AnalyseLatestPr { .. }
+        | ParsedIntent::CheckBranch { .. }
+        | ParsedIntent::GitHubCommand { .. } => (
+            "Which repository should I use, sir?".to_string(),
+            "repo".to_string(),
+        ),
+        ParsedIntent::OpenArchitect => (
+            "Do you want the architecture mapper, sir?".to_string(),
+            "architect_confirm".to_string(),
+        ),
+        _ => (
+            "I didn't catch that clearly, sir — say it again.".to_string(),
+            "repeat".to_string(),
+        ),
+    }
+}
+
+/// Speak a clarification prompt and keep the turn open for one bounded reply.
+/// Unlike `speak_prompt_and_finish`, this does not emit `Done` or clear the
+/// active request. The frontend auto-listens after TTS and cancels on timeout.
+async fn speak_prompt_and_hold<R: Runtime>(
+    app: &AppHandle<R>,
+    prompt: String,
+    expected_slot: String,
+) -> Result<ProcessResult, String> {
+    const CLARIFICATION_TIMEOUT_MS: u64 = 10_000;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    // The question now owns the next reply: "repeat" is its re-ask slot, so
+    // the screen-voice replay must not claim the turn while it waits.
+    mark_clarification_pending();
+    emit(
+        app,
+        &OrchestratorEvent::Clarify {
+            prompt,
+            request_id: request_id.clone(),
+            expected_slot,
+            timeout_ms: CLARIFICATION_TIMEOUT_MS,
+        },
+    );
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
 /// Emit an orchestrator event to the frontend.
 fn emit<R: Runtime>(app: &AppHandle<R>, event: &OrchestratorEvent) {
+    if matches!(event, OrchestratorEvent::Result { .. }) {
+        crate::latency::mark(crate::latency::Stage::Answer);
+    }
     let _ = app.emit("orchestrator:event", event);
     tracing::debug!("orchestrator: emitted {:?}", event);
 }
 
 /// Cancel any active request and install a new one.
 /// Returns the new request's ID and its cancel flag.
-fn install_new_request(subsystem: Subsystem) -> (String, Arc<AtomicBool>) {
+/// `pub(crate)` for the global-hotkey ghost-exit path (same turn semantics
+/// as a voice exit: the bail cancels whatever is in flight).
+pub(crate) fn install_new_request(subsystem: Subsystem) -> (String, Arc<AtomicBool>) {
     let id = new_request_id();
+    let cancel_flag = install_new_request_with_id(id.clone(), subsystem);
+    (id, cancel_flag)
+}
+
+/// Same as `install_new_request`, but for a caller that already has its own
+/// request id to use (e.g. a proactive alert's `sentinel_<id>`, which must
+/// stay stable so `speak_line`'s `sentinel_offer_` prefix match keeps
+/// working). `pub(crate)` for `proactive_policy` — a proactive utterance
+/// must register with `ACTIVE_REQUEST` like any other turn, or
+/// `has_active_request()` can't see it as busy while it's speaking.
+pub(crate) fn install_new_request_with_id(id: String, subsystem: Subsystem) -> Arc<AtomicBool> {
     let cancel_flag = Arc::new(AtomicBool::new(false));
 
     // Cancel the previous request
@@ -223,7 +368,7 @@ fn install_new_request(subsystem: Subsystem) -> (String, Arc<AtomicBool>) {
     });
 
     tracing::info!("orchestrator: new request {} -> {:?}", id, subsystem);
-    (id, cancel_flag)
+    cancel_flag
 }
 
 /// Check if a request is cancelled.
@@ -237,7 +382,8 @@ fn is_cancelled(cancel_flag: &Arc<AtomicBool>) -> bool {
 }
 
 /// Clear the active request (called on done/error).
-fn clear_active_request(request_id: &str) {
+/// `pub(crate)` for the global-hotkey ghost-exit path.
+pub(crate) fn clear_active_request(request_id: &str) {
     let mut guard = ACTIVE_REQUEST.lock().unwrap();
     if let Some(ref current) = *guard {
         if current.id == request_id {
@@ -245,6 +391,76 @@ fn clear_active_request(request_id: &str) {
             tracing::debug!("orchestrator: cleared active request {}", request_id);
         }
     }
+}
+
+/// True while a user turn owns the pipeline. Background announcers
+/// (stage watchdog) must stay silent when this is true — never talk
+/// over the user.
+pub(crate) fn has_active_request() -> bool {
+    ACTIVE_REQUEST.lock().unwrap().is_some()
+}
+
+// ─── Screen agent: the last answer, the last point, the pending question ──
+//
+// Three pieces of state, all process-global and all cheap:
+//
+// * `LAST_SCREEN_ANSWER` / `LAST_SCREEN_POINT` — what the screen agent said
+//   and where it pointed. "repeat that" replays the first, "point again"
+//   re-shows the second. Both expire (a point on a screen that has since
+//   changed is worse than no point at all).
+// * `CLARIFICATION_PENDING` — NEXUS asked a question and is waiting for the
+//   answer. While that is true, the word "repeat" belongs to that question
+//   ("repeat" is the branch's re-ask slot — see `speak_prompt_and_hold`).
+
+/// The last spoken screen answer and the moment it was spoken.
+static LAST_SCREEN_ANSWER: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+
+/// The last point the screen agent showed: (x, y, label, when).
+static LAST_SCREEN_POINT: Mutex<Option<(f64, f64, String, std::time::Instant)>> = Mutex::new(None);
+
+/// How long a screen answer / point stays replayable.
+const SCREEN_ANSWER_TTL: Duration = Duration::from_secs(120);
+
+/// Pure: is a stored screen answer / point still fresh?
+fn screen_fresh(at: std::time::Instant, now: std::time::Instant) -> bool {
+    now.saturating_duration_since(at) < SCREEN_ANSWER_TTL
+}
+
+/// Remember the last screen answer and the point it showed.
+fn remember_screen_point(answer: &str, x: f64, y: f64, label: String) {
+    let now = std::time::Instant::now();
+    *LAST_SCREEN_ANSWER.lock().unwrap() = Some((answer.to_string(), now));
+    *LAST_SCREEN_POINT.lock().unwrap() = Some((x, y, label, now));
+}
+
+/// A question NEXUS asked that is still waiting for its answer.
+///
+/// The deadline is the same window the Clarify event advertises, so the
+/// flag can never outlive the question it belongs to.
+static CLARIFICATION_PENDING: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// How long a spoken question keeps the turn. Matches the Clarify event's
+/// own timeout.
+const CLARIFICATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Mark that a question has been spoken and is waiting for its answer.
+fn mark_clarification_pending() {
+    *CLARIFICATION_PENDING.lock().unwrap() =
+        Some(std::time::Instant::now() + CLARIFICATION_TIMEOUT);
+}
+
+/// Is a spoken question still waiting for its answer?
+///
+/// The flag is CONSUMED by the read: the turn that answers the question is
+/// the last turn it owns.
+fn take_clarification_pending() -> bool {
+    let mut g = CLARIFICATION_PENDING.lock().unwrap();
+    let pending = match g.as_ref() {
+        Some(deadline) => std::time::Instant::now() < *deadline,
+        None => false,
+    };
+    *g = None;
+    pending
 }
 
 // ─── ML parsing fallback ──────────────────────────────────────────────
@@ -329,6 +545,36 @@ fn cap_ml_window_open(result: &mut crate::intent_parser::ParseResult) -> bool {
         );
         result.confidence = result.confidence.min(0.4);
         return true;
+    }
+    // doc 07 P3 finding, measured live against the real 0.5B brain model
+    // (not theoretical): system_click_element/minimize/maximize exist
+    // ONLY in the brain's system prompt text, with zero actual training —
+    // and at 0.5B params it confidently (0.9-1.0) mis-tags unrelated
+    // phrases with them ("click submit" -> screen_analysis@0.9,
+    // "switch to brave" -> start_dictation@1.0 were observed; the
+    // reverse direction, guessing these NEW labels for unrelated speech,
+    // is the same failure mode). NLU (BERT-mini) can't make this mistake
+    // — these three labels aren't in its trained vocabulary at all, so
+    // it can never emit them — this guard is brain-path only by
+    // construction (deterministic/NLU sources already can't trigger it).
+    // The deterministic parser (intent_parser.rs) remains the reliable
+    // path for all three; this just stops an ML guess from executing.
+    if let ParsedIntent::NluResult { intent, .. } = &result.intent {
+        if !result.source.starts_with("deterministic")
+            && matches!(
+                intent.as_str(),
+                "system_click_element" | "system_minimize_window" | "system_maximize_window"
+            )
+        {
+            tracing::warn!(
+                "orchestrator: ML-only {} (source={}, conf={:.2}) capped — unverified brain-only label",
+                intent,
+                result.source,
+                result.confidence
+            );
+            result.confidence = result.confidence.min(0.4);
+            return true;
+        }
     }
     false
 }
@@ -437,21 +683,78 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
         // asked for the missing slot rather than getting a guess/refusal.
         ParsedIntent::NeedMoreInfo { .. } => Subsystem::LocalCommand,
 
-        // Screen control + vision intents are handled explicitly in
-        // process_transcript (run_screen_click/read/tab/vision); tracked as local.
-        ParsedIntent::ScreenClick { .. }
+        // Memory intents are handled explicitly in process_transcript
+        // (run_memory_* — local, never cloud); tracked as local.
+        // Screen control intents are handled explicitly in
+        // process_transcript (run_screen_click/read/tab); tracked as local.
+        ParsedIntent::MemoryAudit
+        | ParsedIntent::Briefing
+        | ParsedIntent::ImportContacts
+        | ParsedIntent::PowerAction { .. }
+        | ParsedIntent::ReopenSession
+        | ParsedIntent::TimetableAdd { .. }
+        | ParsedIntent::TimetableShow
+        | ParsedIntent::TimetableClear
+        | ParsedIntent::TimetableCommit
+        | ParsedIntent::StudyPref { .. }
+        | ParsedIntent::MailDigest
+        | ParsedIntent::MailMute
+        | ParsedIntent::CalendarAgenda { .. }
+        | ParsedIntent::CalendarAdd { .. }
+        | ParsedIntent::Directions { .. }
+        | ParsedIntent::PlacesSearch { .. }
+        | ParsedIntent::WhatsappRead { .. }
+        | ParsedIntent::PeopleFlag { .. }
+        | ParsedIntent::PeopleList
+        | ParsedIntent::MemoryForget { .. }
+        | ParsedIntent::MemoryForgetAll
+        | ParsedIntent::MemoryForgetAllConfirm
+        | ParsedIntent::PersonaFriend
+        | ParsedIntent::PersonaButler
+        | ParsedIntent::ScreenClick { .. }
+        | ParsedIntent::GhostAction { .. }
         | ParsedIntent::ScreenRead { .. }
-        | ParsedIntent::BrowserTab { .. }
-        | ParsedIntent::ScreenDescribe
+        // The screen agent (locate / silence / replay / re-point) is local
+        // on every platform: no Worker round-trip, no cloud answer.
         | ParsedIntent::ScreenLocate { .. }
-        | ParsedIntent::ScreenReadText
         | ParsedIntent::StopSpeech
         | ParsedIntent::RepeatScreen
-        | ParsedIntent::PointAgain => Subsystem::LocalCommand,
+        | ParsedIntent::PointAgain
+        | ParsedIntent::BrowserTab { .. }
+        | ParsedIntent::BrowserCloseTab { .. }
+        | ParsedIntent::BrowserSearch { .. }
+        | ParsedIntent::BrowserSearchFocus
+        | ParsedIntent::WatchScreenEmail
+        | ParsedIntent::StartDictation
+        | ParsedIntent::StopDictation
+        | ParsedIntent::BlockContact { .. }
+        | ParsedIntent::UnblockContact { .. }
+        | ParsedIntent::ListBlockedContacts
+        | ParsedIntent::RunOnLocalhost
+        | ParsedIntent::CodeProject { .. }
+        | ParsedIntent::CodingAgentTask { .. }
+        | ParsedIntent::WatchAgentTask { .. }
+        | ParsedIntent::PlayMusic { .. }
+        | ParsedIntent::OpenMusicPlayer { .. }
+        | ParsedIntent::ScanInternshipEmails
+        | ParsedIntent::CreateVoiceReminder { .. }
+        | ParsedIntent::AnalyseChatDocs { .. } => Subsystem::LocalCommand,
+
+        // Counsel runs through cloud backends (9Router → Worker) with the
+        // counsel contract — handled explicitly in process_transcript.
+        ParsedIntent::ShareConcern { .. } => Subsystem::WorkerBackend,
 
         // Ghostwriter room entry — handled explicitly in process_transcript
         // (session start + sidebar card), tracked as a local request.
+        // Cursor-control Ghost Mode entry — same explicit handling
+        // (ghost session + ring, no sidebar card).
         ParsedIntent::EnterGhostwriter { .. } => Subsystem::LocalCommand,
+        ParsedIntent::EnterGhostControl => Subsystem::LocalCommand,
+        ParsedIntent::ExitGhostControl => Subsystem::LocalCommand,
+        ParsedIntent::EnterHandMode
+        | ParsedIntent::ExitHandMode
+        | ParsedIntent::HandMouseLive { .. }
+        | ParsedIntent::PointerClick { .. } => Subsystem::LocalCommand,
 
         // Everything else goes to the Worker
         ParsedIntent::AnalyseRepo { .. }
@@ -464,21 +767,11 @@ pub(crate) fn route_intent(intent: &ParsedIntent) -> Subsystem {
     }
 }
 
-/// Determine if a subsystem is "long-running" and should show the loading indicator.
-///
-/// Local commands are instant (<5ms) — no loading indicator.
-/// Worker and Architect are long-running — show loading indicator after ack.
-#[allow(dead_code)]
-fn is_long_running(subsystem: &Subsystem) -> bool {
-    matches!(
-        subsystem,
-        Subsystem::WorkerBackend
-            | Subsystem::Architect
-            | Subsystem::GitHub
-            | Subsystem::Mcp
-            | Subsystem::CommandCenter
-    )
-}
+/// Loading-indicator policy (plan 120 H3). There is deliberately NO
+/// `is_long_running` helper: a previous one existed but had zero production
+/// callers (the live loading decision is owned by the Ack/Loading event flow
+/// and `loading_should_show`), so branching new code on subsystem longevity
+/// would consult a dead oracle. Decide loading per turn from events, not enums.
 
 // ─── Public API ────────────────────────────────────────────────────────
 
@@ -507,6 +800,7 @@ pub async fn process_transcript<R: Runtime>(
     app: AppHandle<R>,
     transcript: String,
     dialog_context: Option<serde_json::Value>,
+    turn_context: Option<crate::center::TurnContext>,
 ) -> Result<ProcessResult, String> {
     if transcript.trim().is_empty() {
         return Err("empty transcript".into());
@@ -517,10 +811,68 @@ pub async fn process_transcript<R: Runtime>(
         transcript.chars().take(80).collect::<String>()
     );
 
+    // A power command counting down ("powering off in 10 seconds, say cancel") can be stopped by voice.
+    if crate::power_cmd::countdown_active() && crate::power_cmd::is_cancel_phrase(&transcript) {
+        let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+        crate::power_cmd::cancel();
+        return say_and_finish(&app, request_id, "Cancelled, sir. Nothing was turned off.".into());
+    }
+
+    // A question NEXUS just asked ("Shall I start?", "App or browser?",
+    // "Add these slots?") owns the next short answer. Anything that is not a
+    // clear answer drops the offer and is handled as a normal command.
+    // Who is speaking matters: a stray "yes" from the TV (or from a voice that is not the
+    // owner's) must not confirm a shutdown or an app launch. A voice that may not answer
+    // leaves the question pending (the owner can still answer it) and the line is handled
+    // as an ordinary turn, where the ownership gate drops it.
+    let offer_owner = turn_context.as_ref().map(|t| t.ownership).unwrap_or_default();
+    if crate::memcore::offer::is_armed()
+        && crate::memcore::offer::peek().map_or(true, |o| may_answer_offer(offer_owner, &o))
+    {
+        use crate::memcore::offer::{self, Offer, Reply};
+        let reply = offer::classify(&transcript);
+        let has_choice = crate::memcore::timetable::parse_choice(&transcript).is_some();
+        match offer::peek() {
+            Some(o @ Offer::Choose { .. }) if has_choice || reply != Reply::Other => {
+                return run_offer_reply(app, o, reply, &transcript).await;
+            }
+            Some(o) if reply != Reply::Other => {
+                return run_offer_reply(app, o, reply, &transcript).await;
+            }
+            _ => offer::clear(),
+        }
+    }
+
+    // A bare "do it" / "go ahead" with nothing waiting for an answer: ask, quoting what NEXUS really said,
+    // instead of guessing (or letting the cloud claim it did something).
+    if crate::conversation::is_bare_do_it(&transcript) && !crate::memcore::offer::is_armed() {
+        let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+        let last = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .and_then(|d| crate::conversation::last_exchange(&d, chrono::Utc::now().timestamp(), 10 * 60));
+        return say_and_finish(&app, request_id, crate::conversation::do_what_line(last));
+    }
+
     // 1. Parse intent: deterministic (fast, <1ms) → brain (admin) → NLU → Unknown
     // The full pipeline ensures that phrases trained in BERT-Mini or classified
     // by the Qwen brain are actually used for routing, not just observed.
-    let parse_result = parse_deterministic(&transcript);
+    //
+    // `confirmation_pending` — NEXUS asked a question and is waiting for the
+    // answer. While that is true the word "repeat" belongs to that question
+    // (it is the branch's re-ask slot), so the screen-voice replay must not
+    // claim the turn.
+    let confirmation_pending = take_clarification_pending();
+    let parse_result = if crate::ghost::session_active() {
+        crate::ghost_center::parse(&transcript).map(|task| crate::intent_parser::ParseResult {
+            intent: ParsedIntent::GhostAction { task },
+            confidence: 1.0,
+            source: "deterministic-ghost-center".to_string(),
+        }).or_else(|| parse_deterministic_with(&transcript, confirmation_pending))
+    } else {
+        parse_deterministic_with(&transcript, confirmation_pending)
+    };
 
     // If deterministic missed:
     // When online: route directly to cloud backend / 9Router (0 MB local RAM).
@@ -545,14 +897,185 @@ pub async fn process_transcript<R: Runtime>(
         }
     };
 
-    let intent = parse_result
+    // Persona tone (F0): friend-mode greetings address by name (or drop
+    // the address) instead of "sir". Single hook covering every greeting
+    // pick-list at once; the parser stays pure (no settings access).
+    let mut intent = parse_result
         .as_ref()
         .map(|r| r.intent.clone())
-        .unwrap_or(ParsedIntent::Unknown {
-            raw: transcript.clone(),
+        .unwrap_or_else(|| {
+            println!(
+                "[PARSER-MISS] Deterministic parser miss for '{}' → routing to NLU / Cloud fallback (WorkerBackend)",
+                transcript.chars().take(80).collect::<String>().replace('\n', " ")
+            );
+            crate::missed_intent_logger::log_missed_intent(
+                &transcript,
+                "orchestrator",
+                "deterministic_miss",
+            );
+            ParsedIntent::Unknown {
+                raw: transcript.clone(),
+            }
         });
+    if let ParsedIntent::Greeting { reply } = &mut intent {
+        if crate::persona::is_friend(&crate::commands::read_persona_mode(&app)) {
+            let name = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .and_then(|dir| crate::memory::read_user_profile(&dir))
+                .and_then(|p| p.name);
+            *reply = crate::persona::restyle_greeting(reply, name.as_deref());
+        }
+    }
 
-    tracing::info!("orchestrator: parsed intent: {:?}", intent);
+    let source = parse_result
+        .as_ref()
+        .map(|result| result.source.as_str())
+        .unwrap_or("none");
+    let center_name = crate::center::center_for(&intent);
+    let evidence = crate::center::command_evidence(&intent, &transcript, source);
+    let turn = turn_context.unwrap_or_default();
+
+    println!(
+        "[MAIN-CMD] Transcript: '{}' | Intent: {} | Center: {} | Evidence: {:?} | Owner: {:?} (score: {:.3})",
+        transcript.chars().take(80).collect::<String>().replace('\n', " "),
+        crate::intent_parser::intent_to_label(&intent),
+        center_name,
+        evidence,
+        turn.ownership,
+        turn.owner_score
+    );
+
+    crate::latency::mark(crate::latency::Stage::Parsed);
+    if turn.ownership == crate::voice_profile::TurnOwnership::Rejected {
+        println!(
+            "[DROP] Turn ownership REJECTED (session={}, score={:.3}) — dropped by owner gate",
+            turn.session,
+            turn.owner_score
+        );
+        return Ok(ProcessResult {
+            request_id: new_request_id(),
+            subsystem: Subsystem::None,
+            handled_locally: true,
+        });
+    }
+
+    // Doc 124 Q3: a turn handled on-device is recorded with the first line NEXUS speaks for it (see
+    // `speak_line`); cloud turns are recorded by `record_worker_turn`.
+    if !matches!(intent, ParsedIntent::Unknown { .. }) {
+        crate::conversation::begin_local_turn(&transcript, crate::intent_parser::intent_to_label(&intent), turn.ownership);
+    }
+
+    // A spoken stop is honoured in a live ghost session whoever it sounds like and however it
+    // parses: it can only ever make things SAFER. Before this, "halt" / "hold on" / "never mind"
+    // parsed Unknown, were dropped as ambient speech for an unenrolled voice, and never reached
+    // the stop intercepts further down. ("exit ghost mode" is excluded: it ENDS the session and
+    // has its own handler.)
+    if is_early_ghost_stop(crate::ghost::session_active(), &transcript) {
+        return run_ghost_stop(&app, crate::ghost::drill_running());
+    }
+
+    match crate::center::action_disposition(
+        &intent,
+        &transcript,
+        source,
+        turn.ownership,
+        crate::ghost::session_active(),
+    ) {
+        crate::center::ActionDisposition::AmbientDrop => {
+            println!(
+                "[DROP] Ambient drop: evidence={:?}, ownership={:?}, ghost_active={} — dropped transcript: '{}'",
+                evidence,
+                turn.ownership,
+                crate::ghost::session_active(),
+                transcript.chars().take(80).collect::<String>().replace('\n', " ")
+            );
+            return Ok(ProcessResult {
+                request_id: new_request_id(),
+                subsystem: Subsystem::None,
+                handled_locally: true,
+            });
+        }
+        crate::center::ActionDisposition::Clarify => {
+            let (prompt, slot) = clarification_for(&intent);
+            println!("[MAIN-CMD] Clarification needed for slot '{}': \"{}\"", slot, prompt);
+            return speak_prompt_and_hold(&app, prompt, slot).await;
+        }
+        crate::center::ActionDisposition::Allow => {}
+    }
+
+    // Main Center decision tree (doc 74, P0: classification only — the
+    // routing below is untouched, so behavior is identical).
+    tracing::info!(
+        "main-center: {:?} → sub-center {}",
+        intent,
+        center_name
+    );
+
+    // Main Center validity gate (doc 74, P1): garbage / missing slots /
+    // invalid values never reach execution or cloud chat — the user hears
+    // exactly what's wrong. Skipped where every transcript is meaningful
+    // by design: dictation mode (type everything), the ghostwriter room
+    // (everything becomes ink), and a running drill (follow-ups queue for
+    // the drain pass instead of being judged).
+    if !is_dictation_active()
+        && !crate::ghostwriter::is_active()
+        && !crate::ghost::drill_running()
+    {
+        match crate::center::validate(&intent, &transcript, dialog_context.is_some()) {
+            crate::center::Validity::Ok => {}
+            crate::center::Validity::Unheard { prompt } => {
+                println!("[MAIN-CMD] Validity: Unheard → \"{prompt}\"");
+                return speak_prompt_and_hold(&app, prompt, "repeat".to_string()).await;
+            }
+            crate::center::Validity::NeedSlot { slot, prompt } => {
+                println!("[MAIN-CMD] Validity: NeedSlot({slot}) → \"{prompt}\"");
+                return speak_prompt_and_hold(&app, prompt, slot.to_string()).await;
+            }
+            crate::center::Validity::Invalid { reason, prompt } => {
+                println!("[MAIN-CMD] Validity: Invalid({reason}) → \"{prompt}\"");
+                return speak_prompt_and_hold(&app, prompt, "repeat".to_string()).await;
+            }
+        }
+    }
+
+    // ─── Active Dictation Stream ──────────────────────────────────────
+    if is_dictation_active() {
+        let trimmed = transcript.trim();
+        if crate::dictation::is_stop_phrase(trimmed) {
+            set_dictation_active(false);
+            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+            speak_line(&app, "Stopped typing, sir.".to_string(), &request_id);
+            clear_active_request(&request_id);
+            return Ok(ProcessResult {
+                request_id,
+                subsystem: Subsystem::LocalCommand,
+                handled_locally: true,
+            });
+        }
+
+        let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+        let dictionary = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .map(|d| crate::dictation::load_dictionary(&d))
+            .unwrap_or_default();
+        let raw_line = trimmed.to_string();
+        let outcome = tokio::task::spawn_blocking(move || crate::dictation::dictate(&raw_line, dictionary))
+            .await
+            .map_err(|e| e.to_string())?;
+        if let crate::dictation::Outcome::Refused(msg) = outcome {
+            speak_line(&app, msg, &request_id);
+        }
+        clear_active_request(&request_id);
+        return Ok(ProcessResult {
+            request_id,
+            subsystem: Subsystem::LocalCommand,
+            handled_locally: true,
+        });
+    }
 
     // ─── Ghostwriter room entry ─────────────────────────────────────
     // Explicit entry bypasses everything else: start session + card + reply.
@@ -560,10 +1083,54 @@ pub async fn process_transcript<R: Runtime>(
         return run_ghostwriter_enter(app, contact.clone()).await;
     }
 
-    // ─── Screen control + vision (ordinal click / read-back / tab switch /
-    // describe-locate-read via screenshot + vision model) ────
-    // Executes inline with spoken results. Ordinal grounding is local;
-    // vision Q&A touches the free vision chain (Gemini → Groq).
+    // ─── Ghost cursor-control entry ───────────────────────────────────
+    // "ghost mode" means the cursor, never dictation (that collision sent
+    // users into the Ghostwriter room). Enters the ghost session (ring +
+    // Esc cancel armed) and narrates; no sidebar card - the ring IS
+    // the UI. Tracked as a local request like the room entry.
+    if matches!(&intent, ParsedIntent::EnterGhostControl) {
+        return run_ghost_control_enter(app).await;
+    }
+
+    // ─── Hand mode (camera pointer): enter / exit / live toggle ───────
+    if matches!(
+        &intent,
+        ParsedIntent::EnterHandMode
+            | ParsedIntent::ExitHandMode
+            | ParsedIntent::HandMouseLive { .. }
+            | ParsedIntent::PointerClick { .. }
+    ) {
+        return run_hand_mode(app, intent).await;
+    }
+
+    // ─── Counsel mode intercept (F1b) ───────────────────────────────
+    // Armed by the ShareConcern opener: the NEXT command turn (including
+    // Unknown — the story rarely parses) runs the counsel contract, then
+    // disarms. Control intents bypass so the user can always steer out.
+    // Ghost-session turns skip this (hot-mic loop owns them; explicit
+    // ShareConcern arms still work there via their own arm below).
+    if is_counsel_armed() && !crate::ghost::session_active() {
+        let passthrough = matches!(
+            &intent,
+            ParsedIntent::ShareConcern { .. }
+                | ParsedIntent::PersonaFriend
+                | ParsedIntent::PersonaButler
+                | ParsedIntent::StartDictation
+                | ParsedIntent::StopDictation
+                | ParsedIntent::ExitGhostControl
+        ) || matches!(
+            &intent,
+            ParsedIntent::NluResult { intent, .. } if intent == "cancel_action"
+        );
+        if !passthrough {
+            set_counsel_armed(false);
+            return run_counsel_turn(app, transcript.clone(), dialog_context).await;
+        }
+    }
+
+    // ─── Screen control (ordinal click / read-back / tab switch) ────
+    // Executes inline (UIA grounding is local, ~50-500ms) with spoken
+    // results. Nothing here touches the network.
     match &intent {
         ParsedIntent::ScreenClick { ordinal } => {
             return run_screen_click(app, *ordinal).await;
@@ -574,18 +1141,29 @@ pub async fn process_transcript<R: Runtime>(
         ParsedIntent::BrowserTab { index } => {
             return run_browser_tab(app, *index).await;
         }
-        ParsedIntent::ScreenDescribe => {
-            return run_screen_vision(app, crate::vision::ScreenVisionKind::Describe).await;
+        ParsedIntent::BrowserCloseTab { index } => {
+            return run_browser_close(app, *index).await;
         }
+        ParsedIntent::NluResult { intent, .. } if intent == "browser_new_tab" => {
+            // Live browser hotkeys: local, visible keyboard action. Routing
+            // this to WorkerBackend sent "open a new tab" to the cloud chat
+            // while ctrl+t sat unused in the executor (audit).
+            return run_browser_new_tab(app).await;
+        }
+        ParsedIntent::BrowserSearch { query } => {
+            return run_browser_search(app, query.clone()).await;
+        }
+        ParsedIntent::BrowserSearchFocus => {
+            return run_browser_search_focus(app).await;
+        }
+        ParsedIntent::WatchScreenEmail => {
+            return run_watch_screen_email(app).await;
+        }
+        // ─── The screen agent ────────────────────────────────────────
+        // Point at a named target, silence, replay the last answer, or
+        // re-show the last point. All local: no Worker round-trip.
         ParsedIntent::ScreenLocate { target } => {
-            return run_screen_vision(
-                app,
-                crate::vision::ScreenVisionKind::Locate(target.clone()),
-            )
-            .await;
-        }
-        ParsedIntent::ScreenReadText => {
-            return run_screen_vision(app, crate::vision::ScreenVisionKind::ReadText).await;
+            return run_screen_locate(app, target.clone()).await;
         }
         ParsedIntent::StopSpeech => {
             return run_stop_speech(app).await;
@@ -595,6 +1173,186 @@ pub async fn process_transcript<R: Runtime>(
         }
         ParsedIntent::PointAgain => {
             return run_point_again(app).await;
+        }
+        ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_search" => {
+            let query = slots.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            return run_youtube_search(app, query).await;
+        }
+        ParsedIntent::NluResult { intent, slots, .. } if intent == "youtube_journal" => {
+            let url = slots.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            return run_youtube_journal(app, url).await;
+        }
+        ParsedIntent::NluResult { intent, slots, .. } if intent == "type_text" => {
+            let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            return run_type_text(app, text).await;
+        }
+        // Local system control (doc 07 P2): these previously had no
+        // dispatch arm at all, so a classified "focus_app"/"system_*"
+        // intent silently defaulted to Subsystem::WorkerBackend — the
+        // classifier ran instantly and locally, then its answer was
+        // thrown away for a cloud round-trip that couldn't act on it.
+        ParsedIntent::NluResult { intent, slots, .. } if intent == "focus_app" => {
+            let target = slots.get("target").and_then(|v| v.as_str())
+                .or_else(|| slots.get("app").and_then(|v| v.as_str()))
+                .or_else(|| slots.get("title").and_then(|v| v.as_str()))
+                .unwrap_or("").to_string();
+            return run_focus_app(app, target).await;
+        }
+        ParsedIntent::NluResult { intent, .. } if intent == "system_minimize_window" => {
+            return run_minimize_window(app).await;
+        }
+        ParsedIntent::NluResult { intent, .. } if intent == "system_maximize_window" => {
+            return run_maximize_window(app).await;
+        }
+        ParsedIntent::NluResult { intent, slots, .. } if intent == "system_click_element" || intent == "click_element" => {
+            let name = slots.get("name").and_then(|v| v.as_str())
+                .or_else(|| slots.get("element").and_then(|v| v.as_str()))
+                .unwrap_or("").to_string();
+            return run_click_element(app, name).await;
+        }
+        ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_analysis" => {
+            let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("analyze the screen").to_string();
+            return run_screen_analysis(app, prompt).await;
+        }
+        ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_annotation" => {
+            let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
+            return run_screen_annotation(app, prompt).await;
+        }
+        ParsedIntent::MemoryAudit => {
+            return run_memory_audit(app).await;
+        }
+        ParsedIntent::Briefing => {
+            return run_briefing(app).await;
+        }
+        ParsedIntent::ImportContacts => {
+            return run_import_contacts(app).await;
+        }
+        ParsedIntent::PowerAction { kind } => {
+            return run_power_action(app, kind.clone()).await;
+        }
+        ParsedIntent::ReopenSession => {
+            return run_reopen_session(app).await;
+        }
+        ParsedIntent::TimetableAdd { source, section } => {
+            return run_timetable_add(app, source.clone(), *section).await;
+        }
+        ParsedIntent::TimetableShow => {
+            return run_timetable_show(app).await;
+        }
+        ParsedIntent::TimetableClear => {
+            return run_timetable_clear(app).await;
+        }
+        ParsedIntent::TimetableCommit => {
+            return run_timetable_commit(app).await;
+        }
+        ParsedIntent::StudyPref { activity, choice } => {
+            return run_study_pref(app, activity.clone(), choice.clone()).await;
+        }
+        ParsedIntent::MailDigest => {
+            return run_mail_digest(app).await;
+        }
+        ParsedIntent::MailMute => {
+            return run_mail_mute(app).await;
+        }
+        ParsedIntent::Directions { destination, origin, mode } => {
+            return run_directions(app, destination.clone(), origin.clone(), mode.clone()).await;
+        }
+        ParsedIntent::PlacesSearch { query, near } => {
+            return run_places_search(app, query.clone(), near.clone()).await;
+        }
+        ParsedIntent::WhatsappRead { name } => {
+            return run_whatsapp_read(app, name.clone()).await;
+        }
+        ParsedIntent::PeopleFlag { name, kind, on } => {
+            return run_people_flag(app, name.clone(), kind.clone(), *on).await;
+        }
+        ParsedIntent::PeopleList => {
+            return run_people_list(app).await;
+        }
+        ParsedIntent::CalendarAgenda { day } => {
+            return run_calendar_agenda(app, day.clone()).await;
+        }
+        ParsedIntent::CalendarAdd { text } => {
+            return run_calendar_add(app, text.clone()).await;
+        }
+        ParsedIntent::MemoryForget { key } => {
+            return run_memory_forget(app, key.clone()).await;
+        }
+        ParsedIntent::MemoryForgetAll => {
+            return run_memory_forget_all(app).await;
+        }
+        ParsedIntent::MemoryForgetAllConfirm => {
+            return run_memory_forget_all_confirm(app).await;
+        }
+        ParsedIntent::PersonaFriend => {
+            return run_persona_switch(app, true).await;
+        }
+        ParsedIntent::PersonaButler => {
+            return run_persona_switch(app, false).await;
+        }
+        ParsedIntent::ShareConcern { story } => {
+            return run_share_concern(app, story.clone()).await;
+        }
+        ParsedIntent::StartDictation => {
+            start_dictation_session(&app);
+            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+            speak_line(&app, "Dictation started, sir. Say new line for a line break, or scratch that to undo.".to_string(), &request_id);
+            clear_active_request(&request_id);
+            return Ok(ProcessResult {
+                request_id,
+                subsystem: Subsystem::LocalCommand,
+                handled_locally: true,
+            });
+        }
+        ParsedIntent::StopDictation => {
+            set_dictation_active(false);
+            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+            speak_line(&app, "Stopped typing, sir.".to_string(), &request_id);
+            clear_active_request(&request_id);
+            return Ok(ProcessResult {
+                request_id,
+                subsystem: Subsystem::LocalCommand,
+                handled_locally: true,
+            });
+        }
+        ParsedIntent::BlockContact { target, platform, duration_days } => {
+            return run_block_contact(app, target.clone(), platform.clone(), *duration_days).await;
+        }
+        ParsedIntent::UnblockContact { target, platform } => {
+            return run_unblock_contact(app, target.clone(), platform.clone()).await;
+        }
+        ParsedIntent::ListBlockedContacts => {
+            return run_list_blocked_contacts(app).await;
+        }
+        ParsedIntent::RunOnLocalhost => {
+            return run_localhost_dev(app).await;
+        }
+        ParsedIntent::CodeProject { source, prompt } => {
+            return run_code_project(app, source.clone(), prompt.clone()).await;
+        }
+        ParsedIntent::CodingAgentTask { agent, prompt } => {
+            return run_coding_agent_task(app, agent.clone(), prompt.clone()).await;
+        }
+        ParsedIntent::WatchAgentTask { agent, query } => {
+            return run_watch_agent_task(app, agent.clone(), query.clone()).await;
+        }
+        ParsedIntent::PlayMusic { query, player } => {
+            return run_play_music(app, query.clone(), player.clone()).await;
+        }
+        ParsedIntent::OpenMusicPlayer { player } => {
+            return run_open_music_player(app, player.clone()).await;
+        }
+        ParsedIntent::ScanInternshipEmails => {
+            return run_scan_internship_emails(app).await;
+        }
+        ParsedIntent::CreateVoiceReminder { task, minutes } => {
+            return run_create_voice_reminder(app, task.clone(), *minutes).await;
+        }
+        ParsedIntent::AnalyseChatDocs { contact } => {
+            return run_analyse_chat_docs(app, contact.clone()).await;
+        }
+        ParsedIntent::OpenSettings => {
+            return run_open_settings(app).await;
         }
         _ => {}
     }
@@ -606,6 +1364,318 @@ pub async fn process_transcript<R: Runtime>(
     // resumes with its draft intact on re-entry.
     if crate::ghostwriter::is_active() {
         return run_ghostwriter_turn(app, transcript).await;
+    }
+
+    // ─── Ghost drill overlap: stop-words + follow-up queue ──────────
+    // While a ghost drill runs, mid-drill speech must not route normally
+    // (a second full turn would fight the drill for the mouse/keyboard):
+    // stop-words abort the TASK (session stays — user directive: mouse
+    // use / stop never turns the session off; "exit ghost mode" ends it),
+    // everything else queues silently for the drill's drain pass. Bare
+    // test sessions don't set the drill flag, so they never swallow
+    // commands.
+    // A new top-level command starts: a stop left over with no drill to consume
+    // it is stale and must not make every later runner answer "Stopped, sir.".
+    crate::ghost::clear_stale_stop();
+    if crate::ghost::drill_running() {
+        let is_stop = crate::ghost::is_stop_phrase(&transcript)
+            || matches!(&intent, ParsedIntent::NluResult { intent, .. } if intent == "cancel_action");
+        if is_stop {
+            return run_ghost_stop(&app, true);
+        }
+        // FIFO lane: supersede-or-append (Rules 2+4), silent by design —
+        // the drill's drain pass executes in arrival order.
+        let (kept, depth) = crate::ghost::enqueue_command(transcript.clone());
+        if kept {
+            tracing::info!("ghost: queued mid-drill follow-up (silent, drains after main steps)");
+            // Rule 4: depth-ACK once per session so a script user knows
+            // the mic heard them without per-command chatter.
+            if depth >= 2
+                && crate::commands::read_ghost_depth_ack(&app)
+                && !crate::ghost::DEPTH_ACK_SPOKEN
+                    .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, "Queued, sir.".to_string(), &request_id);
+                clear_active_request(&request_id);
+            }
+        } else {
+            // Cap reached (drop-newest): logged; deliberately silent — TTS
+            // mid-drill would echo into the still-hot mic.
+            tracing::warn!("ghost: queue full, rejected newest follow-up");
+        }
+        return Ok(ProcessResult {
+            request_id: new_request_id(),
+            subsystem: Subsystem::None,
+            handled_locally: true,
+        });
+    }
+
+    // ─── Ghost session routing: exits + app opens + desktop messages ──
+    // With a ghost session live (but no drill running — that's handled
+    // above): explicit exits end the session; OpenApp and WhatsApp-
+    // message transcripts drive the ghost desktop flows instead of the
+    // plain paths (ring narration, session guards, visible typing,
+    // session stays open for follow-ups). Messages NEVER auto-send —
+    // the confirm gate still owns that. Stop-words with nothing running
+    // inform instead of routing to the Worker. Everything else routes
+    // normally (questions, dictation, media).
+    if crate::ghost::session_active() {
+        // Explicit exit: "exit/close/turn off ghost mode" voice phrase.
+        if matches!(&intent, ParsedIntent::ExitGhostControl) {
+            let _ = crate::ghost::ghost_exit(crate::ghost::ghost_wry::g_wry(app.clone())).await;
+            crate::hand::stop_if_ghost_started(&app);
+            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+            speak_line(&app, GHOST_EXIT_LINE.to_string(), &request_id);
+            clear_active_request(&request_id);
+            return Ok(ProcessResult {
+                request_id,
+                subsystem: Subsystem::LocalCommand,
+                handled_locally: true,
+            });
+        }
+        // Stop-words with nothing running: inform (never route to the
+        // Worker — "stop" mid-idle means "nothing to stop").
+        if crate::ghost::is_stop_phrase(&transcript)
+            || matches!(&intent, ParsedIntent::NluResult { intent, .. } if intent == "cancel_action")
+        {
+            return run_ghost_stop(&app, false);
+        }
+        match &intent {
+            ParsedIntent::GhostAction { task } => {
+                return run_ghost_center_task(app, task.clone()).await;
+            }
+            ParsedIntent::OpenApp { target } => {
+                return run_ghost_open(app, target.clone()).await;
+            }
+            ParsedIntent::SendWhatsAppMessage { contact, message } => {
+                return run_ghost_message(app, contact.clone(), message.clone()).await;
+            }
+            ParsedIntent::WhatsappChat { contact } => {
+                return run_ghost_message(app, contact.clone(), String::new()).await;
+            }
+            // Browser control in ghost mode: real hotkeys on the user's
+            // laptop (visible), never MCP / Worker.
+            ParsedIntent::BrowserCloseTab { index } => {
+                return run_browser_close(app, *index).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "browser_new_tab" => {
+                return run_browser_new_tab(app).await;
+            }
+            ParsedIntent::Search { query } | ParsedIntent::BrowserSearch { query } => {
+                #[cfg(target_os = "windows")]
+                {
+                    if crate::live::commands::window::is_foreground_app("whatsapp") {
+                        return run_ghost_message(app, query.clone(), String::new()).await;
+                    }
+                }
+                return run_browser_search(app, query.clone()).await;
+            }
+            ParsedIntent::BrowserSearchFocus => {
+                return run_browser_search_focus(app).await;
+            }
+            ParsedIntent::WatchScreenEmail => {
+                return run_watch_screen_email(app).await;
+            }
+            ParsedIntent::ScreenClick { ordinal } => {
+                let els = crate::screen::list_actionables();
+                if let Some(el) = crate::screen::pick_ordinal(&els, *ordinal) {
+                    return run_ghost_center_task(app, crate::ghost_center::GhostTask {
+                        steps: vec![crate::ghost_center::GhostStep::AccessibleClick {
+                            name: el.name.clone(),
+                        }],
+                    }).await;
+                }
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                return say_and_finish(&app, request_id,
+                    format!("I only see {} accessible controls, sir.", els.len()));
+            }
+            ParsedIntent::ScreenRead { ordinal } => {
+                return run_screen_read(app, *ordinal).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_analysis" => {
+                let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("analyze the screen").to_string();
+                return run_screen_analysis(app, prompt).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "screen_annotation" => {
+                let prompt = slots.get("prompt").and_then(|v| v.as_str()).unwrap_or("annotate the screen").to_string();
+                return run_screen_annotation(app, prompt).await;
+            }
+            ParsedIntent::MemoryAudit => {
+                return run_memory_audit(app).await;
+            }
+            ParsedIntent::Briefing => {
+                return run_briefing(app).await;
+            }
+            ParsedIntent::ImportContacts => {
+                return run_import_contacts(app).await;
+            }
+            ParsedIntent::PowerAction { kind } => {
+                return run_power_action(app, kind.clone()).await;
+            }
+            ParsedIntent::ReopenSession => {
+                return run_reopen_session(app).await;
+            }
+            ParsedIntent::TimetableAdd { source, section } => {
+                return run_timetable_add(app, source.clone(), *section).await;
+            }
+            ParsedIntent::TimetableShow => {
+                return run_timetable_show(app).await;
+            }
+            ParsedIntent::TimetableClear => {
+                return run_timetable_clear(app).await;
+            }
+            ParsedIntent::TimetableCommit => {
+                return run_timetable_commit(app).await;
+            }
+            ParsedIntent::StudyPref { activity, choice } => {
+                return run_study_pref(app, activity.clone(), choice.clone()).await;
+            }
+            ParsedIntent::MailDigest => {
+                return run_mail_digest(app).await;
+            }
+            ParsedIntent::MailMute => {
+                return run_mail_mute(app).await;
+            }
+            ParsedIntent::Directions { destination, origin, mode } => {
+                return run_directions(app, destination.clone(), origin.clone(), mode.clone()).await;
+            }
+            ParsedIntent::PlacesSearch { query, near } => {
+                return run_places_search(app, query.clone(), near.clone()).await;
+            }
+            ParsedIntent::WhatsappRead { name } => {
+                return run_whatsapp_read(app, name.clone()).await;
+            }
+            ParsedIntent::PeopleFlag { name, kind, on } => {
+                return run_people_flag(app, name.clone(), kind.clone(), *on).await;
+            }
+            ParsedIntent::PeopleList => {
+                return run_people_list(app).await;
+            }
+            ParsedIntent::CalendarAgenda { day } => {
+                return run_calendar_agenda(app, day.clone()).await;
+            }
+            ParsedIntent::CalendarAdd { text } => {
+                return run_calendar_add(app, text.clone()).await;
+            }
+            ParsedIntent::MemoryForget { key } => {
+                return run_memory_forget(app, key.clone()).await;
+            }
+            ParsedIntent::MemoryForgetAll => {
+                return run_memory_forget_all(app).await;
+            }
+            ParsedIntent::MemoryForgetAllConfirm => {
+                return run_memory_forget_all_confirm(app).await;
+            }
+            ParsedIntent::PersonaFriend => {
+                return run_persona_switch(app, true).await;
+            }
+            ParsedIntent::PersonaButler => {
+                return run_persona_switch(app, false).await;
+            }
+            ParsedIntent::ShareConcern { story } => {
+                return run_share_concern(app, story.clone()).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "type_text" => {
+                let text = slots.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                return run_type_text(app, text).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "focus_app" => {
+                let target = slots.get("target").and_then(|v| v.as_str())
+                    .or_else(|| slots.get("app").and_then(|v| v.as_str()))
+                    .or_else(|| slots.get("title").and_then(|v| v.as_str()))
+                    .unwrap_or("").to_string();
+                return run_focus_app(app, target).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "system_minimize_window" => {
+                return run_minimize_window(app).await;
+            }
+            ParsedIntent::NluResult { intent, .. } if intent == "system_maximize_window" => {
+                return run_maximize_window(app).await;
+            }
+            ParsedIntent::NluResult { intent, slots, .. } if intent == "system_click_element" || intent == "click_element" => {
+                let name = slots.get("name").and_then(|v| v.as_str())
+                    .or_else(|| slots.get("element").and_then(|v| v.as_str()))
+                    .unwrap_or("").to_string();
+                return run_ghost_center_task(app, crate::ghost_center::GhostTask {
+                    steps: vec![crate::ghost_center::GhostStep::AccessibleClick { name }],
+                }).await;
+            }
+            ParsedIntent::StartDictation => {
+                start_dictation_session(&app);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, "Dictation started, sir. Say new line for a line break, or scratch that to undo.".to_string(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            ParsedIntent::StopDictation => {
+                set_dictation_active(false);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, "Stopped typing, sir.".to_string(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            ParsedIntent::BlockContact { target, platform, duration_days } => {
+                return run_block_contact(app, target.clone(), platform.clone(), *duration_days).await;
+            }
+            ParsedIntent::UnblockContact { target, platform } => {
+                return run_unblock_contact(app, target.clone(), platform.clone()).await;
+            }
+            ParsedIntent::ListBlockedContacts => {
+                return run_list_blocked_contacts(app).await;
+            }
+            ParsedIntent::RunOnLocalhost => {
+                return run_localhost_dev(app).await;
+            }
+            ParsedIntent::CodeProject { source, prompt } => {
+                return run_code_project(app, source.clone(), prompt.clone()).await;
+            }
+            ParsedIntent::CodingAgentTask { agent, prompt } => {
+                return run_coding_agent_task(app, agent.clone(), prompt.clone()).await;
+            }
+            ParsedIntent::WatchAgentTask { agent, query } => {
+                return run_watch_agent_task(app, agent.clone(), query.clone()).await;
+            }
+            ParsedIntent::PlayMusic { query, player } => {
+                return run_play_music(app, query.clone(), player.clone()).await;
+            }
+            ParsedIntent::OpenMusicPlayer { player } => {
+                return run_open_music_player(app, player.clone()).await;
+            }
+            ParsedIntent::ScanInternshipEmails => {
+                return run_scan_internship_emails(app).await;
+            }
+            ParsedIntent::CreateVoiceReminder { task, minutes } => {
+                return run_create_voice_reminder(app, task.clone(), *minutes).await;
+            }
+            ParsedIntent::AnalyseChatDocs { contact } => {
+                return run_analyse_chat_docs(app, contact.clone()).await;
+            }
+            ParsedIntent::OpenSettings => {
+                return run_open_settings(app).await;
+            }
+            ParsedIntent::Unknown { .. } => {
+                // Ghost-unknown never goes to cloud chat: a slow/hung
+                // Worker round trip wedges the hot-mic loop with zero
+                // feedback (observed: 29s and 19s dead-air stalls). Memory
+                // + custom-spec fallbacks first (same as normal 2a slot),
+                // else a short local retry line — speaking re-arms the
+                // hot-mic via the normal TTS-onEnd chain.
+                if let Some(handled) = try_unknown_local_fallbacks(&app, &transcript).await {
+                    return handled;
+                }
+                return run_ghost_unknown_retry(app, &transcript).await;
+            }
+            _ => {}
+        }
     }
 
     // ─── Command Center: compound task fast path ───────────────────────
@@ -629,8 +1699,16 @@ pub async fn process_transcript<R: Runtime>(
             task_id: request_id.clone(),
             ..plan
         };
-        return run_command_center(app, plan, transcript, dialog_context, request_id, cancel_flag)
-            .await;
+        return run_command_center(
+            app,
+            plan,
+            transcript,
+            dialog_context,
+            request_id,
+            cancel_flag,
+            &turn,
+        )
+        .await;
     }
 
     // 1b. Brain monitor — watches every transcript in the background.
@@ -651,6 +1729,40 @@ pub async fn process_transcript<R: Runtime>(
 
     // 2. Route to subsystem
     let subsystem = route_intent(&intent);
+
+    println!(
+        "[SUB-ROUTE] SubCenter: {} | Subsystem: {:?} | Action: {}",
+        center_name,
+        subsystem,
+        crate::intent_parser::intent_to_label(&intent)
+    );
+
+    // Console tracking (one line per turn): transcript → intent → subsystem.
+    // INFO-level routing detail stays hidden; this is the trackable shape
+    // (run.ps1 surfaces [ACTION] lines) so executed turns are provable
+    // from `nexus start` alone — previously only transcripts showed.
+    // Intent label (not Debug) keeps the line short on purpose.
+    {
+        let t: String = transcript.chars().take(60).collect();
+        println!(
+            "[ACTION] '{}' → {} → {:?}",
+            t.replace('\n', " "),
+            crate::intent_parser::intent_to_label(&intent),
+            subsystem
+        );
+    }
+
+    // 2a. Custom declarative specs (D2): user intents.yaml fills the
+    // fallback slot — checked on deterministic-miss Unknown only, after
+    // all session intercepts, before NLU/Worker. Built-ins always win.
+    // 2b. Explicit memory write (B1): "remember that X is Y" / "my X is Y".
+    // Same slot (Unknown only, post-intercepts) so in-room dictation like
+    // "remember that we need milk" stays in the room.
+    if matches!(&intent, ParsedIntent::Unknown { .. }) {
+        if let Some(handled) = try_unknown_local_fallbacks(&app, &transcript).await {
+            return handled;
+        }
+    }
 
     // 2b. Check for verbal "wrong" feedback (admin says "wrong" after a bad command)
     #[cfg(feature = "admin-brain")]
@@ -697,6 +1809,11 @@ pub async fn process_transcript<R: Runtime>(
             // Local commands are instant — no ack, no loading indicator.
             // The frontend handles these directly (open app, media, etc).
             // We just emit done immediately.
+            println!(
+                "[SUB-PROC] SubCenter {} executing local command: {}",
+                center_name,
+                crate::intent_parser::intent_to_label(&intent)
+            );
 
             // Clarification prompts (partial MCP commands) are spoken as a
             // Result event — same channel the frontend already speaks — so
@@ -750,7 +1867,9 @@ pub async fn process_transcript<R: Runtime>(
 
         Subsystem::WorkerBackend => {
             // Long-running — emit ack, then show loading indicator after TTS.
-            let ack = pick_ack();
+            // Repeat-back: the ack names the action (P1), so the user hears
+            // WHAT was understood instead of a bare "on it sir".
+            let ack = ack_for(&intent);
             emit(
                 &app,
                 &OrchestratorEvent::Ack {
@@ -770,14 +1889,37 @@ pub async fn process_transcript<R: Runtime>(
             show_loading(&app);
 
             // Dispatch to Worker backend
+            println!(
+                "[SUB-PROC] SubCenter Knowledge routing to 9Router / Cloudflare Worker (request_id={})",
+                request_id
+            );
             let result = dispatch_to_worker(
                 app.clone(),
                 transcript.clone(),
                 dialog_context,
                 request_id.clone(),
                 cancel_flag.clone(),
+                &turn,
+                crate::intent_parser::intent_to_label(&intent),
+                false,
             )
             .await;
+
+            match &result {
+                Ok((t, _, _)) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Knowledge received response ({} chars, request_id={})",
+                        t.len(),
+                        request_id
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Knowledge request failed: {} (request_id={})",
+                        e, request_id
+                    );
+                }
+            }
 
             // Hide loading indicator
             emit(
@@ -807,8 +1949,9 @@ pub async fn process_transcript<R: Runtime>(
                     );
                     let has_structured_analysis = analysis.as_ref().map_or(false, |a| !a.is_null());
                     let is_long_markdown = text.len() > 300 || text.contains("\n#") || text.contains("\n##");
+                    let howto_sidebar = crate::howto::delivery_for(&transcript, &text) == crate::howto::Delivery::Sidebar;
 
-                    let (spoken_text, show_sidebar) = if is_analysis_intent || has_structured_analysis || is_long_markdown {
+                    let (spoken_text, show_sidebar) = if is_analysis_intent || has_structured_analysis || is_long_markdown || howto_sidebar {
                         let spoken = match &intent {
                             ParsedIntent::AnalysePr { pr_number, repo, .. } => {
                                 format!("Here is the analysis for PR #{} in {}, sir.", pr_number, repo)
@@ -822,6 +1965,7 @@ pub async fn process_transcript<R: Runtime>(
                             ParsedIntent::CheckBranch { repo, .. } => {
                                 format!("Here is the branch check for {}, sir.", repo)
                             }
+                            _ if howto_sidebar && !is_long_markdown => crate::howto::SIDEBAR_SPOKEN.to_string(),
                             _ => "Here is the response in the sidebar, sir.".to_string(),
                         };
                         (spoken, true)
@@ -885,6 +2029,16 @@ pub async fn process_transcript<R: Runtime>(
                 }
                 Err(e) => {
                     hide_loading(&app);
+                    // Offline clarity (P3.1): a network-dropped Worker turn
+                    // speaks an attributed line (never raw error JSON) and
+                    // names what still works locally.
+                    let offline = !crate::tts_network::is_network_up();
+                    let msg = if offline {
+                        "Network's down, sir — I've gone local. Offline commands still work: open and close apps, media, dictation, memory. Ask me again once you're back online."
+                            .to_string()
+                    } else {
+                        e.clone()
+                    };
                     // Report execution failure to the brain monitor
                     // (admin-only, no-op if not admin)
                     #[cfg(feature = "admin-brain")]
@@ -899,7 +2053,7 @@ pub async fn process_transcript<R: Runtime>(
                     emit(
                         &app,
                         &OrchestratorEvent::Error {
-                            message: e.clone(),
+                            message: msg,
                             request_id: request_id.clone(),
                         },
                     );
@@ -992,6 +2146,9 @@ pub async fn process_transcript<R: Runtime>(
                         dialog_context,
                         request_id.clone(),
                         cancel_flag.clone(),
+                        &turn,
+                        crate::intent_parser::intent_to_label(&intent),
+                        false,
                     )
                     .await;
 
@@ -1074,7 +2231,7 @@ pub async fn process_transcript<R: Runtime>(
                         crate::brain_monitor::report_execution_success(&transcript, &intent_name);
                     }
                     let cmd_json = serde_json::to_value(command).unwrap_or(serde_json::Value::Null);
-                    emit(
+                    let _confirm_event = emit(
                         &app,
                         &OrchestratorEvent::Confirm {
                             prompt: prompt.clone(),
@@ -1087,12 +2244,17 @@ pub async fn process_transcript<R: Runtime>(
                         "prompt": prompt.clone(),
                         "command": cmd_json,
                     });
-                    let _ = crate::commands::show_sidebar_with_confirmation(
+                    // Log (never swallow): if the sidebar fails to open, the
+                    // Confirm event above still fired but PENDING_SIDEBAR was
+                    // never stored — the user would see no approve/cancel UI.
+                    if let Err(e) = crate::commands::show_sidebar_with_confirmation(
                         app.clone(),
                         "GitHub Confirmation".to_string(),
                         prompt.clone(),
                         confirm_payload,
-                    ).await;
+                    ).await {
+                        tracing::warn!("confirm: GitHub sidebar failed to open: {e}");
+                    }
                 }
                 crate::github_cmd::GitHubResult::MergeConflict {
                     pr_number,
@@ -1262,7 +2424,35 @@ pub async fn process_transcript<R: Runtime>(
                 show_loading(&app);
             }
 
+            println!(
+                "[SUB-PROC] SubCenter Message/Commerce executing MCP intent: {} (request_id={})",
+                crate::intent_parser::intent_to_label(&intent),
+                request_id
+            );
+
             let mcp_outcome = dispatch_to_mcp(&app, &intent, &transcript, &request_id).await;
+
+            match &mcp_outcome {
+                Ok(Some(t)) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Message/Commerce tool finished ({} chars, request_id={})",
+                        t.len(),
+                        request_id
+                    );
+                }
+                Ok(None) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Message/Commerce confirmation prompt pending (request_id={})",
+                        request_id
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "[SUB-PROC] SubCenter Message/Commerce failed: {} (request_id={})",
+                        e, request_id
+                    );
+                }
+            }
 
             if !is_write_intent {
                 emit(
@@ -1370,6 +2560,26 @@ pub async fn process_transcript<R: Runtime>(
     }
 }
 
+/// DAC/room-reverb tail drain after cutting TTS before fresh capture (ms).
+/// Single owner — every barge path sleeps this after `request_barge_in`.
+/// 250 ms ensures sound card buffers + room reverb tails completely drain
+/// before opening the mic, preventing speaker audio from bleeding into STT capture.
+pub(crate) const BARGE_DAC_DRAIN_MS: u64 = 250;
+
+/// Alexa-style barge-in choke point: cut speech mid-sentence, cancel the
+/// active turn, clear the TTS flag, purge queued follow-ups — in that
+/// order (audio first, bookkeeping after). Idempotent: every primitive
+/// is safe when nothing is playing, so unconditional calls are free.
+/// Single call site owner for ALL barge paths (hotkey, wake fire, drill
+/// stop) — never duplicate these four lines elsewhere.
+pub(crate) fn request_barge_in(reason: &str) {
+    let _ = crate::tts::stop_tts();
+    cancel_active();
+    crate::wakeword_oww::clear_tts_playing();
+    crate::ghost::drop_followups();
+    tracing::info!("barge-in: audio cut + turn cancelled ({reason})");
+}
+
 /// Cancel the active request (if any). Called on barge-in or new wake.
 pub fn cancel_active() {
     let mut guard = ACTIVE_REQUEST.lock().unwrap();
@@ -1398,13 +2608,218 @@ pub fn signal_done(request_id: &str) {
 /// bypassing the Worker for 3-7x lower latency (~242ms vs ~2s). The
 /// Worker is the fallback if 9Router fails or the task requires Worker
 /// infrastructure (PR analysis, GitHub token, search).
+/// NEXUS wire protocol version (C3) — sent on every Worker POST.
+/// Must match `PROTOCOL_VERSION` in server/worker/src/protocol.ts.
+pub const PROTOCOL_VERSION: &str = "1";
+
+/// Build the Worker request payload. Pure + unit-tested.
+/// `profile_id` rides `requester` for canonical (Worker-issued) identity
+/// clients; legacy clients pass None and keep the pre-identity shape.
+#[allow(dead_code)]
+pub fn build_worker_payload(
+    request_id: &str,
+    user_id: &str,
+    device_id: &str,
+    transcript: &str,
+    dialog_context: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    build_worker_payload_ident(request_id, user_id, device_id, None, transcript, dialog_context)
+}
+
+/// Identity-aware payload builder (Feature 88).
+pub fn build_worker_payload_ident(
+    request_id: &str,
+    user_id: &str,
+    device_id: &str,
+    profile_id: Option<&str>,
+    transcript: &str,
+    dialog_context: Option<&serde_json::Value>,
+) -> serde_json::Value {    let task = if let Some(ctx) = dialog_context {
+        serde_json::json!({
+            "type": "general",
+            "request": transcript,
+            "dialog_context": ctx,
+        })
+    } else {
+        serde_json::json!({
+            "type": "general",
+            "request": transcript,
+        })
+    };
+    let mut requester = serde_json::json!({
+        "id": user_id,
+        "device_id": device_id,
+    });
+    if let Some(p) = profile_id {
+        requester["profile_id"] = serde_json::Value::String(p.to_string());
+    }
+    serde_json::json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": request_id,
+        "requester": requester,
+        "task": task,
+    })
+}
+
+/// Feature 88 (C2): map a Worker AI-entitlement denial to its distinct,
+/// speakable line. Returns None for non-denial errors (regular worker
+/// failures keep the generic error path).
+pub fn denial_spoken_line(body: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    if json["error"].as_str()? != "worker_ai_not_enabled" {
+        return None;
+    }
+    let line = match json["code"].as_str().unwrap_or("") {
+        "pending" => "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile.",
+        "suspended" => "Cloud access has been suspended, sir. Please contact your administrator.",
+        "revoked" => "This device's cloud access has been revoked, sir.",
+        "expired" => "This device's cloud access grant has expired, sir. Please ask your administrator to renew it.",
+        "bad_token" => "This device's cloud credentials are invalid, sir. Please reconnect in the setup wizard.",
+        _ => "Cloud access isn't enabled for this device yet, sir.",
+    };
+    Some(line.to_string())
+}
+
+fn record_worker_turn<R: Runtime>(
+    app: &AppHandle<R>,
+    transcript: &str,
+    response: &str,
+    dialog_state: Option<&serde_json::Value>,
+    turn: &crate::center::TurnContext,
+    intent_label: &str,
+    outcome: crate::conversation::ConversationOutcome,
+    unresolved: Vec<String>,
+) {
+    if let Ok(dir) = app.path().app_data_dir() {
+        // The cloud may have seen "Person A"; local memory keeps real names.
+        let (transcript, response) = if crate::memcore::names::enabled(&dir) {
+            let roster = crate::memcore::names::roster(&dir);
+            (
+                crate::memcore::names::unredact(transcript, &roster),
+                crate::memcore::names::unredact(response, &roster),
+            )
+        } else {
+            (transcript.to_string(), response.to_string())
+        };
+        let (transcript, response) = (transcript.as_str(), response.as_str());
+        // M2 auto-learning: until now nothing called `log_episode`, so
+        // "I work at X" / "call me Y" were never mined. Completed turns of
+        // a recognised owner only — failed, cancelled or rejected audio
+        // must not teach NEXUS anything.
+        // Memory hygiene (memcore/hygiene.rs): a fragment, a hallucination or a turn that only
+        // earned a "could you clarify" reply is not a memory. 85-90 % of the old store was that,
+        // and all of it was re-sent to the cloud on every turn.
+        let completed = outcome == crate::conversation::ConversationOutcome::Completed;
+        if completed
+            && turn.ownership != crate::voice_profile::TurnOwnership::Rejected
+        {
+            match crate::memcore::hygiene::admit_episode(transcript, response) {
+                Ok(()) => crate::memory::log_episode(&dir, transcript, response),
+                Err(why) => tracing::debug!("memory: episode not admitted ({why:?}): '{}'", transcript),
+            }
+        }
+        if let Err(why) =
+            crate::memcore::hygiene::admit_conversation_turn(transcript, response, completed)
+        {
+            tracing::debug!("memory: conversation turn not admitted ({why:?}): '{}'", transcript);
+            return;
+        }
+        let mut unresolved = unresolved;
+        unresolved.extend(crate::conversation::unresolved_from_dialog_state(dialog_state));
+        crate::conversation::record_conversation_turn(
+            &dir,
+            crate::conversation::ConversationTurnInput {
+                agent: "worker".to_string(),
+                intent: intent_label.to_string(),
+                transcript: transcript.to_string(),
+                response: response.to_string(),
+                outcome,
+                unresolved,
+                owner: turn.ownership,
+            },
+        );
+    }
+}
+
+/// Cloud dispatch. With `memcoreRedactNames` on, names NEXUS knows locally
+/// are swapped for stable labels ("Person A") in the transcript that leaves
+/// the device and swapped back in the reply — the cloud never sees them.
 async fn dispatch_to_worker<R: Runtime>(
     app: AppHandle<R>,
     transcript: String,
     dialog_context: Option<serde_json::Value>,
     request_id: String,
     cancel_flag: Arc<AtomicBool>,
+    turn: &crate::center::TurnContext,
+    intent_label: &str,
+    counsel: bool,
 ) -> Result<(String, Option<serde_json::Value>, Option<serde_json::Value>), String> {
+    let roster = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .filter(|dir| crate::memcore::names::enabled(dir))
+        .map(|dir| crate::memcore::names::roster(&dir))
+        .filter(|r| !r.is_empty());
+    let Some(roster) = roster else {
+        return dispatch_to_worker_inner(
+            app, transcript, dialog_context, request_id, cancel_flag, turn, intent_label, counsel,
+        )
+        .await;
+    };
+    let masked = crate::memcore::names::redact(&transcript, &roster);
+    dispatch_to_worker_inner(
+        app, masked, dialog_context, request_id, cancel_flag, turn, intent_label, counsel,
+    )
+    .await
+    .map(|(text, a, b)| (crate::memcore::names::unredact(&text, &roster), a, b))
+}
+
+async fn dispatch_to_worker_inner<R: Runtime>(
+app: AppHandle<R>,
+transcript: String,
+dialog_context: Option<serde_json::Value>,
+request_id: String,
+cancel_flag: Arc<AtomicBool>,
+turn: &crate::center::TurnContext,
+intent_label: &str,
+counsel: bool,
+) -> Result<(String, Option<serde_json::Value>, Option<serde_json::Value>), String> {
+    // Redact PII before the transcript leaves the device.
+    let transcript = crate::pii_filter::sanitize(&transcript);
+    let transcript = transcript.as_str();
+    // Enrich dialog context with persistent facts plus the coordinated
+    // conversation brief and high-signal recent turns.
+    let mut dialog_context = dialog_context;
+    if let Ok(dir) = app.path().app_data_dir() {
+        let mut parts = Vec::new();
+        // Counsel turns lead with the contract (F1b): 9Router's
+        // build_prompt renders dialog_context.memory as "Context:", so
+        // this reaches every provider with zero signature changes.
+        if counsel {
+            parts.push(COUNSEL_CONTRACT.to_string());
+        }
+        // Friend tone (F0): same channel — 9Router replies shift tone.
+        // Worker path uses explicit task.persona (injected at payload).
+        if crate::persona::is_friend(&crate::commands::read_persona_mode(&app)) {
+            parts.push(FRIEND_TONE.to_string());
+        }
+        if let Some(mem) = crate::memory::get_memory_context(&dir, transcript) {
+            parts.push(mem);
+        }
+        if let Some(history) = crate::conversation::conversation_prompt(&dir) {
+            parts.push(history);
+        }
+        // What is about to leave the device (7-day, encrypted, user-visible).
+        crate::memcore::log_egress(&dir, "cloud", transcript, &parts.join("\n"));
+        if !parts.is_empty() {
+            let mut ctx = dialog_context.unwrap_or(serde_json::json!({}));
+            if let Some(obj) = ctx.as_object_mut() {
+                obj.insert("memory".to_string(), serde_json::Value::String(parts.join("\n")));
+            }
+            dialog_context = Some(ctx);
+        }
+    }
     // ─── 9Router fast path ──────────────────────────────────────────────
     // Try local → free cloud providers first. This bypasses the Worker
     // entirely for general questions, cutting latency from ~2s to ~242ms.
@@ -1436,6 +2851,17 @@ async fn dispatch_to_worker<R: Runtime>(
                     resp.provider.name(),
                     resp.latency_ms
                 );
+                // Record the completed cloud turn in coordinated conversation memory.
+                record_worker_turn(
+                    &app,
+                    transcript,
+                    &resp.text,
+                    None,
+                    turn,
+                    intent_label,
+                    crate::conversation::ConversationOutcome::Completed,
+                    Vec::new(),
+                );
                 // 9Router answered — return directly, skip Worker entirely.
                 return Ok((resp.text, None, None));
             }
@@ -1460,34 +2886,70 @@ async fn dispatch_to_worker<R: Runtime>(
         .ok_or("no session open — call open_session first")?;
     let (worker_url, user_id, device_id) = session_info;
 
-    // Build the request payload
-    let task = if let Some(ctx) = &dialog_context {
-        serde_json::json!({
-            "type": "general",
-            "request": transcript,
-            "dialog_context": ctx,
-        })
-    } else {
-        serde_json::json!({
-            "type": "general",
-            "request": transcript,
-        })
-    };
-    let payload = serde_json::json!({
-        "request_id": request_id,
-        "requester": {
-            "id": user_id,
-            "device_id": device_id,
-        },
-        "task": task,
+    // Build the request payload (versioned wire protocol v1).
+    // Sanitize dialog history + memory: the Worker forwards these to
+    // its own LLM calls, so raw PII must not ride along.
+    let clean_ctx = dialog_context
+        .as_ref()
+        .map(|c| crate::pii_filter::sanitize_context(c));
+    // Feature 88: canonical clients attach the Worker-issued profile_id
+    // and authenticate with the device token (keyring, never plaintext).
+    let identity = app.path().app_data_dir().ok()
+        .map(|dir| crate::identity_state::read_identity_config(&dir));
+    let profile_id = identity.as_ref().and_then(|i| {
+        (i.identity == crate::identity_state::IDENTITY_CANONICAL && !i.profile_id.is_empty())
+            .then(|| i.profile_id.clone())
     });
+    let mut payload = build_worker_payload_ident(
+        &request_id,
+        &user_id,
+        &device_id,
+        profile_id.as_deref(),
+        transcript,
+        clean_ctx.as_ref(),
+    );
+    // Counsel turns carry an explicit task intent (F1b): the Worker reads
+    // task.intent as an explicitIntent override and routes to handleCounsel
+    // instead of re-classifying (which would land on generic chat).
+    if counsel {
+        payload["task"]["intent"] = serde_json::Value::String("counsel".to_string());
+    }
+    // Friend tone (F0): explicit task.persona the Worker reads for its
+    // general-system variant. Butler (default) sends nothing — Worker
+    // behavior byte-identical when the user never opts in.
+    if crate::persona::is_friend(&crate::commands::read_persona_mode(&app)) {
+        payload["task"]["persona"] = serde_json::Value::String("friend".to_string());
+    }
+    let device_token = profile_id
+        .as_ref()
+        .and_then(|_| crate::auth_vault::get_api_key(crate::identity_state::DEVICE_TOKEN_SERVICE));
 
-    // HTTP POST to the Worker
+    let record_failure = |message: &str| {
+        record_worker_turn(
+            &app,
+            transcript,
+            message,
+            None,
+            turn,
+            intent_label,
+            crate::conversation::ConversationOutcome::Failed,
+            vec!["followup".to_string()],
+        );
+    };
+
+    // HTTP POST to the Worker. 30s ceiling (was 120s): a hung Worker
+    // round trip wedged the ghost hot-mic loop with zero feedback
+    // (observed: 29s and 19s dead-air stalls). The frontend additionally
+    // races ghost turns at 12s — this is the backstop, not the UX bound.
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("http client: {e}"))?;
+        .map_err(|e| {
+            let message = format!("http client: {e}");
+            record_failure(&message);
+            message
+        })?;
 
     tracing::info!(
         "orchestrator: dispatching to worker: url={} request_id={}",
@@ -1495,16 +2957,34 @@ async fn dispatch_to_worker<R: Runtime>(
         request_id
     );
 
-    let resp = crate::device_auth::apply_to(client.post(&worker_url))
+    let resp = client
+        .post(&worker_url)
         .json(&payload)
+        .headers({
+            let mut h = reqwest::header::HeaderMap::new();
+            if let Some(tok) = &device_token {
+                if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("Bearer {tok}")) {
+                    h.insert(reqwest::header::AUTHORIZATION, v);
+                }
+            }
+            h
+        })
         .send()
         .await
-        .map_err(|e| format!("worker request: {e}"))?;
+        .map_err(|e| {
+            let message = format!("worker request: {e}");
+            record_failure(&message);
+            message
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("Worker error {status}: {body}"));
+        // Feature 88: a cloud-access denial gets its own spoken line.
+        let message = denial_spoken_line(&body)
+            .unwrap_or_else(|| format!("Worker error {status}: {body}"));
+        record_failure(&message);
+        return Err(message);
     }
 
     // Check if cancelled while waiting
@@ -1516,7 +2996,11 @@ async fn dispatch_to_worker<R: Runtime>(
     let data: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("worker json: {e}"))?;
+        .map_err(|e| {
+            let message = format!("worker json: {e}");
+            record_failure(&message);
+            message
+        })?;
 
     let reply_text = data["reply_text"]
         .as_str()
@@ -1529,18 +3013,59 @@ async fn dispatch_to_worker<R: Runtime>(
     let analysis = data.get("analysis").cloned();
     let dialog_state = data.get("dialog_state").cloned();
 
+    // Quota-aware narration (P3.2): a quota denial rides reply_text from
+    // the Worker (quota.reason) — surface it verbatim (already spoken
+    // downstream) and mark the flag so callers/UI can badge the state.
+    if data.get("quota_exceeded").and_then(|q| q.as_bool()).unwrap_or(false) {
+        tracing::warn!(
+            "orchestrator: worker quota denial for request {} (spoken verbatim)",
+            request_id
+        );
+    }
+
+    // Record the completed cloud turn in coordinated conversation memory.
+    let unresolved = crate::conversation::unresolved_from_dialog_state(dialog_state.as_ref());
+    let outcome = if unresolved.is_empty() {
+        crate::conversation::ConversationOutcome::Completed
+    } else {
+        crate::conversation::ConversationOutcome::Clarification
+    };
+    record_worker_turn(
+        &app,
+        transcript,
+        &reply_text,
+        dialog_state.as_ref(),
+        turn,
+        intent_label,
+        outcome,
+        Vec::new(),
+    );
+
     Ok((reply_text, analysis, dialog_state))
 }
 
 /// Public wrapper for `dispatch_to_worker` — used by command_center steps.
 pub(crate) async fn dispatch_to_worker_pub<R: Runtime>(
-    app: AppHandle<R>,
-    transcript: String,
-    dialog_context: Option<serde_json::Value>,
-    request_id: String,
-    cancel_flag: Arc<AtomicBool>,
+app: AppHandle<R>,
+transcript: String,
+dialog_context: Option<serde_json::Value>,
+request_id: String,
+cancel_flag: Arc<AtomicBool>,
+turn: &crate::center::TurnContext,
+intent_label: &str,
+counsel: bool,
 ) -> Result<(String, Option<serde_json::Value>, Option<serde_json::Value>), String> {
-    dispatch_to_worker(app, transcript, dialog_context, request_id, cancel_flag).await
+    dispatch_to_worker(
+        app,
+        transcript,
+        dialog_context,
+        request_id,
+        cancel_flag,
+        turn,
+        intent_label,
+        counsel,
+    )
+    .await
 }
 
 // ─── MCP sub-center dispatch ───────────────────────────────────────────
@@ -1620,6 +3145,24 @@ async fn dispatch_to_mcp<R: Runtime>(
         return Err(mcp_error_guidance(server, "HTTP 401: no credential"));
     }
 
+    // WhatsApp has no vault key, so nothing above noticed an offline bridge: the user was asked
+    // to approve a send that could never run and only then heard "bridge isn't running". Probe
+    // first (3 s budget; status poll, never trips the breaker) and say so BEFORE the confirm.
+    if matches!(server, McpServer::WhatsApp) {
+        let client = crate::stt::shared_client();
+        let state = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::mcp_client::query_pairing_status(&client),
+        )
+        .await;
+        if matches!(state, Err(_) | Ok(crate::mcp_client::PairingState::Unavailable)) {
+            return Err(format!(
+                "{} In ghost mode I can type it into WhatsApp for you instead, sir. Say ghost mode, then ask again.",
+                mcp_error_guidance(server, "connection refused")
+            ));
+        }
+    }
+
     // Confirmation gate for write/destructive operations.
     if server.requires_confirmation(tool) {
         let prompt = if server.is_destructive(tool) {
@@ -1659,12 +3202,16 @@ async fn dispatch_to_mcp<R: Runtime>(
             "prompt": prompt,
             "command": pending,
         });
-        let _ = crate::commands::show_sidebar_with_confirmation(
+        // Log (never swallow): Confirm already emitted above; a failed
+        // sidebar open leaves the user with no approve/cancel UI.
+        if let Err(e) = crate::commands::show_sidebar_with_confirmation(
             app.clone(),
             "Action Confirmation".to_string(),
             prompt.clone(),
             confirm_payload,
-        ).await;
+        ).await {
+            tracing::warn!("confirm: MCP action sidebar failed to open: {e}");
+        }
 
         // The actual call happens in orchestrator_mcp_confirm after the
         // user approves. Return Ok(None) to indicate confirmation is pending.
@@ -1823,6 +3370,17 @@ fn stash_mcp_retry(
     params: &serde_json::Value,
 ) {
     let mut guard = PENDING_MCP_RETRY.lock().unwrap();
+    // Single slot: a second failure before the 5s monitor fires discards the
+    // first stashed call. Log the drop so it is visible instead of silent.
+    if let Some(prev) = guard.as_ref() {
+        tracing::warn!(
+            "mcp-retry: overwriting pending {}.{} with {}.{} (first call dropped)",
+            prev.server.name(),
+            prev.tool,
+            server.name(),
+            tool
+        );
+    }
     *guard = Some(McpRetry {
         server,
         tool: tool.to_string(),
@@ -1898,6 +3456,10 @@ pub(crate) async fn open_mcp_connect_card<R: Runtime>(
     server: crate::mcp_client::McpServer,
     transcript: &str,
 ) {
+    // Reserve the once-per-session slot atomically (insert returns false if
+    // already present). The reservation is RELEASED on any failure below so
+    // a failed card open doesn't burn the session's one chance (audit M5 —
+    // the QR rotates every 20-30s, a permanently-suppressed card is dead).
     let first = {
         let mut shown = SHOWN_CONNECT_CARDS.lock().unwrap();
         shown.insert(server.name().to_string())
@@ -1905,6 +3467,12 @@ pub(crate) async fn open_mcp_connect_card<R: Runtime>(
     if !first {
         return;
     }
+    let release = |server: &crate::mcp_client::McpServer| {
+        SHOWN_CONNECT_CARDS
+            .lock()
+            .unwrap()
+            .remove(&server.name().to_string());
+    };
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .connect_timeout(std::time::Duration::from_secs(3))
@@ -1913,6 +3481,7 @@ pub(crate) async fn open_mcp_connect_card<R: Runtime>(
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("connect card: http client failed: {e}");
+            release(&server);
             return;
         }
     };
@@ -1926,6 +3495,7 @@ pub(crate) async fn open_mcp_connect_card<R: Runtime>(
     .await
     {
         tracing::warn!("connect card: sidebar failed: {e}");
+        release(&server);
         return;
     }
     spawn_ready_monitor(app.clone(), server, transcript.to_string());
@@ -2076,6 +3646,95 @@ fn display_server_name(server: crate::mcp_client::McpServer) -> &'static str {
     }
 }
 
+/// Drain ghost follow-ups queued mid-drill, in arrival order, through the
+/// normal pipeline. Called by drill runners AFTER main steps + session
+/// exit, and only when the run was clean (no stop request — resuming
+/// behind a stop is rejected by design). Bounded: stops after
+/// DRAIN_CAP items or on a fresh stop request, dropping the rest with a
+/// log. A follow-up that starts its own drill nests sequentially; items
+/// it queues are picked up by the same loop.
+pub(crate) async fn drain_ghost_followups<R: Runtime>(app: &AppHandle<R>) {
+    // FIFO serial executor (Approach E): arrival order, one step at a
+    // time, re-verified grounding, bounded. Cadence + watchdog come from
+    // settings (D4/D7), read once per drain pass.
+    let gap_ms = crate::commands::read_ghost_turn_gap_ms(app);
+    let step_timeout_ms = crate::commands::read_ghost_step_timeout_ms(app);
+    let mut done = 0usize;
+    loop {
+        if crate::ghost::stop_requested() {
+            tracing::info!("ghost: drain aborted at loop top (stop requested, {done} steps done)");
+            crate::ghost::drop_followups();
+            break;
+        }
+        let cmd = match crate::ghost::dequeue_command() {
+            Some(c) => c,
+            None => break,
+        };
+        if done >= crate::ghost::DRAIN_CAP {
+            tracing::warn!("ghost: drain cap reached ({done} steps), purging remainder");
+            crate::ghost::drop_followups();
+            break;
+        }
+        // Structured step line (log-completeness P4): index, queue id,
+        // slot class, transcript — every step provable in the log.
+        tracing::info!(
+            "ghost: drain step #{done} id={} slot={:?} '{}'",
+            cmd.id,
+            cmd.slot,
+            cmd.transcript
+        );
+        // Rule 3: re-verify grounding at dequeue time — never execute
+        // blind against a window the user has since left (F4).
+        if let Err(e) = crate::ghost::verify_grounding(&cmd) {
+            tracing::warn!("ghost: drain step #{done} id={} grounding failed: {}", cmd.id, e);
+            let (req_id, _) = install_new_request(Subsystem::LocalCommand);
+            speak_line(app, "Target window lost, sir — skipping.".to_string(), &req_id);
+            clear_active_request(&req_id);
+            continue;
+        }
+        // Inter-command gap τ (D4): the finished step's narration + echo
+        // tail clear before the next step acts (~1s narrated cadence).
+        tokio::time::sleep(tokio::time::Duration::from_millis(gap_ms)).await;
+        // A stop that landed during the gap still wins (F1/F2).
+        if crate::ghost::stop_requested() {
+            tracing::info!("ghost: drain aborted during gap (stop requested, {done} steps done)");
+            crate::ghost::drop_followups();
+            break;
+        }
+        // Boxed: process_transcript → drill → drain forms a cycle;
+        // the boxed future breaks the infinite-size recursion.
+        // Clone the label first: the transcript moves into the future
+        // and is still needed for the watchdog log below.
+        let label = cmd.transcript.clone();
+                let fut = Box::pin(process_transcript(app.clone(), cmd.transcript, None, None));
+        // Rule 4: per-step watchdog — a poisoned step (hung UIA lookup,
+        // 60s analysis) must not wedge the queue behind it (F6).
+        let step_start = std::time::Instant::now();
+        match tokio::time::timeout(std::time::Duration::from_millis(step_timeout_ms), fut).await {
+            Ok(_) => {
+                tracing::info!(
+                    "ghost: drain step #{done} id={} done in {}ms",
+                    cmd.id,
+                    step_start.elapsed().as_millis()
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "ghost: drain step #{done} id={} watchdog ({}ms) expired after {}ms, skipping queued '{}'",
+                    cmd.id,
+                    step_timeout_ms,
+                    step_start.elapsed().as_millis(),
+                    label
+                );
+                let (req_id, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(app, "Skipping step, sir.".to_string(), &req_id);
+                clear_active_request(&req_id);
+            }
+        }
+        done += 1;
+    }
+}
+
 /// Public wrapper for `dispatch_to_mcp` — used by command_center steps.
 pub(crate) async fn dispatch_to_mcp_pub<R: Runtime>(
     app: &AppHandle<R>,
@@ -2137,8 +3796,107 @@ async fn run_screen_click<R: Runtime>(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = ordinal;
-        speak_line(&app, "Screen clicking needs Windows, sir.".to_string(), &request_id);
+        // Linux: the accessibility tree is the instrument, and the *action* is
+        // performed by the application itself (AT-SPI `do_action`), so this
+        // works on a native Wayland session where synthetic input does not
+        // exist. The policy gate is inside the semantic tier.
+        #[cfg(target_os = "linux")]
+        {
+            // The semantic lookup is a BLOCKING call (an accessibility-bus
+            // round trip) inside an async function — keep it off the tokio
+            // worker threads.
+            let els = match tokio::task::spawn_blocking(crate::screen::list_actionables_with_reason)
+                .await
+            {
+                Ok(Ok(els)) => els,
+                Ok(Err(e)) => {
+                    speak_line(&app, e, &request_id);
+                    clear_active_request(&request_id);
+                    return Ok(ProcessResult {
+                        request_id,
+                        subsystem: Subsystem::LocalCommand,
+                        handled_locally: true,
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("screen click: the element lookup failed — {e}");
+                    Vec::new()
+                }
+            };
+            match crate::screen::pick_ordinal(&els, ordinal) {
+                Some(el) => {
+                    let name = el.name.clone();
+                    let (cx, cy) = crate::live::commands::mouse::element_center(&el);
+                    // The activation is a blocking accessibility call too.
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        crate::system_center::click_element_by_name(&name)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(format!("the click could not be performed: {e}")));
+                    match outcome {
+                        Ok(msg) => {
+                            // Point at what was clicked, so the user can see
+                            // which control the assistant acted on. Any stale
+                            // marker from an earlier turn goes first.
+                            let _ = crate::pointer::emit_hide(&app);
+                            let _ = crate::pointer::show_direct(
+                                &app,
+                                cx as f64,
+                                cy as f64,
+                                el.name.clone(),
+                            );
+                            speak_line(&app, msg, &request_id)
+                        }
+                        Err(e) => speak_line(&app, e, &request_id),
+                    }
+                }
+                None => speak_line(
+                    &app,
+                    format!("I only see {} clickable things, sir.", els.len()),
+                    &request_id,
+                ),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            speak_line(&app, "Screen clicking needs Windows, sir.".to_string(), &request_id);
+        }
     }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Run a user-defined declarative spec (D2): open apps + speak lines.
+/// Actions run in order; an open failure speaks the error and continues
+/// to the remaining say lines (best-effort routine, not a transaction).
+async fn run_custom_spec<R: Runtime>(
+    app: AppHandle<R>,
+    custom: &crate::agent_specs::CustomIntent,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    tracing::info!("specs: running custom intent '{}'", custom.name);
+    let mut said: Vec<String> = vec![];
+    for action in &custom.run {
+        match action {
+            crate::agent_specs::SpecAction::Open(target) => {
+                match crate::command_executor::resolve_and_open_app(target) {
+                    Ok(res) => {
+                        if !res.message.is_empty() {
+                            said.push(res.message);
+                        }
+                    }
+                    Err(e) => said.push(format!("Couldn't open {}, sir: {}", target, e)),
+                }
+            }
+            crate::agent_specs::SpecAction::Say(text) => said.push(text.clone()),
+        }
+    }
+    let reply = said.join(" ");
+    speak_line(&app, reply, &request_id);
     clear_active_request(&request_id);
     Ok(ProcessResult {
         request_id,
@@ -2172,246 +3930,47 @@ async fn run_screen_read<R: Runtime>(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = ordinal;
-        speak_line(&app, "Screen reading needs Windows, sir.".to_string(), &request_id);
-    }
-    clear_active_request(&request_id);
-    Ok(ProcessResult {
-        request_id,
-        subsystem: Subsystem::LocalCommand,
-        handled_locally: true,
-    })
-}
-
-/// Answer a screen-vision question: capture the screen, ask the free
-/// vision chain (Gemini → Groq), speak the answer. Locate targets are
-/// parsed + logged now; the Phase-2 overlay window will render them.
-async fn run_screen_vision<R: Runtime>(
-    app: AppHandle<R>,
-    kind: crate::vision::ScreenVisionKind,
-) -> Result<ProcessResult, String> {
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    let t0 = std::time::Instant::now();
-    let keys = crate::router::read_provider_keys(&app);
-    let outcome: Result<Option<String>, String> = async {
-        // Privacy gate FIRST: an excluded foreground app refuses capture AND UIA
-        // enumeration — no pixels, no element names. An *unidentifiable*
-        // foreground window also refuses, because we cannot rule out an
-        // exclusion without knowing which window we are looking at.
-        match crate::pointer::exclusion_verdict(&app) {
-            crate::pointer::ExclusionVerdict::Blocked(name) => {
-                return Ok(Some(format!(
-                    "That's on your privacy list, sir — I won't look at {name}."
-                )));
-            }
-            crate::pointer::ExclusionVerdict::UnknownForeground => {
-                // Fail closed. Native Wayland has no portable foreground-title
-                // API (Shell.Eval was disabled in GNOME 41; there is no
-                // get-active-window portal), so this is the expected path there
-                // until the AT-SPI tier can identify the focused window.
-                tracing::warn!(
-                    "screen vision refused: foreground window unidentified on {} — \
-                     cannot verify the privacy list",
-                    crate::session::diagnostic_line()
-                );
-                return Ok(Some(format!(
-                    "I can't tell which window is in front, sir, so I won't risk \
-                     looking at the screen. This looks like {}.",
-                    crate::session::kind().describe()
-                )));
-            }
-            crate::pointer::ExclusionVerdict::Allow => {}
-        }
-        // Phase-3a locate-first: an exact UIA name match skips the
-        // screenshot + VLM call entirely (free, ~5ms, pixel-perfect).
-        // Off-Windows find_by_name always misses → vision path below.
-        if let crate::vision::ScreenVisionKind::Locate(target) = &kind {
-            if let Some(el) = crate::screen::find_by_name(target) {
-                let cx = (el.x + el.w / 2) as f64;
-                let cy = (el.y + el.h / 2) as f64;
-                let name = el.name.clone();
-                crate::pointer::show_direct(&app, cx, cy, name.clone());
-                let speak = format!("The {name} is on your screen, sir.");
-                *LAST_SCREEN_SPEAK.lock().unwrap() = Some(speak.clone());
-                *LAST_POINT.lock().unwrap() =
-                    Some((cx, cy, name, std::time::Instant::now()));
-                return Ok(Some(speak));
-            }
-        }
-        // 10s screenshot cache: rapid describe→locate sequences reuse the
-        // frame instead of re-capturing (portal round-trip + encoding).
-        // (Clone out of the Mutex first — holding a std guard across
-        // .await would make this future !Send.)
-        let now = std::time::Instant::now();
-        let cached = LAST_SHOT.lock().unwrap().clone();
-        let (jpeg, ow, oh, sw, sh) = match cached {
-            Some((at, jpg, ow, oh, sw, sh)) if cache_fresh(at, now) => {
-                tracing::info!("screen vision: reusing cached screenshot");
-                (jpg, ow, oh, sw, sh)
-            }
-            _ => {
-                let shot = crate::screen::capture_primary().await?;
-                tracing::info!(
-                    "screen vision: stage=capture {}ms",
-                    now.elapsed().as_millis()
-                );
-                let jpeg = shot.jpeg();
-                if jpeg.is_empty() {
-                    return Err("screenshot encoding failed".into());
+        // Linux: the same accessibility tree, read instead of actuated.
+        #[cfg(target_os = "linux")]
+        {
+            // The semantic lookup is a BLOCKING call (an accessibility-bus
+            // round trip) inside an async function — keep it off the tokio
+            // worker threads.
+            let els = match tokio::task::spawn_blocking(crate::screen::list_actionables_with_reason)
+                .await
+            {
+                Ok(Ok(els)) => els,
+                Ok(Err(e)) => {
+                    speak_line(&app, e, &request_id);
+                    clear_active_request(&request_id);
+                    return Ok(ProcessResult {
+                        request_id,
+                        subsystem: Subsystem::LocalCommand,
+                        handled_locally: true,
+                    });
                 }
-                let dims = (shot.orig_w, shot.orig_h, shot.scaled_w, shot.scaled_h);
-                *LAST_SHOT.lock().unwrap() =
-                    Some((now, jpeg.clone(), dims.0, dims.1, dims.2, dims.3));
-                (jpeg, dims.0, dims.1, dims.2, dims.3)
-            }
-        };
-        let t_vlm = std::time::Instant::now();
-        let answer = crate::vision::ask_about_screen(&jpeg, &kind, &keys).await?;
-        tracing::info!(
-            "screen vision: stage=vlm {}ms",
-            t_vlm.elapsed().as_millis()
-        );
-        // Phase-3c: on locate, speak immediately, then snap the VLM point
-        // to OCR text (same scaled image) before showing the marker.
-        // OCR failure falls back to raw VLM coords — never blocks speech.
-        if let crate::vision::ScreenVisionKind::Locate(target) = &kind {
-            speak_line(&app, answer.speak.clone(), &request_id);
-            *LAST_SCREEN_SPEAK.lock().unwrap() = Some(answer.speak.clone());
-            if let Some(pt) = &answer.point {
-                let sx = pt.x as f64 / 1000.0 * sw as f64;
-                let sy = pt.y as f64 / 1000.0 * sh as f64;
-                let to_orig = |bx: f64, by: f64| {
-                    (bx * ow as f64 / sw as f64, by * oh as f64 / sh as f64)
-                };
-                let t_ocr = std::time::Instant::now();
-                let (ox, oy, snapped) = match crate::ocr::ocr_image(&jpeg).await {
-                    Ok(boxes) => match crate::ocr::snap_to_text(
-                        &crate::ocr::merge_lines(boxes),
-                        target,
-                        sx,
-                        sy,
-                        120.0,
-                    ) {
-                        Some((bx, by)) => {
-                            tracing::info!("pointer: OCR snapped to ({bx:.0}, {by:.0})");
-                            let (ox, oy) = to_orig(bx, by);
-                            (ox, oy, true)
-                        }
-                        None => {
-                            let (ox, oy) = to_orig(sx, sy);
-                            (ox, oy, false)
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!("pointer: OCR tier failed ({e}), using raw VLM coords");
-                        let (ox, oy) = to_orig(sx, sy);
-                        (ox, oy, false)
-                    }
-                };
-                if snapped {
-                    crate::pointer::show_direct(&app, ox, oy, pt.label.clone());
-                } else {
-                    crate::pointer::maybe_show(&app, true, Some(pt), ow, oh);
+                Err(e) => {
+                    tracing::warn!("screen read: the element lookup failed — {e}");
+                    Vec::new()
                 }
-                tracing::info!(
-                    "screen vision: stage=ocr+snap {}ms (snapped={snapped})",
-                    t_ocr.elapsed().as_millis()
-                );
-                *LAST_POINT.lock().unwrap() =
-                    Some((ox, oy, pt.label.clone(), std::time::Instant::now()));
-            }
-            return Ok(None);
-        }
-        *LAST_SCREEN_SPEAK.lock().unwrap() = Some(answer.speak.clone());
-        // A describe/read answer supersedes any old marker — repeating it
-        // must not resurrect a stale pointer from an earlier locate.
-        *LAST_POINT.lock().unwrap() = None;
-        Ok(Some(answer.speak))
-    }
-    .await;
-    match outcome {
-        Ok(Some(text)) => {
-            tracing::info!(
-                "screen vision: answered in {}ms",
-                t0.elapsed().as_millis()
-            );
-            speak_line(&app, text, &request_id);
-        }
-        Ok(None) => {
-            tracing::info!(
-                "screen vision: answered in {}ms (spoken inline)",
-                t0.elapsed().as_millis()
-            );
-        }
-        Err(e) => speak_line(&app, format!("I couldn't see the screen, sir: {e}"), &request_id),
-    }
-    clear_active_request(&request_id);
-    Ok(ProcessResult {
-        request_id,
-        subsystem: Subsystem::LocalCommand,
-        handled_locally: true,
-    })
-}
-
-/// Stop speaking immediately: kill Rust TTS + hide the pointer marker.
-/// No farewell line — the user asked for silence.
-async fn run_stop_speech<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<ProcessResult, String> {
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    let _ = crate::tts::stop_tts();
-    let _ = crate::pointer::emit_hide(&app);
-    clear_active_request(&request_id);
-    Ok(ProcessResult {
-        request_id,
-        subsystem: Subsystem::LocalCommand,
-        handled_locally: true,
-    })
-}
-
-/// Replay the last screen answer (speech + fresh marker when the point
-/// is still valid). Fully LLM-free — no screenshot, no VLM call.
-async fn run_repeat_screen<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<ProcessResult, String> {
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    match LAST_SCREEN_SPEAK.lock().unwrap().clone() {
-        None => speak_line(
-            &app,
-            "I haven't described the screen yet, sir.".to_string(),
-            &request_id,
-        ),
-        Some(text) => {
-            speak_line(&app, text, &request_id);
-            if let Some((x, y, label, at)) = LAST_POINT.lock().unwrap().clone() {
-                if at.elapsed() < POINT_TTL {
-                    crate::pointer::show_direct(&app, x, y, label);
-                }
+            };
+            match crate::screen::pick_ordinal(&els, ordinal) {
+                Some(el) => speak_line(
+                    &app,
+                    format!("{} {} says {}, sir.", ordinal_word(ordinal), el.kind, el.name),
+                    &request_id,
+                ),
+                None => speak_line(
+                    &app,
+                    format!("I only see {} clickable things, sir.", els.len()),
+                    &request_id,
+                ),
             }
         }
-    }
-    clear_active_request(&request_id);
-    Ok(ProcessResult {
-        request_id,
-        subsystem: Subsystem::LocalCommand,
-        handled_locally: true,
-    })
-}
-
-/// Re-show the last pointer without a new screenshot (0 quota).
-/// Stale (>120s) or missing points get a guidance line instead.
-async fn run_point_again<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<ProcessResult, String> {
-    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
-    match LAST_POINT.lock().unwrap().clone() {
-        Some((x, y, label, at)) if at.elapsed() < POINT_TTL => {
-            crate::pointer::show_direct(&app, x, y, label);
+        #[cfg(not(target_os = "linux"))]
+        {
+            speak_line(&app, "Screen reading needs Windows, sir.".to_string(), &request_id);
         }
-        _ => speak_line(
-            &app,
-            "Point at what, sir? Ask me where something is first.".to_string(),
-            &request_id,
-        ),
     }
     clear_active_request(&request_id);
     Ok(ProcessResult {
@@ -2430,6 +3989,2895 @@ fn ordinal_word(n: u32) -> String {
     }
 }
 
+/// Screen-query cost tier (Feature 86, Phase 5 pre-filter).
+///
+/// A "read my screen" / "what's on my screen" is answered completely by
+/// free local OCR (~50ms, no quota). Sending it through two Gemini calls
+/// first wastes ~2s and 2 quota units. Complex queries (analyse, explain,
+/// research) need visual reasoning the OCR text can't provide, so they
+/// keep the VLM-first order. Pure + unit-tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenQueryTier {
+    /// Raw transcription suffices — OCR first, VLM only if OCR is empty.
+    ReadOnly,
+    /// Visual reasoning required — VLM first, OCR as fallback.
+    Visual,
+}
+
+/// Classify a screen-analysis prompt into a cost tier.
+/// Visual wins on ANY complex verb (analyse/analyze/explain/research/
+/// compare/summarize/why/error/diagnose/mean/teach/describe); everything
+/// else is a transcription request. Pure.
+pub fn classify_screen_query(prompt: &str) -> ScreenQueryTier {
+    const COMPLEX_VERBS: &[&str] = &[
+        "analys", "analyz", "explain", "research", "compar", "summar",
+        "why", "error", "diagnos", "mean", "teach", "describe",
+    ];
+    let lower = prompt.to_lowercase();
+    if COMPLEX_VERBS.iter().any(|v| lower.contains(v)) {
+        ScreenQueryTier::Visual
+    } else {
+        ScreenQueryTier::ReadOnly
+    }
+}
+
+/// LOCAL OCR answer attempt (Feature 86, zero-RAM, keyless+offline).
+/// Runs Windows.Media.Ocr on a blocking thread (WinRT async), speaks a
+/// text summary, and shows the extracted text in the assistant panel via
+/// the race-free pending pattern. `prompt` is the raw transcript (used as
+/// the pending query so the copy/title gating keys off the real words).
+///
+/// Returns Some(ProcessResult) when OCR produced text (turn answered +
+/// cleared); None when OCR found nothing → caller continues the chain.
+#[cfg(target_os = "windows")]
+async fn try_ocr_answer<R: Runtime>(
+    app: &AppHandle<R>,
+    prompt: &str,
+    request_id: &str,
+) -> Option<ProcessResult> {
+    match tokio::task::spawn_blocking(crate::ocr::capture_screen_text).await {
+        Ok(Some((text, rects))) => {
+            let line_count = text.lines().count();
+            let first: String = text.lines().next().unwrap_or("").chars().take(90).collect();
+            // Keyless/quota-spent runs prepend the onboarding guidance (P5).
+            let has_key = !crate::commands::read_api_key(app, "gemini").is_empty();
+            let exhausted = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|d| crate::vision::exhausted(&d, "gemini"))
+                .unwrap_or(false);
+            let prefix = screen_key_guidance(has_key, exhausted)
+                .map(|s| format!("{s} "))
+                .unwrap_or_default();
+            speak_line(
+                app,
+                format!(
+                    "{prefix}Your screen shows {} text lines, sir, starting with: {}. The full text is in the sidebar.",
+                    line_count, first
+                ),
+                request_id,
+            );
+            crate::commands::set_pending_sidebar_text(
+                prompt.to_string(),
+                format!(
+                    "## Screen Text (OCR)\n\n```\n{}\n```",
+                    text.chars().take(3000).collect::<String>()
+                ),
+            );
+            let _ = crate::commands::unified_show_sidebar(app, "assistant", None).await;
+            tracing::info!(
+                "ocr: screen text extracted ({} lines, {} rects)",
+                line_count,
+                rects.len()
+            );
+            clear_active_request(request_id);
+            Some(ProcessResult {
+                request_id: request_id.to_string(),
+                subsystem: Subsystem::LocalCommand,
+                handled_locally: true,
+            })
+        }
+        Ok(None) => {
+            tracing::warn!("ocr: screen text extraction returned None — continuing chain");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("ocr: blocking task failed: {e} — continuing chain");
+            None
+        }
+    }
+}
+
+/// LOCAL OCR answer attempt on Linux (the Feature 86 path, ported).
+///
+/// The Windows implementation uses Windows.Media.Ocr; on Linux the local
+/// RapidOCR sidecar does the same job: free, offline, no quota, no API key.
+/// The screenshot comes from the xdg-desktop-portal — which means it passes
+/// through the pre-capture privacy gate — and the text boxes come back from
+/// the sidecar.
+///
+/// Returns Some(ProcessResult) when OCR produced text (turn answered +
+/// cleared); None when OCR found nothing → the caller continues the chain.
+#[cfg(target_os = "linux")]
+async fn try_ocr_answer_linux<R: Runtime>(
+    app: &AppHandle<R>,
+    prompt: &str,
+    request_id: &str,
+) -> Option<ProcessResult> {
+    // The capture primitive carries the privacy gate: an unidentified
+    // foreground refuses the capture and this returns None.
+    //
+    // The capture is a BLOCKING call (a portal round trip, up to 25 s, plus
+    // the gate's accessibility lookup) and this is an async function — so it
+    // goes to a blocking thread instead of parking a tokio worker.
+    let (b64, _, _) = tokio::task::spawn_blocking(|| {
+        crate::vision::capture_plain_jpeg_base64_w(crate::vision::VISION_FAST_W)
+    })
+    .await
+    .ok()
+    .flatten()?;
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let boxes = match crate::ocr::ocr_image(&bytes).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("ocr: the local OCR tier failed ({e}) — continuing chain");
+            return None;
+        }
+    };
+    let lines = crate::ocr::merge_lines(boxes);
+    if lines.is_empty() {
+        tracing::warn!("ocr: screen text extraction was empty — continuing chain");
+        return None;
+    }
+    let line_count = lines.len();
+    let text: String = lines
+        .iter()
+        .map(|b| b.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let first = lines
+        .first()
+        .map(|b| b.text.chars().take(90).collect::<String>())
+        .unwrap_or_default();
+    speak_line(
+        app,
+        format!(
+            "Your screen shows {line_count} text lines, sir, starting with: {first}. \
+             The full text is in the sidebar."
+        ),
+        request_id,
+    );
+    crate::commands::set_pending_sidebar_text(
+        prompt.to_string(),
+        format!(
+            "## Screen Text (OCR)\n\n```\n{}\n```",
+            text.chars().take(3000).collect::<String>()
+        ),
+    );
+    let _ = crate::commands::unified_show_sidebar(app, "assistant", None).await;
+    tracing::info!("ocr: screen text extracted ({line_count} lines)");
+    clear_active_request(request_id);
+    Some(ProcessResult {
+        request_id: request_id.to_string(),
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Spoken guidance prefix for the OCR fallback in screen analysis
+/// (Feature 83 P5 — turns the keyless/quota-spent dead-end into an
+/// onboarding funnel). Returns None when a Gemini key exists with quota
+/// remaining (the VLM path speaks for itself). Pure + unit-tested.
+pub fn screen_key_guidance(has_gemini_key: bool, gemini_exhausted: bool) -> Option<&'static str> {
+    if !has_gemini_key {
+        Some("Screen vision needs a Gemini key, sir — add it in Command Hub, Accounts.")
+    } else if gemini_exhausted {
+        Some("Vision quota is spent for today, sir.")
+    } else {
+        None
+    }
+}
+
+/// Seed payload for the annotation canvas (Feature 87).
+/// Pure + unit-tested: empty element list, default tool, original prompt.
+pub fn annotation_seed(prompt: &str) -> serde_json::Value {
+    serde_json::json!({ "tool": "select", "elements": [], "prompt": prompt })
+}
+
+/// Start interactive screen annotation (Feature 87): stage overlay ink
+/// canvas + sidebar Annotate palette. All canvas ops stay frontend-local
+/// (no IPC per stroke); commit serializes on the frontend and surfaces
+/// through stage events. Pure shell: show stage → seed pending → show
+/// sidebar view → warm-path event → cached spoken confirmation.
+async fn run_screen_annotation<R: Runtime>(
+    app: AppHandle<R>,
+    prompt: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    // 1. Stage overlay on screen (click-through; the ink layer registers
+    //    its own hitboxes once the frontend canvas mounts).
+    if let Err(e) = crate::stage::stage_show(app.clone()).await {
+        tracing::warn!("annotate: stage show failed: {e}");
+    }
+    // 2. Sidebar: Annotate view + race-free seed payload (fresh-window
+    //    fetch path) + warm-window event path.
+    let seed = annotation_seed(&prompt);
+    crate::commands::set_pending_annotation(&seed);
+    if let Err(e) = crate::commands::unified_show_sidebar(&app, "annotate", None).await {
+        tracing::warn!("annotate: sidebar show failed: {e}");
+    }
+    crate::commands::emit_logged(&app, "sidebar:show_annotation", seed);
+    // 3. Cached spoken confirmation (<5ms, see tts::CACHED_PHRASES).
+    speak_line(&app, "Annotation ready, sir.".to_string(), &request_id);
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+// ─── Narrated screen tour ──────────────────────────────────────────────
+//
+// "Nexus, analyse my screen": STT → thinking → short ack → orb hides while
+// we capture + ask the VLM (spinner) → the orb returns and NEXUS narrates an
+// OVERVIEW while the stage overlay points at one thing at a time (ring +
+// callout, strictly synced to the audible line by `tts::narrate`) → overlay
+// clears, the full breakdown opens in the sidebar. Pure logic (script
+// validation, state machine) lives in `screen_tour.rs`.
+
+/// Outcome of a narrated-tour attempt.
+enum TourRun {
+    Done(ProcessResult),
+    /// Tour unavailable (no key/quota/capture failure/unusable script) — the
+    /// legacy chain continues. `acked` = an ack was already spoken.
+    Fallback { acked: bool },
+}
+
+fn tour_end_reason_label(r: crate::screen_tour::EndReason) -> &'static str {
+    match r {
+        crate::screen_tour::EndReason::Done => "done",
+        crate::screen_tour::EndReason::Cancelled => "cancelled",
+        crate::screen_tour::EndReason::Failed => "failed",
+    }
+}
+
+/// Translate engine actions into overlay events. Only the CURRENT callout is
+/// ever sent — the frontend never holds future items.
+fn apply_tour_actions<R: Runtime>(
+    app: &AppHandle<R>,
+    request_id: &str,
+    script: &crate::screen_tour::TourScript,
+    actions: Vec<crate::screen_tour::Action>,
+) {
+    use crate::screen_tour::Action;
+    for a in actions {
+        match a {
+            Action::Show(i) => {
+                if let Some(item) = script.items.get(i) {
+                    let _ = app.emit(
+                        "screen:callout",
+                        crate::screen_tour::callout_json(
+                            request_id,
+                            item,
+                            i,
+                            script.items.len(),
+                            script.region,
+                        ),
+                    );
+                }
+            }
+            Action::Clear => {
+                let _ = app.emit(
+                    "screen:callout_clear",
+                    serde_json::json!({ "request_id": request_id }),
+                );
+            }
+            Action::End(reason) => {
+                let _ = app.emit(
+                    "screen:tour_end",
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "reason": tour_end_reason_label(reason),
+                    }),
+                );
+            }
+        }
+    }
+}
+
+fn end_tour_fetch<R: Runtime>(app: &AppHandle<R>, request_id: &str, shown: bool) {
+    if shown {
+        emit(
+            app,
+            &OrchestratorEvent::Loading {
+                visible: false,
+                request_id: request_id.to_string(),
+            },
+        );
+        hide_loading(app);
+    }
+}
+
+/// Tour unavailable: stop the spinner, tell the frontend not to hide the orb
+/// (the legacy chain speaks next), and hand control back.
+fn tour_fallback<R: Runtime>(app: &AppHandle<R>, request_id: &str, spoken: bool) -> TourRun {
+    end_tour_fetch(app, request_id, spoken);
+    let _ = app.emit(
+        "screen:tour_phase",
+        serde_json::json!({ "phase": "fallback", "request_id": request_id }),
+    );
+    TourRun::Fallback { acked: spoken }
+}
+
+async fn show_sidebar_spatial<R: Runtime>(app: &AppHandle<R>, payload: &serde_json::Value) {
+    if let Err(e) = crate::commands::unified_show_sidebar(app, "spatial", None).await {
+        tracing::warn!("screen_tour: sidebar show failed: {e}");
+    }
+    crate::commands::emit_logged(app, "sidebar:show_spatial", payload.clone());
+}
+
+#[cfg(target_os = "windows")]
+async fn run_screen_tour<R: Runtime>(
+    app: &AppHandle<R>,
+    prompt: &str,
+    request_id: &str,
+    cancel_flag: &Arc<AtomicBool>,
+) -> TourRun {
+    use crate::screen_tour as st;
+    let rid = request_id.to_string();
+    let done_result = |rid: &str| ProcessResult {
+        request_id: rid.to_string(),
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    };
+    let meeting = app.try_state::<Arc<crate::meeting_detect::MeetingState>>();
+    // Meeting (screen share / call): the overlay is not hidden from the share
+    // and speech would be muted anyway → sidebar only, no overlay, no ack.
+    let quiet = meeting
+        .as_ref()
+        .map(|m| m.should_suppress_tts())
+        .unwrap_or(false);
+    let spoken = !quiet;
+
+    // 1. thinking → ack → orb hides + spinner while we fetch.
+    if spoken {
+        let ack_text = st::screen_ack(network::uuid_v4().as_bytes()[0]).to_string();
+        emit(
+            app,
+            &OrchestratorEvent::State {
+                state: OrchestratorState::Thinking,
+                request_id: rid.clone(),
+            },
+        );
+        emit(
+            app,
+            &OrchestratorEvent::Ack {
+                text: ack_text.clone(),
+                request_id: rid.clone(),
+            },
+        );
+        speak_line(app, ack_text, &rid);
+        let _ = app.emit(
+            "screen:tour_phase",
+            serde_json::json!({ "phase": "fetching", "request_id": rid }),
+        );
+        emit(
+            app,
+            &OrchestratorEvent::Loading { visible: true, request_id: rid.clone() },
+        );
+        show_loading(app);
+    }
+
+    // 2. what is the user looking at? (app, tab title, trimmed URL, YouTube
+    //    title/channel, page-content region). Gathered while the ack plays;
+    //    the stage never takes focus so the foreground window is still theirs.
+    let (sw, sh) = crate::screen::primary_monitor_size().unwrap_or((1920, 1080));
+    let ctx = crate::screen_context::collect(sw, sh).await;
+    if ctx.sensitive {
+        // Banks / password managers / wallets: nothing is captured or sent.
+        tracing::info!("screen_tour: sensitive window — refusing to analyse");
+        end_tour_fetch(app, &rid, spoken);
+        let _ = app.emit(
+            "screen:tour_phase",
+            serde_json::json!({ "phase": "fallback", "request_id": rid }),
+        );
+        if spoken {
+            speak_line(app, "I won't analyse this window, sir.".to_string(), &rid);
+        } else {
+            emit(app, &OrchestratorEvent::Done { request_id: rid.clone() });
+        }
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+    if is_cancelled(cancel_flag) {
+        end_tour_fetch(app, &rid, spoken);
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+
+    // 3. capture the page content only, with the stage excluded (no orb /
+    //    spinner / old pins in the shot; no tabs, URL bar or taskbar either).
+    crate::commands::emit_logged(
+        app,
+        "stage:spatial_annotations",
+        serde_json::json!({ "title": "", "pins": [] }),
+    );
+    let excluded = crate::stage::set_capture_excluded(app, true);
+    if excluded {
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    }
+    let full = crate::screen_context::Region::full(sw, sh);
+    let mut candidates = vec![ctx.region];
+    if ctx.region != full {
+        candidates.push(full); // crop failed to capture → whole screen
+    }
+    let mut cap: Option<(String, crate::screen_context::Region)> = None;
+    for r in candidates {
+        let got = tokio::task::spawn_blocking(move || {
+            // Feature 98 P5: 768px capture (VISION_FAST_W) — 82% smaller
+            // base64 upload (400 KB → ~70 KB). The tour crops to page
+            // content, so 768px keeps text legible for the model.
+            crate::vision::capture_region_jpeg_base64(
+                r.x, r.y, r.w, r.h, crate::vision::VISION_FAST_W,
+            )
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(b64) = got {
+            cap = Some((b64, r));
+            break;
+        }
+    }
+    if excluded {
+        crate::stage::set_capture_excluded(app, false);
+    }
+    let Some((b64, used_region)) = cap else {
+        tracing::warn!("screen_tour: capture failed — falling back");
+        return tour_fallback(app, &rid, spoken);
+    };
+    let region_tuple = (used_region.x, used_region.y, used_region.w, used_region.h);
+    // The crop failed and we fell back to the whole screen: tell the model so.
+    let mut ctx = ctx;
+    if used_region != ctx.region {
+        ctx.region = used_region;
+        ctx.full_screen = true;
+    }
+    tracing::info!("screen_tour: capturing region {:?} of {sw}x{sh}", region_tuple);
+    if let Some(dir) = std::env::var_os("NEXUS_TOUR_DUMP_DIR") {
+        use base64::Engine;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+            let _ = std::fs::write(std::path::Path::new(&dir).join("tour_capture.jpg"), bytes);
+        }
+    }
+    if is_cancelled(cancel_flag) {
+        end_tour_fetch(app, &rid, spoken);
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+
+    // 4. vision → validated script (strong model first, lite fallback).
+    let script = match st::analyze_tour_image(app, prompt, &ctx.prompt_block(), &b64, region_tuple).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("screen_tour: {e} — falling back to local OCR");
+            end_tour_fetch(app, &rid, spoken);
+            let _ = app.emit(
+                "screen:tour_phase",
+                serde_json::json!({ "phase": "fallback", "request_id": rid }),
+            );
+            if spoken {
+                speak_line(app, "I'm having trouble reaching the vision service, sir. Reading the visible text on your screen instead.".to_string(), &rid);
+            }
+            if let Some(res) = try_ocr_answer(app, prompt, &rid).await {
+                clear_active_request(&rid);
+                return TourRun::Done(res);
+            }
+            return tour_fallback(app, &rid, spoken);
+        }
+    };
+    if is_cancelled(cancel_flag) {
+        end_tour_fetch(app, &rid, spoken);
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+    let payload_json = serde_json::to_value(script.to_payload()).unwrap_or(serde_json::Value::Null);
+    crate::commands::set_pending_spatial(&payload_json);
+
+    // Meeting: detail in the sidebar only.
+    if quiet {
+        println!("[TOUR] meeting active — showing the breakdown in the sidebar only");
+        show_sidebar_spatial(app, &payload_json).await;
+        emit(app, &OrchestratorEvent::Done { request_id: rid.clone() });
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+
+    // 4. let the ack finish (starting narration would cut it), then bring the
+    //    orb back and start the tour.
+    if let Some(m) = meeting.as_ref() {
+        let t0 = std::time::Instant::now();
+        while m.tts_playing.load(Ordering::Relaxed) && t0.elapsed().as_millis() < 4_000 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    end_tour_fetch(app, &rid, spoken);
+    if is_cancelled(cancel_flag) {
+        clear_active_request(&rid);
+        return TourRun::Done(done_result(&rid));
+    }
+    let overlay_ok = crate::stage::is_shown();
+    let _ = app.emit(
+        "screen:tour_start",
+        serde_json::json!({
+            "request_id": rid,
+            "title": script.title,
+            "count": script.items.len(),
+            "screen_w": sw,
+            "screen_h": sh,
+            "overlay": overlay_ok,
+        }),
+    );
+
+    // 5. narrate: line i audible ⇔ callout i shown.
+    let mut steps = st::narration_steps(&script);
+    if !overlay_ok {
+        // No overlay → no pointing: speak only the overview + closer.
+        steps.retain(|s| s.item.is_none());
+    }
+    let lines: Vec<String> = steps.iter().map(|s| s.text.clone()).collect();
+    let engine = Arc::new(std::sync::Mutex::new(st::TourEngine::new(&steps)));
+    let script = Arc::new(script);
+
+    let watch_done = Arc::new(AtomicBool::new(false));
+    {
+        let (d, c) = (watch_done.clone(), cancel_flag.clone());
+        tauri::async_runtime::spawn(async move {
+            while !d.load(Ordering::Relaxed) {
+                if c.load(Ordering::Relaxed) {
+                    let _ = crate::tts::stop_tts(); // new request superseded us
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+    }
+
+    let on_event = {
+        let (a, e, s, r) = (app.clone(), engine.clone(), script.clone(), rid.clone());
+        move |ev: crate::tts::NarrationEvent| {
+            let acts = {
+                let mut eng = e.lock().unwrap();
+                match ev {
+                    crate::tts::NarrationEvent::Started(i) => eng.step_started(i),
+                    crate::tts::NarrationEvent::Ended(i) => eng.step_ended(i),
+                }
+            };
+            apply_tour_actions(&a, &r, &s, acts);
+        }
+    };
+    let outcome = crate::tts::narrate(app.clone(), lines, on_event).await;
+    watch_done.store(true, Ordering::Relaxed);
+
+    let reason = match outcome {
+        crate::tts::NarrateOutcome::Completed => st::EndReason::Done,
+        crate::tts::NarrateOutcome::Cancelled => st::EndReason::Cancelled,
+        crate::tts::NarrateOutcome::Unavailable(why) => {
+            // Offline / TTS down: timed silent tour — the callouts carry the text.
+            tracing::warn!("screen_tour: audio unavailable ({why}) — timed callouts");
+            let t0 = std::time::Instant::now();
+            let acts = engine.lock().unwrap().audio_unavailable(0);
+            apply_tour_actions(app, &rid, &script, acts);
+            let mut cancelled = false;
+            loop {
+                if is_cancelled(cancel_flag) {
+                    cancelled = true;
+                    break;
+                }
+                let ended = engine.lock().unwrap().is_ended();
+                if ended {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let acts = engine.lock().unwrap().tick(t0.elapsed().as_millis() as u64);
+                apply_tour_actions(app, &rid, &script, acts);
+            }
+            if cancelled { st::EndReason::Cancelled } else { st::EndReason::Done }
+        }
+    };
+    let acts = engine.lock().unwrap().end(reason); // no-op when already ended
+    apply_tour_actions(app, &rid, &script, acts);
+
+    // 6. detail → sidebar (at the END, so it never covers a target); orb off.
+    if reason != st::EndReason::Cancelled {
+        show_sidebar_spatial(app, &payload_json).await;
+        emit(app, &OrchestratorEvent::Done { request_id: rid.clone() });
+    }
+    clear_active_request(&rid);
+    TourRun::Done(done_result(&rid))
+}
+
+/// Credential hints for the memory profile refresh (M1): primary Google
+/// email + voice enrollment. GitHub login stays None until a successful
+/// authenticated call caches it (M5) — refresh never touches the network.
+fn memory_credential_hints<R: Runtime>(app: &AppHandle<R>) -> (Option<String>, bool) {
+    let accounts = crate::auth_vault::get_google_accounts();
+    let email = accounts
+        .iter()
+        .find(|a| a.is_primary)
+        .or_else(|| accounts.first())
+        .map(|a| a.email.clone());
+    let enrolled = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| {
+            crate::voice_profile::VoiceProfile::load(&crate::voice_profile::resolve_profile_path(&dir))
+                .map(|v| v.is_enrolled())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    (email, enrolled)
+}
+
+fn local_result(request_id: String, subsystem: Subsystem) -> ProcessResult {
+    ProcessResult {
+        request_id,
+        subsystem,
+        handled_locally: true,
+    }
+}
+
+/// Speak the memory audit summary (M0 — local, never cloud). Refreshes
+/// the unified profile first so the answer is current.
+async fn run_memory_audit<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let summary = match app.path().app_data_dir() {
+        Ok(dir) => {
+            let (email, enrolled) = memory_credential_hints(&app);
+            crate::memory::refresh_user_profile(&dir, email.as_deref(), None, enrolled);
+            // The full, provenance-labelled list goes to the sidebar; the
+            // spoken answer stays a short summary.
+            let st = crate::memcore::status(&dir);
+            if st.enabled {
+                let rows = crate::memcore::list_rows(&dir, 200);
+                let md = crate::memcore::card_markdown(&rows, &st, chrono::Utc::now().timestamp());
+                if let Err(e) = crate::commands::show_sidebar_with_content(
+                    app.clone(),
+                    "What I remember".to_string(),
+                    md,
+                )
+                .await
+                {
+                    tracing::warn!("memory card: could not open sidebar: {e}");
+                }
+            }
+            crate::memory::memory_audit_summary(&dir)
+        }
+        Err(_) => "I couldn't open my memory, sir.".to_string(),
+    };
+    speak_line(&app, summary, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+// ─── Timetable (P4) ───────────────────────────────────────────────────
+
+fn local_week_now() -> (u8, u16) {
+    use chrono::{Datelike, Timelike};
+    let now = chrono::Local::now();
+    (now.weekday().num_days_from_monday() as u8, (now.hour() * 60 + now.minute()) as u16)
+}
+
+fn timetable_slots(dir: &std::path::Path) -> Vec<crate::memcore::timetable::Slot> {
+    crate::memcore::with_store(dir, crate::memcore::timetable::load_slots).unwrap_or_default()
+}
+
+/// Speak `text` for a finished local turn.
+fn say_and_finish<R: Runtime>(app: &AppHandle<R>, request_id: String, text: String) -> Result<ProcessResult, String> {
+    speak_line(app, text, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// "Analyse this and add section 2 to my timetable": read the image (screen
+/// or clipboard), show what was found, and ask before saving anything.
+async fn run_timetable_add<R: Runtime>(
+    app: AppHandle<R>,
+    source: String,
+    section: Option<usize>,
+) -> Result<ProcessResult, String> {
+    use crate::memcore::{offer, timetable, timetable_io};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    if !crate::memcore::enabled(&dir) {
+        return say_and_finish(&app, request_id, "My memory is switched off, sir, so I can't keep a timetable.".into());
+    }
+    let from_clipboard = source == "clipboard";
+    let b64 = tauri::async_runtime::spawn_blocking(move || {
+        if from_clipboard { timetable_io::clipboard_image_b64() } else { timetable_io::capture_screen_b64() }
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(b64) = b64 else {
+        let msg = if from_clipboard {
+            "There's no picture on the clipboard, sir. Copy the timetable image, or show it on screen and say add this to my timetable."
+        } else {
+            "I couldn't capture the screen, sir."
+        };
+        return say_and_finish(&app, request_id, msg.to_string());
+    };
+    speak_line(&app, "Reading the timetable, sir.".to_string(), &request_id);
+
+    let want = section.map(timetable::Want::Number);
+    let extracted = match timetable_io::extract(&app, &b64, want.as_ref()).await {
+        Ok(ex) => ex,
+        Err(e) => {
+            let msg = match e {
+                timetable_io::ExtractError::NoKey => "I need a Gemini key to read pictures, sir. You can add one in the Command Hub under API Keys.",
+                timetable_io::ExtractError::Quota => "My picture-reading allowance is used up for today, sir.",
+                timetable_io::ExtractError::Timeout => "That took too long, sir. Please try again.",
+                timetable_io::ExtractError::Unreadable => "I couldn't find a timetable in that image, sir. Make sure it's fully visible and try again.",
+            };
+            return say_and_finish(&app, request_id, msg.to_string());
+        }
+    };
+    let slots = match timetable::select_section(&extracted, want.as_ref()) {
+        Ok(s) => s,
+        Err(msg) => return say_and_finish(&app, request_id, format!("{msg} Sir.")),
+    };
+    let existing: std::collections::HashSet<String> = timetable_slots(&dir).into_iter().map(|s| s.id).collect();
+    let fresh: Vec<timetable::Slot> = slots.iter().filter(|s| !existing.contains(&s.id)).cloned().collect();
+    if fresh.is_empty() {
+        return say_and_finish(&app, request_id, "Those are already on your timetable, sir.".into());
+    }
+    let label = match section {
+        Some(n) => format!("section {n}"),
+        None => "the timetable".to_string(),
+    };
+    let md = timetable::card_markdown(
+        &format!("Found in {label}"),
+        &fresh,
+        "Say *yes* to add these, or *no* to discard them. Nothing is saved until you confirm.",
+    );
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Review timetable".to_string(), md).await {
+        tracing::warn!("timetable card: could not open sidebar: {e}");
+    }
+    let listed: Vec<String> = fresh.iter().take(3).map(timetable::describe).collect();
+    let more = fresh.len().saturating_sub(3);
+    let spoken = format!(
+        "I found {} slot{} in {label}: {}{}. Shall I add {}?",
+        fresh.len(),
+        if fresh.len() == 1 { "" } else { "s" },
+        listed.join("; "),
+        if more > 0 { format!("; and {more} more") } else { String::new() },
+        if fresh.len() == 1 { "it" } else { "them" },
+    );
+    offer::set_draft(fresh.clone(), label.clone());
+    offer::set(offer::Offer::AddSlots { slots: fresh, label }, true);
+    speak_line(&app, spoken, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+fn save_and_speak<R: Runtime>(app: &AppHandle<R>, slots: &[crate::memcore::timetable::Slot]) -> String {
+    let Ok(dir) = app.path().app_data_dir() else { return "I couldn't open my memory, sir.".into() };
+    let now = chrono::Utc::now().timestamp();
+    let n = crate::memcore::with_store(&dir, |s| {
+        crate::memcore::timetable::save_slots(s, slots, "timetable:image", now)
+    })
+    .unwrap_or(0);
+    if n == 0 {
+        return "I couldn't save those, sir.".into();
+    }
+    let all = timetable_slots(&dir);
+    let (wd, min) = local_week_now();
+    let next = crate::memcore::timetable::next_speech(&all, wd, min).unwrap_or_default();
+    format!("Added {n} slot{} to your timetable, sir. {next}", if n == 1 { "" } else { "s" }).trim().to_string()
+}
+
+async fn run_timetable_commit<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let text = match crate::memcore::offer::take_draft() {
+        Some((slots, _)) => {
+            crate::memcore::offer::clear();
+            save_and_speak(&app, &slots)
+        }
+        None => "I don't have any slots waiting, sir. Show me a timetable and say add this to my timetable.".to_string(),
+    };
+    say_and_finish(&app, request_id, text)
+}
+
+async fn run_timetable_show<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let slots = timetable_slots(&dir);
+    if slots.is_empty() {
+        return say_and_finish(
+            &app,
+            request_id,
+            "Your timetable is empty, sir. Show me one and say add this to my timetable.".into(),
+        );
+    }
+    let md = crate::memcore::timetable::card_markdown(
+        "Your timetable",
+        &slots,
+        "Say *clear my timetable* to start over. Manage individual slots in the Command Hub under Memory.",
+    );
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Your timetable".to_string(), md).await {
+        tracing::warn!("timetable card: could not open sidebar: {e}");
+    }
+    let (wd, min) = local_week_now();
+    let text = crate::memcore::timetable::next_speech(&slots, wd, min)
+        .unwrap_or_else(|| format!("You have {} slots on your timetable, sir.", slots.len()));
+    say_and_finish(&app, request_id, text)
+}
+
+async fn run_timetable_clear<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let n = app.path().app_data_dir().map(|d| timetable_slots(&d).len()).unwrap_or(0);
+    if n == 0 {
+        return say_and_finish(&app, request_id, "Your timetable is already empty, sir.".into());
+    }
+    crate::memcore::offer::set(crate::memcore::offer::Offer::ClearTimetable, true);
+    say_and_finish(
+        &app,
+        request_id,
+        format!("That erases all {n} slot{} from your timetable, sir. Shall I?", if n == 1 { "" } else { "s" }),
+    )
+}
+
+async fn run_study_pref<R: Runtime>(app: AppHandle<R>, activity: String, choice: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let c = if choice == "app" { crate::memcore::timetable::Choice::App } else { crate::memcore::timetable::Choice::Browser };
+    let now = chrono::Utc::now().timestamp();
+    let saved = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|d| crate::memcore::with_store(&d, |s| crate::memcore::timetable::set_pref(s, &activity, c, now)))
+        .is_some();
+    let text = if saved {
+        format!(
+            "Understood, sir. I'll use the {} for {} from now on.",
+            if c == crate::memcore::timetable::Choice::App { "app" } else { "browser" },
+            activity.replace('_', " ")
+        )
+    } else {
+        "I couldn't save that, sir.".to_string()
+    };
+    say_and_finish(&app, request_id, text)
+}
+
+/// Open what an activity needs, the way the user prefers, and say what happened.
+async fn start_activity<R: Runtime>(
+    app: &AppHandle<R>,
+    title: &str,
+    activity: &str,
+    choice: crate::memcore::timetable::Choice,
+) -> String {
+    use crate::memcore::{resume, store::Tier, timetable, timetable_io};
+    let Ok(dir) = app.path().app_data_dir() else { return "I couldn't open my memory, sir.".into() };
+    let entries: Vec<(resume::Sample, i64)> = crate::memcore::with_store(&dir, |s| {
+        s.recent(Tier::Resume, 150)
+            .into_iter()
+            .filter_map(|h| resume::decode(&h.value).map(|sm| (sm, h.last_seen)))
+            .collect()
+    })
+    .unwrap_or_default();
+    let targets = timetable::plan_targets(activity, &entries);
+    let wants_video = timetable::plan_sites(activity).map(|s| s.contains(&"youtube.com")).unwrap_or(false);
+    let youtube_missing = wants_video && !targets.iter().any(|t| t.site == "youtube.com");
+    let mut outcomes: Vec<(String, timetable_io::Opened)> = vec![];
+    for t in &targets {
+        let tc = t.clone();
+        let how = tauri::async_runtime::spawn_blocking(move || timetable_io::open_target(&tc, choice))
+            .await
+            .unwrap_or(timetable_io::Opened::Failed);
+        outcomes.push((t.url.clone(), how));
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    timetable_io::start_speech(title, &targets, &outcomes, youtube_missing)
+}
+
+/// The user answered a question NEXUS asked (see the intercept in
+/// `process_transcript`).
+async fn run_offer_reply<R: Runtime>(
+    app: AppHandle<R>,
+    offer: crate::memcore::offer::Offer,
+    reply: crate::memcore::offer::Reply,
+    text: &str,
+) -> Result<ProcessResult, String> {
+    use crate::memcore::offer::{self, Offer, Reply};
+    use crate::memcore::timetable;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    offer::clear();
+    let dir = app.path().app_data_dir().ok();
+    let said_choice = timetable::parse_choice(text);
+    let now = chrono::Utc::now().timestamp();
+    let remember = |activity: &str, c: timetable::Choice| {
+        if let Some(d) = &dir {
+            crate::memcore::with_store(d, |s| timetable::set_pref(s, activity, c, now));
+        }
+    };
+
+    let line = match (offer, reply) {
+        (Offer::Start { title, activity }, Reply::Yes) => {
+            // A choice spoken with the yes ("yes, in the browser") also
+            // overwrites the stored one.
+            if let Some(c) = said_choice {
+                remember(&activity, c);
+            }
+            let stored = said_choice.or_else(|| {
+                dir.as_ref().and_then(|d| crate::memcore::with_store(d, |s| timetable::get_pref(s, &activity)).flatten())
+            });
+            match stored {
+                Some(c) => start_activity(&app, &title, &activity, c).await,
+                None => {
+                    offer::set(Offer::Choose { title: title.clone(), activity }, true);
+                    format!("Should I open {title} in the app or in the browser, sir? I'll remember your answer.")
+                }
+            }
+        }
+        (Offer::Start { title, activity }, Reply::Later) => {
+            crate::memcore::scheduler::snooze_start(&app, title, activity);
+            "Very well, sir. I'll ask again in ten minutes.".to_string()
+        }
+        (Offer::Start { title, .. }, _) => format!("Understood, sir. Skipping {title} for now."),
+        (Offer::Choose { title, activity }, Reply::Yes | Reply::Other) if said_choice.is_some() => {
+            let c = said_choice.unwrap_or(timetable::Choice::Browser);
+            remember(&activity, c);
+            start_activity(&app, &title, &activity, c).await
+        }
+        (Offer::Choose { .. }, _) => "Very well, sir. I won't open anything.".to_string(),
+        (Offer::AddSlots { slots, .. }, Reply::Yes) => {
+            let _ = offer::take_draft();
+            save_and_speak(&app, &slots)
+        }
+        (Offer::AddSlots { .. }, Reply::Later) => {
+            "Very well, sir. Say add those slots whenever you're ready.".to_string()
+        }
+        (Offer::AddSlots { .. }, _) => {
+            let _ = offer::take_draft();
+            "Understood, sir. I won't add them.".to_string()
+        }
+        (Offer::ClearTimetable, Reply::Yes) => {
+            let n = dir
+                .as_ref()
+                .and_then(|d| crate::memcore::with_store(d, |s| timetable::clear_slots(s, now)))
+                .unwrap_or(0);
+            format!("Done, sir. I erased {n} slot{}.", if n == 1 { "" } else { "s" })
+        }
+        (Offer::ClearTimetable, _) => "Understood, sir. Your timetable stays.".to_string(),
+        (Offer::AddEvent { summary, start_iso, end_iso, when }, Reply::Yes) => {
+            let ev = crate::google::types::NewEvent {
+                summary: summary.clone(),
+                description: Some("Added by NEXUS".to_string()),
+                start_iso,
+                end_iso,
+                location: None,
+            };
+            let acct = crate::memcore::google_io::primary_account(crate::memcore::google_io::can_use_calendar);
+            let email = acct.and_then(|a| a.email);
+            let res = crate::memcore::google_io::with_client(email.as_deref(), |c| {
+                let ev = ev.clone();
+                async move { crate::memcore::google_io::calendar_insert(&c, &ev).await }
+            })
+            .await;
+            match res {
+                Ok(_) => format!("Done, sir. {summary} is on your calendar {when}."),
+                Err(_) => "I couldn't save it to your calendar, sir. Please check that Google is connected.".to_string(),
+            }
+        }
+        (Offer::AddEvent { .. }, Reply::Later) => "Very well, sir. Ask me again whenever you're ready.".to_string(),
+        (Offer::AddEvent { .. }, _) => "Understood, sir. I won't add it.".to_string(),
+        (Offer::ReopenSession, Reply::Yes) => restore_session(&app).await,
+        (Offer::ReopenSession, Reply::Later) => {
+            "Very well, sir. I'll keep that list; say reopen my session whenever you want it.".to_string()
+        }
+        (Offer::ReopenSession, _) => {
+            if let Some(d) = &dir {
+                crate::memcore::session::clear_pending(d);
+            }
+            "Understood, sir. I won't reopen anything.".to_string()
+        }
+        (Offer::Power { kind }, Reply::Yes) => match crate::power_cmd::PowerKind::from_str(&kind) {
+            Some(k) => {
+                // A confirmed mishearing is remembered (local file) so it is obeyed at once next time.
+                if let Some(d) = &dir {
+                    crate::power_cmd::learn_pending_alias(d);
+                }
+                // Linux: did the question the user just answered carry the
+                // "I can't close your other apps" warning? Only then does this
+                // "yes" confirm it — every other power question leaves the
+                // warning unconfirmed, and the close step then stops the
+                // shutdown instead of dropping unsaved work.
+                #[cfg(target_os = "linux")]
+                crate::power_close::linux::confirm_warning();
+                start_power(&app, k).await
+            }
+            None => "I didn't understand which power command that was, sir.".to_string(),
+        },
+        (Offer::Power { .. }, _) => {
+            #[cfg(target_os = "linux")]
+            crate::power_close::linux::clear_warning();
+            "Understood, sir. Nothing will be turned off.".to_string()
+        }
+        (Offer::OpenApp { display_name, spoken }, Reply::Yes) => {
+            // The user confirmed the guess: remember it, then open it for real.
+            crate::app_registry::confirm_resolution(&spoken, &display_name);
+            match crate::command_executor::resolve_and_open_app(&display_name.to_lowercase()) {
+                Ok(r) => r.message,
+                Err(e) => e,
+            }
+        }
+        (Offer::OpenApp { .. }, _) => "Understood, sir. I won't open anything.".to_string(),
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+// ─── Inbox + calendar (P5) ────────────────────────────────────────────
+
+fn not_connected_line(what: &str) -> String {
+    format!("I'm not connected to your {what} yet, sir. You can connect a Google account in the Command Hub.")
+}
+
+/// "Any important emails?" — what the inbox watcher filed, most urgent first.
+async fn run_mail_digest<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    use crate::memcore::{briefing, google_io};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let items = briefing::important_mail(&dir, chrono::Utc::now().timestamp());
+    if items.is_empty() {
+        let line = if google_io::list_accounts(google_io::can_read_mail).is_empty() {
+            not_connected_line("Gmail")
+        } else if !crate::memcore::flag(&dir, "memcoreMail", true) {
+            "Email alerts are switched off, sir. You can turn them on in the Command Hub under Memory.".to_string()
+        } else {
+            "Nothing important in your inbox right now, sir.".to_string()
+        };
+        return say_and_finish(&app, request_id, line);
+    }
+    let mut md = String::from("## Important email\n\n");
+    for m in &items {
+        md.push_str(&format!("- {}\n", briefing::mail_line(m).replace(['*', '_', '[', ']', '<', '>', '`', '#', '|'], "")));
+    }
+    md.push_str("\n---\nSay *that's not important* right after an alert to stop alerts from that sender.\n");
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Important email".to_string(), md).await {
+        tracing::warn!("mail card: could not open sidebar: {e}");
+    }
+    let first = briefing::mail_line(&items[0]);
+    let line = if items.len() == 1 {
+        format!("You have one important email, sir: {first}.")
+    } else {
+        format!("You have {} important emails, sir. The most urgent is {first}. The rest are in the sidebar.", items.len())
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+/// "That's not important" — mute the sender of the alert just spoken.
+async fn run_mail_mute<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    // "That's not important" refers to whichever alert (mail or WhatsApp) was spoken last.
+    if let Some(wa_age) = crate::memcore::wa::last_alert_age() {
+        let mail_age = crate::memcore::mailwatch::last_alert_age();
+        if mail_age.map(|m| wa_age < m).unwrap_or(true) {
+            return run_whatsapp_mute_last(app).await;
+        }
+    }
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let line = match crate::memcore::mailwatch::last_alert_sender() {
+        None => "I haven't alerted you about any email in the last few minutes, sir.".to_string(),
+        Some((email, label)) => {
+            let now = chrono::Utc::now().timestamp();
+            let done = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .and_then(|d| crate::memcore::with_store(&d, |s| crate::memcore::mailwatch::mute_sender(s, &email, now)))
+                .unwrap_or(false);
+            if done {
+                format!("Understood, sir. I won't alert you about mail from {label} any more. Say forget mail mute {email} to undo it.")
+            } else {
+                "I couldn't save that, sir.".to_string()
+            }
+        }
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+// ─── Directions (Google Maps window) ──────────────────────────────────
+
+/// Spoken line for a directions request. Pure.
+fn directions_line(destination: &str, eta: Option<&str>) -> String {
+    match eta {
+        Some(e) => format!("Finding route to {destination}. About {e}, sir."),
+        None => format!("Finding the best route to {destination}, sir."),
+    }
+}
+
+/// "Directions to X": open the real Google Maps app first (so it appears
+/// at once), then - only if a Routes API key AND a spoken origin exist - ask
+/// the Routes API for a traffic-aware ETA (3 s cap) to speak. Any failure
+/// falls back to the plain acknowledgement; the map window is unaffected.
+async fn run_directions<R: Runtime>(
+    app: AppHandle<R>,
+    destination: String,
+    origin: Option<String>,
+    mode: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let travel = crate::commands::parse_travel_mode(Some(&mode));
+    let (destination, origin) = match resolve_saved_places(&app, &destination, origin.as_deref()) {
+        Ok(r) => r,
+        Err(line) => return say_and_finish(&app, request_id, line),
+    };
+    if let Err(e) = crate::commands::open_maps(&app, &destination, origin.as_deref(), travel) {
+        tracing::warn!("directions: could not open Maps window: {e}");
+        return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
+    }
+    let key = crate::commands::read_api_key(&app, "google_maps");
+    let eta = match (key.is_empty(), origin.as_deref().map(str::trim).filter(|o| !o.is_empty())) {
+        (false, Some(o)) => {
+            let client = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(2))
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .unwrap_or_default();
+            match crate::google::maps::MapsService::compute_route(&client, &key, o, &destination, travel).await {
+                Ok(eta) => Some(eta.spoken()),
+                Err(e) => {
+                    tracing::debug!("directions: routes api: {e}");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    say_and_finish(&app, request_id, directions_line(&destination, eta.as_deref()))
+}
+
+/// Which saved place a spoken word means: "home" / "work" (None = a real address).
+fn saved_place_kind(s: &str) -> Option<&'static str> {
+    match s.trim().to_lowercase().trim_start_matches("my ").trim_start_matches("the ") {
+        "home" | "house" | "my place" | "home address" => Some("home"),
+        "work" | "office" | "workplace" | "work address" => Some("work"),
+        _ => None,
+    }
+}
+
+/// Pick the saved address for "home"/"work" from remembered facts. Pure.
+pub(crate) fn pick_saved_place(hits: &[(String, String)], kind: &str) -> Option<String> {
+    let keys: &[&str] = if kind == "home" {
+        &["home", "my_home", "home_address", "my_home_address", "address", "my_address", "home_location"]
+    } else {
+        &["work", "my_work", "workplace", "my_workplace", "office", "my_office", "work_address", "work_location"]
+    };
+    keys.iter().find_map(|k| {
+        hits.iter()
+            .find(|(hk, v)| hk.to_lowercase() == *k && !v.trim().is_empty())
+            .map(|(_, v)| v.trim().to_string())
+    })
+}
+
+fn saved_place<R: Runtime>(app: &AppHandle<R>, kind: &str) -> Option<String> {
+    let dir = app.path().app_data_dir().ok()?;
+    pick_saved_place(&crate::memory::recall(&dir, kind), kind)
+}
+
+fn unknown_place_line(kind: &str) -> String {
+    format!("I don't know where your {kind} is yet, sir. Say: remember that my {kind} is, followed by the address.")
+}
+
+/// Replace "home"/"work" in a destination/origin with the remembered address.
+fn resolve_saved_places<R: Runtime>(
+    app: &AppHandle<R>,
+    destination: &str,
+    origin: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    let one = |s: &str| -> Result<String, String> {
+        match saved_place_kind(s) {
+            Some(kind) => saved_place(app, kind).ok_or_else(|| unknown_place_line(kind)),
+            None => Ok(s.to_string()),
+        }
+    };
+    let d = one(destination)?;
+    let o = match origin {
+        Some(o) => Some(one(o)?),
+        None => None,
+    };
+    Ok((d, o))
+}
+
+/// Spoken line for a places lookup. Pure.
+fn places_line(query: &str, anchor: Option<&str>, places: &[crate::google::types::PlaceItem]) -> String {
+    let Some(top) = places.first() else {
+        return format!("Searching maps for {query}, sir.");
+    };
+    let street = top.address.split(',').next().unwrap_or("").trim();
+    let open = match top.open_now {
+        Some(true) => ", open now",
+        Some(false) => ", closed right now",
+        None => "",
+    };
+    let at = if street.is_empty() { String::new() } else { format!(", {street}") };
+    let area = anchor.map(|a| format!(" near {a}")).unwrap_or_default();
+    let mut line = format!("Top result for {query}{area}: {}{at}{open}.", top.name);
+    if let Some(second) = places.get(1) {
+        line.push_str(&format!(" Also {}.", second.name));
+    }
+    line
+}
+
+/// "Nearest pharmacy": with a Places key and an anchor (spoken "near X" or the
+/// remembered home) ask Places API (New) for the top matches, speak them and
+/// open the first on Maps. Otherwise open a Maps search ("near me" is resolved
+/// by Google in the window). Ranking is by relevance to the text query, not by
+/// exact distance, so the wording says "top result", never "closest".
+async fn run_places_search<R: Runtime>(
+    app: AppHandle<R>,
+    query: String,
+    near: Option<String>,
+) -> Result<ProcessResult, String> {
+    use crate::google::maps::MapsService;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let anchor = match near.as_deref() {
+        Some(n) => match saved_place_kind(n) {
+            Some(kind) => match saved_place(&app, kind) {
+                Some(a) => Some(a),
+                None => return say_and_finish(&app, request_id, unknown_place_line(kind)),
+            },
+            None => Some(n.to_string()),
+        },
+        None => saved_place(&app, "home"),
+    };
+    let key = crate::commands::read_api_key(&app, "google_places");
+    let mut places = vec![];
+    if let (false, Some(a)) = (key.is_empty(), anchor.as_deref()) {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_default();
+        match MapsService::search_places(&client, &key, &format!("{query} near {a}")).await {
+            Ok(p) => places = p,
+            Err(e) => tracing::debug!("places: {e}"),
+        }
+    }
+    let search_text = match (places.first(), anchor.as_deref()) {
+        (Some(top), _) => format!("{} {}", top.name, top.address),
+        (None, Some(a)) => format!("{query} near {a}"),
+        (None, None) => query.clone(),
+    };
+    let url = MapsService::build_place_search_url(&search_text);
+    if let Err(e) = crate::commands::open_maps_url(&app, &url) {
+        tracing::warn!("places: could not open Maps window: {e}");
+        return say_and_finish(&app, request_id, "I couldn't open the map window, sir.".into());
+    }
+    say_and_finish(&app, request_id, places_line(&query, near.as_deref().or(anchor.as_deref()), &places))
+}
+
+// ─── WhatsApp priority people (P6) ────────────────────────────────────
+
+fn wa_off_line() -> String {
+    "WhatsApp watching is switched off, sir. You can turn it on in the Command Hub under Memory.".to_string()
+}
+
+/// "Read that message" - the conversation goes to the sidebar (local). The
+/// text is only spoken if the user opted in: the voice service is a cloud
+/// service and would receive the message text.
+async fn run_whatsapp_read<R: Runtime>(app: AppHandle<R>, name: Option<String>) -> Result<ProcessResult, String> {
+    use crate::memcore::wa;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    if !crate::memcore::flag(&dir, "memcoreWhatsapp", false) {
+        return say_and_finish(&app, request_id, wa_off_line());
+    }
+    let resolved = crate::memcore::with_store(&dir, |s| wa::resolve_chat(s, name.as_deref()))
+        .unwrap_or_else(|| Err("I couldn't open my memory, sir.".to_string()));
+    let (jid, display) = match resolved {
+        Ok(r) => r,
+        Err(e) => return say_and_finish(&app, request_id, e),
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    let msgs = match tokio::time::timeout(std::time::Duration::from_secs(20), wa::fetch_chat(&client, &jid)).await {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => return say_and_finish(&app, request_id, format!("I couldn't read that chat, sir. {e}")),
+        Err(_) => return say_and_finish(&app, request_id, "WhatsApp took too long to answer, sir.".into()),
+    };
+    let md = wa::card_markdown(&display, &msgs);
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), format!("WhatsApp - {display}"), md).await {
+        tracing::warn!("whatsapp card: could not open sidebar: {e}");
+    }
+    let line = if crate::memcore::flag(&dir, "memcoreWhatsappSpeak", false) {
+        wa::read_aloud(&display, &msgs)
+    } else if msgs.iter().any(|m| !m.from_me) {
+        format!("I've put {display}'s latest messages in the sidebar, sir. I haven't marked them as read.")
+    } else {
+        format!("I don't see any recent messages from {display}, sir.")
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Make Asha a VIP" / "mute WhatsApp alerts from Raj".
+async fn run_people_flag<R: Runtime>(app: AppHandle<R>, name: String, kind: String, on: bool) -> Result<ProcessResult, String> {
+    use crate::memcore::wa::{self, FlagOutcome, PersonFlag};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let flag = if kind == "vip" { PersonFlag::Vip } else { PersonFlag::Mute };
+    let now = chrono::Utc::now().timestamp();
+    let outcome = crate::memcore::with_store(&dir, |s| wa::set_flag(s, &name, flag, on, now)).unwrap_or(FlagOutcome::NotFound);
+    let line = match (outcome, flag, on) {
+        (FlagOutcome::Done(n), PersonFlag::Vip, true) => format!("Done, sir. {n} is a priority person - I'll tell you whenever they message."),
+        (FlagOutcome::Done(n), PersonFlag::Vip, false) => format!("Understood, sir. {n} is no longer pinned as a priority person."),
+        (FlagOutcome::Done(n), PersonFlag::Mute, true) => format!("Understood, sir. I won't alert you about WhatsApp messages from {n}."),
+        (FlagOutcome::Done(n), PersonFlag::Mute, false) => format!("Done, sir. I'll alert you about {n} again when it matters."),
+        (FlagOutcome::Ambiguous(v), _, _) => format!("I know more than one {name}, sir: {}. Please say the full name.", v.join(", ")),
+        (FlagOutcome::NotFound, _, _) => format!("I don't know a WhatsApp contact called {name} yet, sir. I learn people from your chats once WhatsApp is connected."),
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Who are my priority people".
+async fn run_people_list<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    use crate::memcore::{people, wa};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let now = chrono::Utc::now().timestamp();
+    let (line, rows) = crate::memcore::with_store(&dir, |s| {
+        (wa::priority_line(s, now), people::ranked(&people::load_all(s), now))
+    })
+    .unwrap_or_else(|| ("I couldn't open my memory, sir.".to_string(), vec![]));
+    if !rows.is_empty() {
+        let esc = |s: &str| s.replace(['*', '_', '[', ']', '<', '>', '`', '#', '|', '\\'], "");
+        let mut md = String::from("## Priority people on WhatsApp\n\n");
+        for (p, sc) in rows.iter().take(10) {
+            let tag = if p.vip { " (VIP)" } else if p.muted { " (muted)" } else { "" };
+            md.push_str(&format!("- **{}**{} - {}: {}\n", esc(&p.name), tag, sc.value, esc(&sc.why)));
+        }
+        md.push_str("\n---\nLearned from how often you message each other and how fast you reply. Message text is never used. Say *make <name> a VIP* or *mute WhatsApp alerts from <name>* to change this.\n");
+        if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Priority people".to_string(), md).await {
+            tracing::warn!("people card: could not open sidebar: {e}");
+        }
+    }
+    say_and_finish(&app, request_id, line)
+}
+
+/// "That's not important" right after a WhatsApp alert: mute that person.
+async fn run_whatsapp_mute_last<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    use crate::memcore::wa::{self, FlagOutcome, PersonFlag};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Some((jid, name)) = wa::last_alert_chat() else {
+        return say_and_finish(&app, request_id, "I haven't alerted you about any WhatsApp message lately, sir.".into());
+    };
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+    let now = chrono::Utc::now().timestamp();
+    let done = crate::memcore::with_store(&dir, |s| match crate::memcore::people::get(s, &jid) {
+        Some(mut p) => {
+            p.muted = true;
+            p.vip = false;
+            crate::memcore::people::save_user_choice(s, &p, now);
+            true
+        }
+        None => matches!(wa::set_flag(s, &name, PersonFlag::Mute, true, now), FlagOutcome::Done(_)),
+    })
+    .unwrap_or(false);
+    let line = if done {
+        format!("Understood, sir. I won't alert you about WhatsApp messages from {name} any more. Say unmute WhatsApp alerts from {name} to undo it.")
+    } else {
+        "I couldn't save that, sir.".to_string()
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+/// Run `scripts/instagram_client.py <action> --user <target>` and report the
+/// real outcome (exit status + the script's own error text), not a guess.
+async fn run_instagram_action(action: &'static str, target: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let script = crate::memcore::leases::resolve_script_path("scripts/instagram_client.py");
+        if !script.exists() {
+            return Err("the Instagram helper script isn't installed".to_string());
+        }
+        let out = std::process::Command::new("python")
+            .args([script.to_string_lossy().as_ref(), action, "--user", &target])
+            .output()
+            .map_err(|e| format!("I couldn't run Python ({e})"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let reason = if text.contains("not_authenticated") {
+            "Instagram isn't signed in yet. Run the login command of scripts/instagram_client.py once".to_string()
+        } else if String::from_utf8_lossy(&out.stderr).contains("instagrapi is not installed") {
+            "the instagrapi package isn't installed".to_string()
+        } else {
+            "Instagram refused the request".to_string()
+        };
+        tracing::warn!(
+            "instagram {action} '{target}' failed: stdout={} stderr={}",
+            text.trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Err(reason)
+    })
+    .await
+    .map_err(|e| format!("the Instagram task crashed ({e})"))?
+}
+
+/// Platforms this build can really block / unblock. Everything else is said
+/// out loud as "not supported" instead of being reported as done.
+fn block_supported(platform: &str) -> bool {
+    matches!(platform, "instagram" | "all")
+}
+
+/// "Block Prem Sai for 5 days on Instagram / WhatsApp"
+async fn run_block_contact<R: Runtime>(
+    app: AppHandle<R>,
+    target: String,
+    platform: String,
+    duration_days: Option<u32>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+
+    if !block_supported(&platform) {
+        let line = format!(
+            "I can only block people on Instagram so far, sir. I can't block {target} on {platform} yet, so I haven't done anything."
+        );
+        return say_and_finish(&app, request_id, line);
+    }
+
+    // Only Instagram is executable. Say so when the request named more.
+    let extra = if platform == "all" {
+        " I can only do Instagram for now; WhatsApp and phone blocks aren't supported yet."
+    } else {
+        ""
+    };
+
+    // 1. Do the block first and report what really happened.
+    if let Err(reason) = run_instagram_action("block", target.clone()).await {
+        let line = format!("I couldn't block {target} on Instagram, sir: {reason}. Nothing was changed.");
+        return say_and_finish(&app, request_id, line);
+    }
+
+    // 2. A timed block needs a lease to lift it. Without one the block would
+    //    be permanent, so refuse to promise an unblock we cannot keep.
+    let now = chrono::Utc::now().timestamp();
+    let mut lease_note = String::new();
+    if let Some(days) = duration_days {
+        let lease = crate::memcore::store::ActionLease {
+            id: format!("lease_{}_{}", target.to_lowercase().replace(' ', "_"), now),
+            action_type: "unblock".into(),
+            target_name: target.clone(),
+            platform: "instagram".into(),
+            target_identifier: target.clone(),
+            expires_at: now + (days as i64 * 86400),
+            created_at: now,
+            status: "active".into(),
+        };
+        let stored = crate::memcore::with_store(&dir, |s| s.create_action_lease(&lease).is_ok()).unwrap_or(false);
+        if stored {
+            let days_str = if days == 1 { "1 day".to_string() } else { format!("{days} days") };
+            lease_note = format!(" I will unblock them in {days_str}.");
+        } else {
+            lease_note = " But I couldn't save the timer, so I will not unblock them automatically. Tell me when to.".to_string();
+        }
+    }
+
+    let line = format!("Done, sir. I have blocked {target} on Instagram.{lease_note}{extra}");
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Unblock Prem Sai on Instagram / WhatsApp"
+async fn run_unblock_contact<R: Runtime>(
+    app: AppHandle<R>,
+    target: String,
+    platform: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+
+    if !block_supported(&platform) {
+        let line = format!("I can only unblock people on Instagram so far, sir. I haven't changed anything for {target} on {platform}.");
+        return say_and_finish(&app, request_id, line);
+    }
+
+    // The platform call decides success; cancel the timer only after it worked,
+    // otherwise a failed unblock would also lose the automatic retry.
+    if let Err(reason) = run_instagram_action("unblock", target.clone()).await {
+        let line = format!("I couldn't unblock {target} on Instagram, sir: {reason}.");
+        return say_and_finish(&app, request_id, line);
+    }
+    let _ = crate::memcore::leases::cancel_leases_for(&dir, &target, "instagram");
+
+    let line = format!("Done, sir. I have unblocked {target} on Instagram.");
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Who is currently blocked" / "List blocked contacts"
+async fn run_list_blocked_contacts<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+
+    let leases = crate::memcore::leases::list_active(&dir);
+    if leases.is_empty() {
+        return say_and_finish(
+            &app,
+            request_id,
+            "You don't have any active temporary blocks at the moment, sir.".into(),
+        );
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let count = leases.len();
+    let mut parts = Vec::new();
+    let mut md = String::from("## Active Temporary Blocks\n\n");
+
+    for l in &leases {
+        let rem_secs = l.expires_at - now;
+        let rem_days = (rem_secs + 86399) / 86400;
+        let time_str = if rem_days > 1 {
+            format!("{} days", rem_days)
+        } else if rem_secs > 3600 {
+            format!("{} hours", rem_secs / 3600)
+        } else {
+            "under an hour".to_string()
+        };
+        parts.push(format!("{} on {} (remaining: {})", l.target_name, l.platform, time_str));
+        md.push_str(&format!("- **{}** on *{}* — unblocks in {}\n", l.target_name, l.platform, time_str));
+    }
+
+    let line = format!(
+        "Sir, you currently have {} temporary block{}: {}.",
+        count,
+        if count == 1 { "" } else { "s" },
+        parts.join(", ")
+    );
+
+    let _ = crate::commands::show_sidebar_with_content(app.clone(), "Blocked Contacts".to_string(), md).await;
+
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Run this on localhost" / "start dev server".
+async fn run_localhost_dev<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let project_opt = crate::coder::detect_active_project();
+
+    let Some(project) = project_opt else {
+        return say_and_finish(
+            &app,
+            request_id,
+            "I couldn't identify the active coding project from your foreground window, sir.".into(),
+        );
+    };
+
+    match crate::coder::launch_localhost(&project) {
+        Ok(msg) => {
+            tracing::info!("run_localhost_dev: {}", msg);
+            let speech = format!(
+                "I've started the development server for {}, sir. It usually listens on localhost {}.",
+                project.name, project.default_port
+            );
+            say_and_finish(&app, request_id, speech)
+        }
+        Err(e) => {
+            tracing::warn!("run_localhost_dev failed: {}", e);
+            let speech = format!("I found {}, but couldn't start the dev server: {}", project.name, e);
+            say_and_finish(&app, request_id, speech)
+        }
+    }
+}
+
+/// "Plan and create project" / "analyse chat with Eesah and plan and create that".
+async fn run_code_project<R: Runtime>(
+    app: AppHandle<R>,
+    source: String,
+    prompt: Option<String>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let project_ctx = crate::coder::detect_active_project();
+    let goal = prompt.unwrap_or_else(|| "Complete requested system implementation".to_string());
+
+    let autonomous_spec = crate::coder::build_autonomous_prompt(&goal, project_ctx.as_ref());
+
+    // Show plan card in sidebar
+    let card_title = format!("Project Plan: {}", goal);
+    let _ = crate::commands::show_sidebar_with_content(
+        app.clone(),
+        card_title,
+        autonomous_spec.clone(),
+    ).await;
+
+    let speech = format!(
+        "I have analyzed the {} and prepared the architectural specification and implementation plan, sir. The blueprint is docked in your sidebar.",
+        source
+    );
+    say_and_finish(&app, request_id, speech)
+}
+
+/// "Ask claude to <prompt>" / "run with antigravity <prompt>".
+/// Maps a spoken agent name to an `agent_watch` adapter id, if (and only
+/// if) that tool is one of the six `coding-agent-adapters` covers (claude,
+/// gemini, codex, aider, hermes, opencode). Antigravity/Cursor/Trae/
+/// Windsurf/VS Code are deliberately NOT mapped here — they stay on the
+/// existing `coder::dispatch_to_agent` path (spawn-if-possible, else
+/// clipboard) unchanged, since nothing here can watch them for completion.
+fn agent_watch_adapter_for(agent_name: &str) -> Option<&'static str> {
+    let norm = agent_name.trim().to_lowercase();
+    crate::agent_watch::KNOWN_ADAPTERS
+        .iter()
+        .copied()
+        .find(|id| norm.contains(id))
+}
+
+async fn run_coding_agent_task<R: Runtime>(
+    app: AppHandle<R>,
+    agent_name: String,
+    prompt: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let agent = crate::coder::CodingAgent::from_str(&agent_name);
+    let project_ctx = crate::coder::detect_active_project();
+    let project_dir = project_ctx.as_ref().map(|p| p.path.as_path());
+
+    let full_prompt = crate::coder::build_autonomous_prompt(&prompt, project_ctx.as_ref());
+
+    // Prefer the agent-watch sidecar for any tool it actually covers: unlike
+    // the raw spawn/clipboard path below, it runs the task AND tells the
+    // user the moment it finishes (or needs login, or errors) — using only
+    // local process-output pattern matching, zero extra API cost. Falls
+    // through to the old path if the sidecar genuinely can't run right now
+    // (e.g. no Node.js installed) rather than failing the whole command.
+    if let Some(adapter_type) = agent_watch_adapter_for(&agent_name) {
+        if crate::agent_watch::sidecar_unavailable_reason().is_none() {
+            let workdir = project_dir.map(|p| p.to_string_lossy().to_string());
+            match crate::agent_watch::start_watch(
+                app.clone(),
+                adapter_type.to_string(),
+                workdir,
+                Some(full_prompt.clone()),
+            )
+            .await
+            {
+                Ok(_watch_id) => {
+                    let speech = format!(
+                        "Understood, sir. I've started {} on the task — I'll let you know the moment it's done.",
+                        agent.display_name()
+                    );
+                    return say_and_finish(&app, request_id, speech);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "run_coding_agent_task: agent_watch failed ({e}), falling back to direct dispatch"
+                    );
+                }
+            }
+        }
+    }
+
+    match crate::coder::dispatch_to_agent(&agent, &full_prompt, project_dir) {
+        Ok(crate::coder::Dispatch::Started(pid)) => {
+            tracing::info!("run_coding_agent_task: started {} (pid {pid})", agent.display_name());
+            let speech = format!("Understood, sir. I have started {} on the task.", agent.display_name());
+            say_and_finish(&app, request_id, speech)
+        }
+        Ok(crate::coder::Dispatch::Copied) => {
+            let speech = format!(
+                "I can't hand tasks to {} directly, sir. I've copied the full specification to your clipboard. Paste it there.",
+                agent.display_name()
+            );
+            say_and_finish(&app, request_id, speech)
+        }
+        Err(e) => {
+            tracing::warn!("run_coding_agent_task dispatch failed: {}", e);
+            let speech = format!("I couldn't dispatch to {}: {}", agent.display_name(), e);
+            say_and_finish(&app, request_id, speech)
+        }
+    }
+}
+
+/// "Nexus watch over this, update me when the response is received and Claude has stopped running"
+/// Or implicit: "Nexus watch over this" (inspects active foreground window/process).
+async fn run_watch_agent_task<R: Runtime>(
+    app: AppHandle<R>,
+    agent_name: Option<String>,
+    _query: Option<String>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let project_ctx = crate::coder::detect_active_project();
+    let project_dir = project_ctx.as_ref().map(|p| p.path.to_string_lossy().to_string());
+
+    // Resolve target agent name: explicit or active foreground window
+    let target = if let Some(ref a) = agent_name {
+        let norm = a.trim().to_lowercase();
+        if norm.contains("claude") {
+            "Claude".to_string()
+        } else if norm.contains("antigravity") || norm.contains("agy") {
+            "Antigravity".to_string()
+        } else if norm.contains("codex") {
+            "Codex".to_string()
+        } else if norm.contains("cursor") {
+            "Cursor".to_string()
+        } else if norm.contains("trae") {
+            "Trae".to_string()
+        } else if norm.contains("windsurf") {
+            "Windsurf".to_string()
+        } else if norm.contains("vscode") || norm == "code" {
+            "VS Code".to_string()
+        } else if norm.contains("aider") {
+            "Aider".to_string()
+        } else if norm.contains("opencode") {
+            "OpenCode".to_string()
+        } else {
+            a.trim().to_string()
+        }
+    } else {
+        // Inspect foreground window title
+        let fg_title = crate::live::commands::window::get_foreground_window_title().unwrap_or_default();
+        let lower = fg_title.to_lowercase();
+        if lower.contains("antigravity") || lower.contains("agy") {
+            "Antigravity".to_string()
+        } else if lower.contains("cursor") {
+            "Cursor".to_string()
+        } else if lower.contains("trae") {
+            "Trae".to_string()
+        } else if lower.contains("windsurf") {
+            "Windsurf".to_string()
+        } else if lower.contains("visual studio code") || lower.contains("code") {
+            "VS Code".to_string()
+        } else if lower.contains("claude") {
+            "Claude".to_string()
+        } else if lower.contains("terminal") || lower.contains("powershell") || lower.contains("cmd") {
+            "your terminal task".to_string()
+        } else if !fg_title.trim().is_empty() {
+            fg_title.trim().to_string()
+        } else {
+            "your current task".to_string()
+        }
+    };
+
+    // If it's a CLI tool with a direct adapter, start sidecar watch if available
+    let adapter_opt = agent_watch_adapter_for(&target);
+    if let Some(adapter_type) = adapter_opt {
+        if crate::agent_watch::sidecar_unavailable_reason().is_none() {
+            match crate::agent_watch::start_watch(
+                app.clone(),
+                adapter_type.to_string(),
+                project_dir.clone(),
+                None,
+            )
+            .await
+            {
+                Ok(_id) => {
+                    let speech = format!(
+                        "Understood, sir. I'm watching over {} — I'll let you know the moment the response is received and it has stopped running.",
+                        target
+                    );
+                    return say_and_finish(&app, request_id, speech);
+                }
+                Err(e) => {
+                    tracing::warn!("run_watch_agent_task: CLI sidecar watch start failed ({e}), using desktop monitor");
+                }
+            }
+        }
+    }
+
+    // For desktop IDEs, GUI apps, or non-CLI tasks, start desktop/quiescence watch
+    let _ = crate::agent_watch::start_desktop_or_ide_watch(
+        app.clone(),
+        target.clone(),
+        project_dir,
+    )
+    .await;
+
+    let speech = format!(
+        "Understood, sir. I'm watching over {} — I will alert you as soon as the response is received and it has stopped running.",
+        target
+    );
+    say_and_finish(&app, request_id, speech)
+}
+
+async fn run_play_music<R: Runtime>(
+    app: AppHandle<R>,
+    query: Option<String>,
+    player: Option<String>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    match crate::media_player::execute_media_action("play", query.as_deref(), player.as_deref()).await {
+        Ok(msg) => say_and_finish(&app, request_id, msg),
+        Err(e) => {
+            let speech = format!("Couldn't play music, sir: {e}");
+            say_and_finish(&app, request_id, speech)
+        }
+    }
+}
+
+async fn run_open_music_player<R: Runtime>(
+    app: AppHandle<R>,
+    player: Option<String>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    match crate::media_player::execute_media_action("open", None, player.as_deref()).await {
+        Ok(msg) => say_and_finish(&app, request_id, msg),
+        Err(e) => {
+            let speech = format!("Couldn't open the music player, sir: {e}");
+            say_and_finish(&app, request_id, speech)
+        }
+    }
+}
+
+/// "Analyse college email about internship" -> opens email and docks details in sidebar
+async fn run_scan_internship_emails<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    use crate::memcore::store::Tier;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+
+    // 1. Search stored emails from inbox watcher
+    let stored: Vec<crate::memcore::mailtriage::StoredMail> = crate::memcore::with_store(&dir, |s| {
+        s.recent(Tier::Mail, 60)
+            .into_iter()
+            .filter_map(|h| serde_json::from_str::<crate::memcore::mailtriage::StoredMail>(&h.value).ok())
+            .collect()
+    })
+    .unwrap_or_default();
+
+    let intern_mail = stored.into_iter().find(|m| {
+        let hay = format!("{} {}", m.subject, m.snippet).to_lowercase();
+        // Whole words only: "internal" and "international" are not internships.
+        let word_hit = hay.split(|c: char| !c.is_alphanumeric()).any(|w| {
+            matches!(w, "intern" | "interns" | "internship" | "internships" | "placement" | "placements")
+        });
+        m.category == "internship" || word_hit || hay.contains("campus drive")
+    });
+
+    if let Some(m) = intern_mail {
+        let mail_url = format!("https://mail.google.com/mail/u/0/#search/{}", crate::memcore::mailtriage::pct_encode(&m.subject));
+        let open_target = mail_url.clone();
+        tokio::task::spawn_blocking(move || {
+            let _ = open::that(&open_target);
+        });
+
+        let mut md = String::from("## College Internship Notice\n\n");
+        md.push_str(&format!("- **Subject:** {}\n", m.subject));
+        md.push_str(&format!("- **From:** {}\n", m.sender));
+        md.push_str(&format!("- **Direct Link:** [Open in Gmail]({})\n\n", mail_url));
+        md.push_str("### Details\n");
+        md.push_str(&format!("> {}\n\n", m.snippet));
+        md.push_str("---\n*Detected from your college email. Opened directly in your mail app without unsolicited voice interruptions.*\n");
+
+        let _ = crate::commands::show_sidebar_with_content(app.clone(), "Internship Notice".to_string(), md).await;
+
+        let speech = format!(
+            "I found an internship email from {} regarding {}, sir. I have opened it and docked the summary in your sidebar.",
+            m.sender, m.subject
+        );
+        return say_and_finish(&app, request_id, speech);
+    }
+
+    // Fallback: check Google connection status
+    if crate::memcore::google_io::list_accounts(crate::memcore::google_io::can_read_mail).is_empty() {
+        return say_and_finish(&app, request_id, not_connected_line("Gmail"));
+    }
+
+    // Open inbox directly if connected
+    tokio::task::spawn_blocking(move || {
+        let _ = open::that("https://mail.google.com");
+    });
+
+    say_and_finish(
+        &app,
+        request_id,
+        "I've opened your college inbox for you, sir. I didn't find any urgent internship notices in recent memory.".into(),
+    )
+}
+
+/// "Remind me to call Prem Sai in 30 minutes" (Alexa-style explicit reminder with repeat-back)
+async fn run_create_voice_reminder<R: Runtime>(
+    app: AppHandle<R>,
+    task: String,
+    minutes: u32,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Ok(dir) = app.path().app_data_dir() else {
+        return say_and_finish(&app, request_id, "I couldn't open my memory, sir.".into());
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    let expires_at = now + (minutes as i64 * 60);
+    let lease_id = format!("remind_{}_{}", task.to_lowercase().replace(' ', "_"), now);
+
+    let lease = crate::memcore::store::ActionLease {
+        id: lease_id,
+        action_type: "reminder".into(),
+        target_name: task.clone(),
+        platform: "voice".into(),
+        target_identifier: task.clone(),
+        expires_at,
+        created_at: now,
+        status: "active".into(),
+    };
+
+    // Never promise a reminder that was not stored.
+    let stored = crate::memcore::with_store(&dir, |s| s.create_action_lease(&lease).is_ok()).unwrap_or(false);
+    if !stored {
+        tracing::warn!("run_create_voice_reminder: lease not stored (memory off or write failed)");
+        return say_and_finish(
+            &app,
+            request_id,
+            "I couldn't save that reminder, sir, because my memory isn't available. Nothing is set.".into(),
+        );
+    }
+
+    let time_str = if minutes == 1 {
+        "1 minute".to_string()
+    } else if minutes < 60 {
+        format!("{} minutes", minutes)
+    } else {
+        let hours = minutes / 60;
+        let rem_mins = minutes % 60;
+        if rem_mins == 0 {
+            if hours == 1 { "1 hour".to_string() } else { format!("{} hours", hours) }
+        } else {
+            format!("{} hours and {} minutes", hours, rem_mins)
+        }
+    };
+
+    let speech = format!("I will remind you to {} in {}, sir.", task, time_str);
+    say_and_finish(&app, request_id, speech)
+}
+
+/// "Analyse docs in chat with Eesah and tell me how they are"
+async fn run_analyse_chat_docs<R: Runtime>(
+    app: AppHandle<R>,
+    contact: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+
+    let downloads_dir = std::env::var("USERPROFILE")
+        .map(|p| std::path::PathBuf::from(p).join("Downloads"))
+        .unwrap_or_default();
+
+    let mut target_file: Option<std::path::PathBuf> = None;
+    if downloads_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&downloads_dir) {
+            let contact_norm = contact.to_lowercase();
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(ext) = p.extension() {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+                    if ext_str == "pdf" || ext_str == "docx" {
+                        let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                        if name.contains(&contact_norm) {
+                            target_file = Some(p);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // No guessing: analysing an unrelated file and presenting it as the
+    // contact's document would be a lie. NEXUS cannot pull attachments out of
+    // WhatsApp itself yet, so say so.
+    let Some(file_to_analyze) = target_file else {
+        return say_and_finish(
+            &app,
+            request_id,
+            format!(
+                "I couldn't find a PDF or Word file from {contact} in your Downloads folder, sir. I can't download documents from WhatsApp myself yet. Save the file to Downloads with their name in it and ask again."
+            ),
+        );
+    };
+
+    let out = tokio::task::spawn_blocking(move || {
+        let script = crate::memcore::leases::resolve_script_path("scripts/doc_analyzer.py");
+        std::process::Command::new("python")
+            .args([script.to_string_lossy().as_ref(), &file_to_analyze.to_string_lossy()])
+            .output()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let Ok(output) = out else {
+        return say_and_finish(&app, request_id, format!("I couldn't run the document analyzer for {}, sir.", contact));
+    };
+
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("doc_analyzer failed: {}", err);
+        return say_and_finish(&app, request_id, format!("I encountered an issue analyzing documents for {}, sir.", contact));
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&stdout_str) {
+        let md = val.get("markdown").and_then(|v| v.as_str()).unwrap_or("");
+        let speech = val.get("speech_summary").and_then(|v| v.as_str()).unwrap_or("I have analyzed the documents, sir.");
+
+        let _ = crate::commands::show_sidebar_with_content(app.clone(), format!("Document Review: {}", contact), md.to_string()).await;
+        say_and_finish(&app, request_id, format!("Sir, {}. I have docked the evaluation in your sidebar.", speech))
+    } else {
+        say_and_finish(&app, request_id, format!("I analyzed the documents from {}, sir. The details are ready in your sidebar.", contact))
+    }
+}
+
+/// "What's on my calendar today / tomorrow".
+async fn run_calendar_agenda<R: Runtime>(app: AppHandle<R>, day: String) -> Result<ProcessResult, String> {
+    use crate::memcore::{agenda, google_io};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if google_io::primary_account(google_io::can_use_calendar).is_none() {
+        return say_and_finish(&app, request_id, not_connected_line("calendar"));
+    }
+    let offset = if day == "tomorrow" { 1 } else { 0 };
+    let items = match tokio::time::timeout(std::time::Duration::from_secs(10), google_io::agenda_for(offset)).await {
+        Ok(Ok(items)) => items,
+        Ok(Err(crate::google::types::GoogleError::AuthRequired)) => {
+            return say_and_finish(&app, request_id, "Google needs you to sign in again before I can read your calendar, sir.".into());
+        }
+        _ => return say_and_finish(&app, request_id, "I couldn't reach your calendar just now, sir.".into()),
+    };
+    let friend = crate::persona::is_friend(&crate::commands::read_persona_mode(&app));
+    let address = crate::persona::address(None, friend).filter(|_| !friend);
+    let md = agenda::card_markdown(&format!("Calendar — {day}"), &items);
+    if let Err(e) = crate::commands::show_sidebar_with_content(app.clone(), "Your calendar".to_string(), md).await {
+        tracing::warn!("agenda card: could not open sidebar: {e}");
+    }
+    say_and_finish(&app, request_id, agenda::agenda_speech(&items, &day, address.as_deref()))
+}
+
+/// "Add dentist to my calendar tomorrow at 5pm" — read it back, then ask.
+async fn run_calendar_add<R: Runtime>(app: AppHandle<R>, text: String) -> Result<ProcessResult, String> {
+    use crate::memcore::{agenda, google_io, offer};
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if google_io::primary_account(google_io::can_use_calendar).is_none() {
+        return say_and_finish(&app, request_id, not_connected_line("calendar"));
+    }
+    let now = chrono::Local::now();
+    let draft = match agenda::parse_event_request(&text, now) {
+        Ok(d) => d,
+        Err(e) => return say_and_finish(&app, request_id, e.message().to_string()),
+    };
+    let offset = (draft.start.date_naive() - now.date_naive()).num_days();
+    let busy = tokio::time::timeout(std::time::Duration::from_secs(8), google_io::agenda_for(offset))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    let when = agenda::when_phrase(draft.start, now);
+    let ev = agenda::to_new_event(&draft);
+    let conflict = agenda::conflict_speech(&busy, &draft).map(|c| format!(" {c}")).unwrap_or_default();
+    offer::set(
+        offer::Offer::AddEvent { summary: draft.summary.clone(), start_iso: ev.start_iso, end_iso: ev.end_iso, when: when.clone() },
+        true,
+    );
+    say_and_finish(&app, request_id, format!("Add {} {when} to your calendar?{conflict}", draft.summary))
+}
+
+/// "Where did I leave off / show my briefing" (P3): built from local data,
+/// spoken short, full card in the sidebar. Never calls the cloud.
+/// "Shut down / restart / sleep / lock my laptop". Session-ending commands ask first and
+/// note what is open before anything is closed; sleep and lock just go.
+async fn run_power_action<R: Runtime>(app: AppHandle<R>, kind: String) -> Result<ProcessResult, String> {
+    use crate::power_cmd::PowerKind;
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let Some(k) = PowerKind::from_str(&kind) else {
+        return say_and_finish(&app, request_id, "I didn't catch which power command you meant, sir.".into());
+    };
+    if let Ok(dir) = app.path().app_data_dir() {
+        if !crate::memcore::flag(&dir, "powerCommands", true) {
+            return say_and_finish(&app, request_id, "Power commands are switched off, sir.".into());
+        }
+    }
+    // Linux: a NEW power flow starts here, so any pending "I can't close
+    // your other apps" warning from an earlier flow is dropped — only a
+    // confirmation given in THIS flow counts.
+    #[cfg(target_os = "linux")]
+    crate::power_close::linux::clear_warning();
+    if k == crate::power_cmd::PowerKind::Shutdown {
+        // The explicit command is obeyed without a question; only something that would be lost or
+        // interrupted (a meeting, a running task) makes NEXUS ask once.
+        if let Some(why) = shutdown_blocker(&app) {
+            crate::memcore::offer::set(crate::memcore::offer::Offer::Power { kind: k.as_str().to_string() }, true);
+            return say_and_finish(&app, request_id, format!("{why} Shut down anyway, sir?"));
+        }
+        let line = start_power(&app, k).await;
+        return say_and_finish(&app, request_id, line);
+    }
+    if k.ends_session() {
+        crate::memcore::offer::set(crate::memcore::offer::Offer::Power { kind: k.as_str().to_string() }, true);
+        return say_and_finish(&app, request_id, k.ask().to_string());
+    }
+    // Sleep / lock: nothing is closed, so no question; the call follows the spoken line.
+    crate::power_cmd::schedule(k);
+    say_and_finish(&app, request_id, k.ask().to_string())
+}
+
+/// The user said yes to a power command: note what is open, announce, count down.
+async fn start_power<R: Runtime>(app: &AppHandle<R>, k: crate::power_cmd::PowerKind) -> String {
+    let mut noted = String::new();
+    if k.needs_snapshot() {
+        if let Ok(dir) = app.path().app_data_dir() {
+            let snap = tauri::async_runtime::spawn_blocking(move || {
+                crate::memcore::session::snapshot_now(&dir, crate::memcore::session::REASON_VOICE_POWER)
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(s) = snap.filter(|s| !s.is_empty()) {
+                noted = format!("I've noted {}. ", crate::memcore::session::summary(&s));
+            }
+        }
+    }
+    if k == crate::power_cmd::PowerKind::Shutdown {
+        // Say goodbye (the caller speaks the returned line), wait for it to finish, close the apps
+        // gracefully, give "cancel" a last 3 s, then power off.
+        use chrono::Timelike;
+        let (name, friend) = match app.path().app_data_dir() {
+            Ok(dir) => (
+                crate::memory::read_user_profile(&dir).and_then(|p| p.name),
+                crate::persona::is_friend(&crate::commands::read_persona_mode(app)),
+            ),
+            Err(_) => (None, false),
+        };
+        let line = crate::power_cmd::goodbye_line(chrono::Local::now().hour(), name.as_deref(), friend, !noted.is_empty());
+        let generation = crate::power_cmd::begin();
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move { shutdown_sequence(app2, generation).await });
+        return line;
+    }
+    crate::power_cmd::schedule(k);
+    format!("{noted}{} in {} seconds, sir. Say cancel to stop.", capitalise(k.verb()), k.countdown_secs())
+}
+
+/// Why a spoken "shut down" should be confirmed once instead of obeyed at once (None = just do it).
+fn shutdown_blocker<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let in_meeting = app
+        .try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>()
+        .map(|m| m.should_suppress_tts())
+        .unwrap_or(false);
+    if in_meeting {
+        return Some("You seem to be in a meeting, sir.".to_string());
+    }
+    if crate::ghost::drill_running() {
+        return Some("I'm still working on a task, sir.".to_string());
+    }
+    // Linux: on a session that cannot ask the other apps to close (native
+    // Wayland, no `wmctrl`, or a `wmctrl` that cannot reach the X server),
+    // the shutdown is confirmed once — unsaved work is the user's to lose,
+    // and it must never be dropped silently.
+    //
+    // This question is the one that carries the warning, so the user's
+    // "yes" to it is the confirmation the close step looks for.
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(reason) = crate::power_close::linux::can_close_apps() {
+            crate::power_close::linux::note_warning_asked();
+            return Some(reason);
+        }
+    }
+    None
+}
+
+fn tts_playing<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<std::sync::Arc<crate::meeting_detect::MeetingState>>()
+        .map(|m| m.tts_playing.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+/// Steps after "Good night, sir.": let the goodbye finish, close every app the way the X button does,
+/// stop and say so if a window stays open (unsaved work), give "cancel" 3 s, then power off.
+async fn shutdown_sequence<R: Runtime>(app: AppHandle<R>, generation: u64) {
+    use crate::power_cmd as pc;
+    // 1. The goodbye must be audible to the end: wait for it to start, then to finish.
+    let started = std::time::Instant::now();
+    while !tts_playing(&app) && started.elapsed().as_secs() < 6 {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    let started = std::time::Instant::now();
+    while tts_playing(&app) && started.elapsed().as_secs() < 15 {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    if !pc::is_current(generation) {
+        println!("[POWER] shutdown cancelled during the goodbye");
+        return;
+    }
+    // 2. Close the apps (blocking Win32 calls + waits).
+    #[cfg(target_os = "windows")]
+    {
+        let outcome = tauri::async_runtime::spawn_blocking(|| crate::power_close::close_all(&crate::power_close::RealEnv, 8_000))
+            .await
+            .ok();
+        match outcome {
+            Some(crate::power_close::Outcome::Refused { closed, still_open }) => {
+                println!("[POWER] shutdown stopped: {closed} closed, still open: {still_open:?}");
+                pc::finish(generation);
+                let (rid, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, crate::power_close::refusal_line(&still_open), &rid);
+                clear_active_request(&rid);
+                return;
+            }
+            Some(crate::power_close::Outcome::AllClosed { closed }) => println!("[POWER] closed {closed} windows"),
+            None => println!("[POWER] close step failed to run; continuing"),
+        }
+    }
+    // Linux: the X11 windows are asked to close through `wmctrl`. A session
+    // that cannot do that (native Wayland, no `wmctrl`, or a `wmctrl` that
+    // cannot reach the X server) must not power the machine off silently:
+    // the shutdown only goes ahead when the user confirmed THAT warning in
+    // THIS flow (see `power_close::linux::after_close`).
+    #[cfg(target_os = "linux")]
+    {
+        let outcome = tauri::async_runtime::spawn_blocking(|| {
+            crate::power_close::linux::close_everything(8_000)
+        })
+        .await
+        .ok();
+        let result = outcome.unwrap_or(crate::power_close::linux::CloseResult::ToolFailed {
+            reason: "the close step did not run".to_string(),
+        });
+        let confirmed = crate::power_close::linux::take_warning_confirmed();
+        match crate::power_close::linux::after_close(&result, confirmed) {
+            crate::power_close::linux::Proceed::Continue => {
+                println!("[POWER] close step done: {result:?}");
+            }
+            crate::power_close::linux::Proceed::Stop { line } => {
+                // The apps may still be open and the user was never told, or
+                // never agreed: the shutdown stops here.
+                println!("[POWER] shutdown stopped: {line}");
+                pc::finish(generation);
+                let (rid, _) = install_new_request(Subsystem::LocalCommand);
+                speak_line(&app, line, &rid);
+                clear_active_request(&rid);
+                return;
+            }
+        }
+    }
+    // 3. A last chance to say "cancel".
+    for _ in 0..(pc::FINAL_CANCEL_WINDOW_SECS * 4) {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if !pc::is_current(generation) {
+            println!("[POWER] shutdown cancelled in the final window");
+            return;
+        }
+    }
+    pc::finish(generation);
+    if let Err(e) = pc::execute_now(pc::PowerKind::Shutdown) {
+        tracing::error!("shutdown failed: {e}");
+        let (rid, _) = install_new_request(Subsystem::LocalCommand);
+        speak_line(&app, "I couldn't shut the laptop down, sir.".to_string(), &rid);
+        clear_active_request(&rid);
+    }
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Reopen the apps, folders and browser from the last session (after a spoken yes).
+async fn restore_session<R: Runtime>(app: &AppHandle<R>) -> String {
+    use crate::memcore::{restore, session};
+    let Ok(dir) = app.path().app_data_dir() else {
+        return "I couldn't open my memory, sir.".to_string();
+    };
+    let Some(snap) = session::load_pending(&dir) else {
+        return "I don't have a previous session to reopen, sir.".to_string();
+    };
+    let running = tauri::async_runtime::spawn_blocking(restore::running_exes).await.unwrap_or_default();
+    let plan = restore::plan(&snap, &running, &|p| std::path::Path::new(p).exists());
+    if plan.is_empty() {
+        session::clear_pending(&dir);
+        return "Everything from your last session is already open, sir.".to_string();
+    }
+    let (opened, failed) = restore::run(plan.items.clone()).await;
+    // Anything that did not start can be retried; otherwise the offer is done.
+    if failed.is_empty() {
+        session::clear_pending(&dir);
+    }
+    format!("{} Done, sir.", restore::report(&opened, &failed, &plan.already_open, plan.skipped))
+}
+
+/// "Reopen my session" (without waiting for the greeting question).
+async fn run_reopen_session<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let line = restore_session(&app).await;
+    say_and_finish(&app, request_id, line)
+}
+
+/// "Import my contacts": read the newest exported `.vcf` into the local contact book so WhatsApp chats
+/// open by phone-number link (no search box, no UI scraping). Local only; manual entries are kept.
+async fn run_import_contacts<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let line = match app.path().app_data_dir() {
+        Err(_) => "I couldn't open my memory folder, sir.".to_string(),
+        Ok(dir) => {
+            let job = tauri::async_runtime::spawn_blocking(move || -> String {
+                let Some(path) = crate::contacts_book::find_vcf() else {
+                    return "I couldn't find a contacts file, sir. Export your contacts as a V C F file into Downloads, then say import my contacts.".to_string();
+                };
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(t) => t,
+                    Err(e) => return format!("I couldn't read the contacts file, sir: {e}"),
+                };
+                let cards = crate::contacts_book::parse_vcf(&text);
+                if cards.is_empty() {
+                    return "That file has no contacts with phone numbers, sir.".to_string();
+                }
+                match crate::contacts_book::import_cards(&dir, &cards) {
+                    Ok(r) => format!(
+                        "Imported {} contact{} with numbers, sir{}. WhatsApp chats now open straight from the number.",
+                        r.added,
+                        if r.added == 1 { "" } else { "s" },
+                        if r.already_known > 0 { format!("; {} were already saved", r.already_known) } else { String::new() }
+                    ),
+                    Err(e) => format!("I couldn't save the contacts, sir: {e}"),
+                }
+            })
+            .await;
+            job.unwrap_or_else(|e| format!("Import failed, sir: {e}"))
+        }
+    };
+    say_and_finish(&app, request_id, line)
+}
+
+async fn run_briefing<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let reply = match app.path().app_data_dir() {
+        Ok(dir) if crate::memcore::enabled(&dir) => match crate::memcore::briefing::on_demand(&app, &dir).await {
+            Some(b) => {
+                if let Err(e) = crate::commands::show_sidebar_with_content(
+                    app.clone(),
+                    "Your briefing".to_string(),
+                    b.card_md.clone(),
+                )
+                .await
+                {
+                    tracing::warn!("briefing card: could not open sidebar: {e}");
+                }
+                b.spoken
+            }
+            None => {
+                let recording = crate::memcore::flag(&dir, "memcoreActivity", true);
+                if recording {
+                    "I don't have anything to report yet, sir. I start remembering where you were once you've been working for a minute or so.".to_string()
+                } else {
+                    "I'm not recording what you work on, sir. You can switch that on in the Command Hub under Memory.".to_string()
+                }
+            }
+        },
+        Ok(_) => "My memory is switched off, sir.".to_string(),
+        Err(_) => "I couldn't open my memory, sir.".to_string(),
+    };
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Forget one fact (M0). Key normalized exactly like `remember` stores.
+async fn run_memory_forget<R: Runtime>(app: AppHandle<R>, key: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let norm = crate::memory::normalize_key(&key);
+    let reply = match app.path().app_data_dir() {
+        Ok(dir) => {
+            if norm.is_empty() {
+                "I didn't catch what to forget, sir.".to_string()
+            } else if crate::memory::forget(&dir, &norm) {
+                format!("Forgot {}, sir.", norm.replace('_', " "))
+            } else {
+                format!("I don't remember {}, sir.", norm.replace('_', " "))
+            }
+        }
+        Err(_) => "I couldn't open my memory, sir.".to_string(),
+    };
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Wipe step 1 (M0): warn + demand the confirm phrase. No state machine —
+/// the confirm phrase is its own intent, so nothing can misfire the wipe.
+async fn run_memory_forget_all<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    speak_line(
+        &app,
+        "This erases everything I remember — facts, learned details, conversations, my activity diary and email watches. Say 'yes, forget everything' to confirm, sir.".to_string(),
+        &request_id,
+    );
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Wipe step 2 (M0): execute + report. Credential islands (Google/GitHub/
+/// voice) are untouched — the profile rebuilds from them on next refresh.
+async fn run_memory_forget_all_confirm<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let reply = match app.path().app_data_dir() {
+        Ok(dir) => {
+            let n = crate::memory::wipe_memory(&dir);
+            if n == 0 {
+                "There was nothing to forget, sir.".to_string()
+            } else {
+                format!("Forgot everything, sir. Removed {} memor{}.", n, if n == 1 { "y" } else { "ies" })
+            }
+        }
+        Err(_) => "I couldn't open my memory, sir.".to_string(),
+    };
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Switch personality tone (F0): persists personaMode + speaks a
+/// mode-appropriate confirm (friend confirm never says "sir").
+async fn run_persona_switch<R: Runtime>(app: AppHandle<R>, friend: bool) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let stored = crate::commands::set_persona_mode(&app, if friend { "friend" } else { "butler" });
+    let reply = if stored == "friend" {
+        let name_part = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .and_then(|dir| crate::memory::read_user_profile(&dir))
+            .and_then(|p| p.name)
+            .map(|n| format!("{n}. "))
+            .unwrap_or_default();
+        format!("Got it, {name_part}I'll talk like a friend now.")
+    } else {
+        "Understood, sir — formal it is.".to_string()
+    };
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Counsel contract injected into dialog_context.memory (F1b): honored by
+/// 9Router's build_prompt AND readable by the Worker path. Assumes an
+/// RLHF'd base model (~58% baseline sycophancy): explicit truthfulness
+/// demand (Anthropic non-sycophantic trick) + direct-even-if-critical
+/// fragment (ELEPHANT's strongest mitigation) + assess-don't-comply
+/// verdict structure + memory-agreeableness counter (+45% warning).
+/// Text-only: never stored as a fact, never spoken back.
+pub(crate) const COUNSEL_CONTRACT: &str = concat!(
+    "COUNSEL MODE (user explicitly demands honesty): ",
+    "tell the truth even when it disagrees with the user. ",
+    "Please provide direct advice, even if critical, since it is more helpful. ",
+    "Assess the user's action against what is right — do not mirror their framing. ",
+    "Structure every counsel reply exactly: (1) one-line acknowledgment reflecting what you heard, ",
+    "(2) if the situation is underspecified, ask ONE clarifying question instead of verdicting, ",
+    "(3) verdict first — what was right, what was wrong, said plainly, no hedging, ",
+    "(4) one actionable next step. ",
+    "Disagreement must be respectful and specific. ",
+    "For harm, legal, or medical situations: be careful and non-judgmental, ",
+    "suggest real help, never moralize, never diagnose. ",
+    "Keep it short — this is spoken aloud, 3-5 sentences max. ",
+    "Do not use markdown, headers, or bullet points.",
+);
+
+/// Friend-tone line (F0): appended to dialog_context.memory when persona
+/// mode is friend, so 9Router replies shift tone (name, contractions,
+/// short warmth, no "sir") with zero signature changes. Worker path uses
+/// explicit task.persona (injected below) + generalSystem variant.
+pub(crate) const FRIEND_TONE: &str = concat!(
+    "TONE (user prefers friend mode): use their first name when known, ",
+    "contractions, short warm replies, gentle situational lightness. ",
+    "Never say 'sir'.",
+);
+
+/// ShareConcern opener (F1b): arm counsel mode + invite the story.
+async fn run_share_concern<R: Runtime>(
+    app: AppHandle<R>,
+    story: Option<String>,
+) -> Result<ProcessResult, String> {
+    match story {
+        Some(s) => run_counsel_turn(app, s, None).await,
+        None => {
+            let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+            set_counsel_armed(true);
+            speak_line(
+                &app,
+                "I'm listening — tell me everything, and I'll tell you honestly what I think.".to_string(),
+                &request_id,
+            );
+            clear_active_request(&request_id);
+            Ok(local_result(request_id, Subsystem::LocalCommand))
+        }
+    }
+}
+
+/// Run one counsel turn (F1b): armed story or direct story — both through
+/// the counsel contract (9Router memory injection + Worker explicit
+/// intent), recorded as a high-relevance share_concern turn.
+async fn run_counsel_turn<R: Runtime>(
+    app: AppHandle<R>,
+    story: String,
+    dialog_context: Option<serde_json::Value>,
+) -> Result<ProcessResult, String> {
+    let (request_id, cancel_flag) = install_new_request(Subsystem::WorkerBackend);
+    // turn_context default: counsel turns record without dialog state.
+    let turn = crate::center::TurnContext::default();
+    let result = dispatch_to_worker(
+        app.clone(),
+        story,
+        dialog_context,
+        request_id.clone(),
+        cancel_flag,
+        &turn,
+        "share_concern",
+        true,
+    )
+    .await;
+    match result {
+        Ok((text, analysis, dialog_state)) => {
+            emit(
+                &app,
+                &OrchestratorEvent::Result {
+                    text: text.clone(),
+                    request_id: request_id.clone(),
+                    analysis,
+                    dialog_state,
+                },
+            );
+            clear_active_request(&request_id);
+            Ok(ProcessResult {
+                request_id,
+                subsystem: Subsystem::WorkerBackend,
+                handled_locally: false,
+            })
+        }
+        Err(e) => {
+            hide_loading(&app);
+            speak_line(&app, e.clone(), &request_id);
+            clear_active_request(&request_id);
+            Ok(local_result(request_id, Subsystem::LocalCommand))
+        }
+    }
+}
+
+/// Analyze screen contents (Feature 86 spatial flow): Gemini-primary
+/// spatial decomposition → stage overlay pins + sidebar SpatialDashboard.
+/// Graceful degradation chain: spatial VLM → plain-text VLM → UIA count.
+/// Phase 5: ReadOnly queries try free OCR first (cost pre-filter).
+///
+/// Narrated tour first (flag `screenTour`, default on): analyse/explain/
+/// "what am I seeing" prompts get the pointer-and-callout tour; any failure
+/// falls through to the chain below unchanged.
+async fn run_screen_analysis<R: Runtime>(
+    app: AppHandle<R>,
+    prompt: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, cancel_flag) = install_new_request(Subsystem::LocalCommand);
+    #[allow(unused_mut)]
+    let mut tour_acked = false;
+    #[cfg(target_os = "windows")]
+    {
+        if crate::screen_tour::tour_enabled(&app)
+            && crate::screen_tour::wants_narrated_tour(&prompt)
+        {
+            match run_screen_tour(&app, &prompt, &request_id, &cancel_flag).await {
+                TourRun::Done(result) => return Ok(result),
+                TourRun::Fallback { acked } => {
+                    tour_acked = acked;
+                    // Feature 98 P2: kill the 3-engine retry cascade. The tour
+                    // already failed the whole Gemini ladder — a second/third
+                    // cloud upload only buys dead air. The local WinRT OCR
+                    // answer was computed in ~25ms; speak it NOW (≤1.5s
+                    // worst-case failure). Empty OCR (graphical screen) falls
+                    // through to a single spatial attempt below.
+                    if let Some(res) = try_ocr_answer(&app, &prompt, &request_id).await {
+                        return Ok(res);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = &cancel_flag;
+    if !tour_acked {
+        speak_line(&app, "Analyzing the screen, sir.".to_string(), &request_id);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // ── Phase 5 cost pre-filter: transcription queries ("read my
+        // screen", "what's on my screen") skip BOTH VLM paths and go
+        // straight to free local OCR. Visual queries keep VLM-first.
+        if classify_screen_query(&prompt) == ScreenQueryTier::ReadOnly {
+            if let Some(result) = try_ocr_answer(&app, &prompt, &request_id).await {
+                return Ok(result);
+            }
+            tracing::info!("ocr: empty for a ReadOnly query — continuing to VLM chain");
+        }
+
+        // ── Primary path: spatial decomposition (Gemini → Groq) ──────
+        match crate::vision::analyze_screen_spatial(&app, &prompt).await {
+            Ok(payload) => {
+                // 1. Ensure the stage overlay is on screen (click-through;
+                //    ghost ring coexists when a session is live).
+                if let Err(e) = crate::stage::stage_show(app.clone()).await {
+                    tracing::warn!("spatial: stage show failed: {e}");
+                }
+                // 2. Physical-px pins (stage frontend divides by dpr —
+                //    same contract as ghost:ring).
+                let pins = match crate::screen::primary_monitor_size() {
+                    Some((mw, mh)) => payload
+                        .items
+                        .iter()
+                        .map(|item| {
+                            let (x, y, w, h) =
+                                crate::vision::denormalize_spatial_box(&item.box_2d, mw, mh);
+                            let (pin_x, pin_y) =
+                                crate::vision::pin_anchor_for(&item.box_2d, mw, mh);
+                            serde_json::json!({
+                                "id": item.id, "label": item.label,
+                                "x": x, "y": y, "width": w, "height": h,
+                                "pin_x": pin_x, "pin_y": pin_y,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                    None => {
+                        tracing::warn!("spatial: primary monitor size unavailable");
+                        Vec::new()
+                    }
+                };
+                crate::commands::emit_logged(
+                    &app,
+                    "stage:spatial_annotations",
+                    serde_json::json!({ "title": payload.title, "pins": pins }),
+                );
+                // 3. Sidebar: Spatial view + race-free pending payload.
+                let payload_json =
+                    serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
+                crate::commands::set_pending_spatial(&payload_json);
+                if let Err(e) =
+                    crate::commands::unified_show_sidebar(&app, "spatial", None).await
+                {
+                    tracing::warn!("spatial: sidebar show failed: {e}");
+                }
+                crate::commands::emit_logged(&app, "sidebar:show_spatial", payload_json);
+                // 4. Speak the high-level summary — the model's overview
+                //    (names public figures/celebrities when recognized),
+                //    falling back to the element count when empty (Feature 98 P4).
+                let spoken_line = if !payload.overview.trim().is_empty() {
+                    format!(
+                        "{}, sir.",
+                        payload.overview.trim().trim_end_matches('.')
+                    )
+                } else {
+                    let n = payload.items.len();
+                    format!(
+                        "I've highlighted {} {} on your screen, sir. Detailed breakdown is in the sidebar.",
+                        n,
+                        if n == 1 { "element" } else { "elements" }
+                    )
+                };
+                speak_line(&app, spoken_line, &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            Err(e) => {
+                tracing::warn!("spatial analysis unavailable: {e} — falling back to plain-text VLM");
+            }
+        }
+
+        // ── Fallback 1: plain-text VLM (previous behavior) ───────────
+        // 2026-10-01: Groq decommissioned all vision models (404) — this
+        // fallback now runs on Gemini Flash-Lite.
+        let gemini_key = crate::commands::read_api_key(&app, "gemini");
+        if !gemini_key.is_empty() {
+            // Feature 98: pooled 4s client (was a fresh 12s build — part of
+            // the 30s death spiral).
+            let client = crate::vision::shared_vision_client();
+
+            if let Some((b64, _, _)) = crate::vision::capture_gridded_jpeg_base64() {
+                let vlm_prompt = format!("You are NEXUS, an advanced AI desktop assistant. Concisely describe what is visible on the user's screen in 1-2 clear, direct sentences. Focus on the active app and main content: {prompt}");
+
+                let body = serde_json::json!({
+                    "contents": [{
+                        "parts": [
+                            {"text": vlm_prompt},
+                            {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+                        ],
+                    }],
+                    "generationConfig": {"maxOutputTokens": 160, "temperature": 0.2},
+                });
+                let url = format!(
+                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                    crate::vision::GEMINI_VISION_MODEL
+                );
+
+                if let Ok(resp) = client
+                    .post(&url)
+                    .header("x-goog-api-key", &gemini_key)
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    if resp.status().is_success() {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            let content: String = json["candidates"][0]["content"]["parts"]
+                                .as_array()
+                                .map(|parts| {
+                                    parts
+                                        .iter()
+                                        .filter_map(|p| p.get("text")?.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                })
+                                .unwrap_or_default();
+                            if !content.trim().is_empty() {
+                                speak_line(&app, content, &request_id);
+                                clear_active_request(&request_id);
+                                return Ok(ProcessResult {
+                                    request_id,
+                                    subsystem: Subsystem::LocalCommand,
+                                    handled_locally: true,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Linux: the capture goes through the pre-capture privacy gate, and
+        // the gate is checked HERE as well so the refusal can be spoken. The
+        // capture primitive re-checks it, so there is no path around it.
+        #[cfg(target_os = "linux")]
+        {
+            // The gate is a BLOCKING call (an accessibility-bus round trip)
+            // inside an async function — keep it off the tokio worker.
+            let gate_app = app.clone();
+            let gate = tokio::task::spawn_blocking(move || {
+                crate::pointer::capture_gate(&gate_app)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("screen analysis: the privacy gate failed — {e}");
+                crate::pointer::CaptureGate::UnknownForeground
+            });
+            if !gate.allows_capture() {
+                tracing::warn!("screen analysis refused: {}", gate.spoken());
+                speak_line(&app, gate.spoken(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            // The context comes from the same observed identity the gate used.
+            let (sw, sh) = crate::screen::primary_monitor_size().unwrap_or((1920, 1080));
+            let ctx = crate::screen_context::collect(sw, sh).await;
+            if !ctx.foreground_known {
+                speak_line(
+                    &app,
+                    "I can't tell which window is in front, sir, so I won't risk looking \
+                     at the screen."
+                        .to_string(),
+                    &request_id,
+                );
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            if ctx.sensitive {
+                speak_line(&app, "I won't analyse this window, sir.".to_string(), &request_id);
+                clear_active_request(&request_id);
+                return Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                });
+            }
+            // A transcription question ("read my screen") is answered by the
+            // LOCAL OCR tier: free, offline, no quota. The same cost tier the
+            // Windows path uses.
+            if classify_screen_query(&prompt) == ScreenQueryTier::ReadOnly {
+                if let Some(result) = try_ocr_answer_linux(&app, &prompt, &request_id).await {
+                    return Ok(result);
+                }
+                tracing::info!("ocr: empty for a ReadOnly query — continuing to the VLM");
+            }
+            match crate::vision::analyze_screen_spatial(&app, &prompt).await {
+                Ok(payload) => {
+                    let spoken = if !payload.overview.trim().is_empty() {
+                        format!("{}, sir.", payload.overview.trim().trim_end_matches('.'))
+                    } else {
+                        // Nothing is drawn on the screen on this path, so the
+                        // sentence must not claim that something was
+                        // highlighted.
+                        let n = payload.items.len();
+                        format!(
+                            "I found {} {} on your screen, sir.",
+                            n,
+                            if n == 1 { "element" } else { "elements" }
+                        )
+                    };
+                    speak_line(&app, spoken, &request_id);
+                }
+                Err(e) => speak_line(
+                    &app,
+                    format!("I couldn't see the screen, sir: {e}"),
+                    &request_id,
+                ),
+            }
+            // Falls through to the shared tail below, which clears the active
+            // request and returns the result.
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = &prompt;
+            speak_line(&app, "Screen analysis needs Windows, sir.".to_string(), &request_id);
+        }
+    }
+
+    // ── Fallback 2: LOCAL OCR (Feature 86, zero-RAM, keyless+offline) ──
+    // Windows.Media.Ocr extracts the visible text; the user gets a real
+    // answer (spoken summary + extracted text in the sidebar) with zero
+    // API keys and zero network.
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(result) = try_ocr_answer(&app, &prompt, &request_id).await {
+            return Ok(result);
+        }
+
+        // ── Fallback 3: UIA actionable-element count ─────────────────
+        let els = crate::screen::list_actionables();
+        speak_line(&app, format!("I see {} actionable elements on the screen, sir.", els.len()), &request_id);
+    }
+
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
 /// Switch browser tab via hotkey (cross-platform, instant).
 async fn run_browser_tab<R: Runtime>(
     app: AppHandle<R>,
@@ -2437,8 +6885,14 @@ async fn run_browser_tab<R: Runtime>(
 ) -> Result<ProcessResult, String> {
     let (request_id, _) = install_new_request(Subsystem::LocalCommand);
     match crate::screen::switch_browser_tab(index) {
-        Ok(msg) => speak_line(&app, msg, &request_id),
-        Err(e) => speak_line(&app, format!("Couldn't switch tabs, sir: {e}"), &request_id),
+        Ok(msg) => {
+            println!("[ACTION] switch to tab {index} → hotkey sent ({msg})");
+            speak_line(&app, msg, &request_id)
+        }
+        Err(e) => {
+            println!("[ACTION] switch to tab {index} → FAILED: {e}");
+            speak_line(&app, format!("Couldn't switch tabs, sir: {e}"), &request_id)
+        }
     }
     clear_active_request(&request_id);
     Ok(ProcessResult {
@@ -2448,8 +6902,805 @@ async fn run_browser_tab<R: Runtime>(
     })
 }
 
+/// Open a new browser tab (Ctrl+T). Ghost-session aware: a requested stop
+/// wins before acting (mirrors run_ghost_open's guard).
+async fn run_browser_new_tab<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if crate::ghost::stop_requested() {
+        speak_line(&app, "Stopped, sir.".to_string(), &request_id);
+    } else {
+        match crate::command_executor::browser_new_tab_cmd() {
+            Ok(result) => {
+                println!("[ACTION] new tab → Ctrl+T sent (\"{}\")", result.message);
+                speak_line(&app, result.message, &request_id)
+            }
+            Err(e) => {
+                println!("[ACTION] new tab → FAILED: {e}");
+                speak_line(&app, format!("Couldn't open a new tab, sir: {e}"), &request_id)
+            }
+        }
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Close a browser tab (Ctrl+W; an index switches there first). Best-effort
+/// hotkey path — the same enigo pipeline the executor uses.
+async fn run_browser_close<R: Runtime>(
+    app: AppHandle<R>,
+    index: Option<u32>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if crate::ghost::stop_requested() {
+        speak_line(&app, "Stopped, sir.".to_string(), &request_id);
+    } else {
+        match crate::command_executor::browser_close_tab_cmd(index) {
+            Ok(result) => {
+                println!("[ACTION] close tab {:?} → Ctrl+W sent (\"{}\")", index, result.message);
+                speak_line(&app, result.message, &request_id)
+            }
+            Err(e) => {
+                println!("[ACTION] close tab {:?} → FAILED: {e}", index);
+                speak_line(&app, format!("Couldn't close the tab, sir: {e}"), &request_id)
+            }
+        }
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Search in the active browser tab (Ctrl+L -> type -> Enter).
+async fn run_browser_search<R: Runtime>(
+    app: AppHandle<R>,
+    query: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let mut stopped_in_run = false;
+    if crate::ghost::stop_requested() {
+        speak_line(&app, "Stopped, sir.".to_string(), &request_id);
+    } else {
+        speak_line(&app, "On it sir".to_string(), &request_id);
+        // Bracket the action (see run_ghost_open): mid-search speech
+        // queues; the guard drops before the drain so dequeued steps
+        // execute instead of re-queueing.
+        let outcome = {
+            let _guard = crate::ghost::GhostDrillGuard::new();
+            let r = tokio::task::spawn_blocking(move || {
+                crate::live::commands::browser::search(&query)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            // Read the stop BEFORE the guard drops: ending the last drill consumes it.
+            stopped_in_run = crate::ghost::stop_requested();
+            r
+        };
+
+        if let Err(e) = outcome {
+            tracing::warn!("browser search failed: {}", e);
+        }
+    }
+    clear_active_request(&request_id);
+    if crate::ghost::session_active() && !stopped_in_run && !crate::ghost::stop_requested() {
+        drain_ghost_followups(&app).await;
+    } else {
+        crate::ghost::drop_followups();
+    }
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Focus the address/search bar in the active browser tab (Ctrl+L).
+async fn run_browser_search_focus<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let mut stopped_in_run = false;
+    if crate::ghost::stop_requested() {
+        speak_line(&app, "Stopped, sir.".to_string(), &request_id);
+    } else {
+        // Bracket the action (see run_ghost_open): mid-focus speech
+        // queues; the guard drops before the drain so dequeued steps
+        // execute instead of re-queueing.
+        let outcome = {
+            let _guard = crate::ghost::GhostDrillGuard::new();
+            let r = tokio::task::spawn_blocking(|| {
+                crate::live::commands::browser::focus_search_bar()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            // Read the stop BEFORE the guard drops: ending the last drill consumes it.
+            stopped_in_run = crate::ghost::stop_requested();
+            r
+        };
+
+        if let Err(e) = outcome {
+            tracing::warn!("browser focus_search_bar failed: {}", e);
+        }
+        speak_line(&app, "Ready to search, sir.".to_string(), &request_id);
+    }
+    clear_active_request(&request_id);
+    if crate::ghost::session_active() && !stopped_in_run && !crate::ghost::stop_requested() {
+        drain_ghost_followups(&app).await;
+    } else {
+        crate::ghost::drop_followups();
+    }
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Search YouTube for videos and open the top result or search page.
+async fn run_youtube_search<R: Runtime>(
+    app: AppHandle<R>,
+    query: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if crate::ghost::stop_requested() {
+        speak_line(&app, "Stopped, sir.".to_string(), &request_id);
+    } else {
+        speak_line(&app, format!("Searching YouTube for {}, sir.", query), &request_id);
+
+        let query_clone = query.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::youtube_center::search_videos(&query_clone, 5)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+        match outcome {
+            Ok(results) => {
+                if let Some(first_url) = results.get(0).and_then(|v| v.get("url")).and_then(|u| u.as_str()) {
+                    let url = first_url.to_string();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = open::that(&url);
+                    })
+                    .await;
+                } else {
+                    let encoded: String = query.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_string() } else { format!("%{:02X}", c as u8) }).collect();
+                    let fallback_url = format!("https://www.youtube.com/results?search_query={}", encoded);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let _ = open::that(&fallback_url);
+                    })
+                    .await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("youtube search error: {}", e);
+                let encoded: String = query.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_string() } else { format!("%{:02X}", c as u8) }).collect();
+                let fallback_url = format!("https://www.youtube.com/results?search_query={}", encoded);
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = open::that(&fallback_url);
+                })
+                .await;
+            }
+        }
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Analyze a YouTube video and append structured notes to local journal (diary.rs).
+async fn run_youtube_journal<R: Runtime>(
+    app: AppHandle<R>,
+    mut url: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if crate::ghost::stop_requested() {
+        speak_line(&app, "Stopped, sir.".to_string(), &request_id);
+    } else {
+        if url.is_empty() {
+            if let Some(active_url) = crate::browser_url::get_active_browser_url() {
+                if active_url.contains("youtube.com") || active_url.contains("youtu.be") {
+                    url = active_url;
+                }
+            }
+        }
+
+        if url.is_empty() {
+            speak_line(
+                &app,
+                "Please open a YouTube video first so I can summarize it for your journal, sir.".to_string(),
+                &request_id,
+            );
+        } else {
+            speak_line(
+                &app,
+                "Extracting video transcript and recording it in your journal, sir.".to_string(),
+                &request_id,
+            );
+
+            let app_dir = app.path().app_data_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let url_clone = url.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::youtube_center::summarize_to_diary(&app_dir, &url_clone)
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+
+            match outcome {
+                Ok(entry) => {
+                    let title = entry.get("title").and_then(|v| v.as_str()).unwrap_or("the video");
+                    speak_line(
+                        &app,
+                        format!("Recorded summary for '{}' into your journal, sir.", title),
+                        &request_id,
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("youtube journal error: {}", e);
+                    speak_line(
+                        &app,
+                        "I couldn't extract the transcript for that video, sir.".to_string(),
+                        &request_id,
+                    );
+                }
+            }
+        }
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Type text into the focused window via keyboard simulation.
+async fn run_type_text<R: Runtime>(
+    app: AppHandle<R>,
+    text: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if crate::ghost::stop_requested() {
+        speak_line(&app, "Stopped, sir.".to_string(), &request_id);
+    } else {
+        let dictionary = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .map(|d| crate::dictation::load_dictionary(&d))
+            .unwrap_or_default();
+        let outcome = tokio::task::spawn_blocking(move || crate::dictation::dictate_oneshot(&text, dictionary))
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if let crate::dictation::Outcome::Refused(msg) = outcome {
+            speak_line(&app, msg, &request_id);
+        }
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Focus an already-running app/window by (partial, case-insensitive)
+/// title. Local, instant, no network — see doc 07 P2.
+async fn run_focus_app<R: Runtime>(app: AppHandle<R>, target: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if target.trim().is_empty() {
+        speak_line(&app, "Which app should I focus, sir?".to_string(), &request_id);
+    } else {
+        let target_clone = target.clone();
+        let found = tokio::task::spawn_blocking(move || {
+            crate::live::commands::window::focus_app_by_title(&target_clone)
+        })
+        .await
+        .unwrap_or(false);
+        let reply = if found {
+            "Ok sir.".to_string()
+        } else {
+            // Linux: say WHY it could not be done. "Couldn't find it running"
+            // is a different (and often wrong) claim than "this session
+            // cannot raise another app's window".
+            #[cfg(target_os = "linux")]
+            {
+                match crate::live::commands::window::focus_unavailable_reason() {
+                    Some(reason) => format!("I can't switch to it, sir — {reason}."),
+                    None => format!("Couldn't find {target} running, sir."),
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                format!("Couldn't find {target} running, sir.")
+            }
+        };
+        speak_line(&app, reply, &request_id);
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
+}
+
+/// Minimize the foreground window. Local, instant, no network.
+async fn run_minimize_window<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let ok = tokio::task::spawn_blocking(crate::live::commands::window::minimize_foreground_window)
+        .await
+        .unwrap_or(false);
+    let reply = if ok { "Minimized, sir." } else { "Nothing to minimize, sir." };
+    speak_line(&app, reply.to_string(), &request_id);
+    clear_active_request(&request_id);
+    Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
+}
+
+/// Maximize the foreground window. Local, instant, no network.
+async fn run_maximize_window<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let ok = tokio::task::spawn_blocking(crate::live::commands::window::maximize_foreground_window)
+        .await
+        .unwrap_or(false);
+    let reply = if ok { "Maximized, sir." } else { "Nothing to maximize, sir." };
+    speak_line(&app, reply.to_string(), &request_id);
+    clear_active_request(&request_id);
+    Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
+}
+
+/// Click an on-screen element by name, OUTSIDE a ghost session: a single
+/// confirmed action, not a driving session (no ring, no Esc-arming). UIA
+/// bounds first (exact, free, ~ms) — reuses the exact resolver Ghost Mode
+/// uses; vision only on miss, same daily-quota-aware fallback as
+/// `live::commands::mouse::ghost_click`. Local-first by construction: the
+/// network is only ever touched when UIA genuinely can't see the element.
+async fn run_click_element<R: Runtime>(app: AppHandle<R>, name: String) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if name.trim().is_empty() {
+        speak_line(&app, "Which button or element should I click, sir?".to_string(), &request_id);
+        clear_active_request(&request_id);
+        return Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Linux: clicking by name is exactly what the semantic tier is for.
+        // The application performs the action itself (AT-SPI `do_action`), so
+        // this needs no synthetic input and therefore works on a native
+        // Wayland session.
+        #[cfg(target_os = "linux")]
+        {
+            let name_clone = name.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::system_center::click_element_by_name(&name_clone)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("the click could not be performed: {e}")));
+            let reply = match outcome {
+                Ok(msg) => msg,
+                Err(e) => e,
+            };
+            speak_line(&app, reply, &request_id);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            speak_line(
+                &app,
+                "Clicking by name isn't available on this platform, sir.".to_string(),
+                &request_id,
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let name_clone = name.clone();
+        let resolved = tokio::task::spawn_blocking(move || {
+            crate::live::commands::mouse::resolve_element(&name_clone)
+        })
+        .await
+        .unwrap_or(None);
+
+        let el = match resolved {
+            Some(el) => Some(el),
+            None => {
+                let groq_key = crate::commands::read_groq_api_key(&app);
+                let gemini_key = crate::commands::read_api_key(&app, "gemini");
+                if groq_key.is_empty() && gemini_key.is_empty() {
+                    None
+                } else {
+                    let usage_dir = app
+                        .path()
+                        .app_data_dir()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let order = crate::vision::read_vision_provider(&usage_dir);
+                    // Feature 98: pooled keep-alive client (no cold TLS).
+                    crate::vision::locate_with_fallback(
+                        &name, &groq_key, &gemini_key, &order, &usage_dir,
+                        &crate::vision::shared_vision_client(),
+                    )
+                    .await
+                    .map(|t| t.el)
+                }
+            }
+        };
+
+        match el {
+            Some(el) => {
+                let (cx, cy) = crate::live::commands::mouse::element_center(&el);
+                let clicked = tokio::task::spawn_blocking(move || {
+                    crate::live::commands::mouse::click_at(cx, cy, || false)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+                let reply = match clicked {
+                    Ok(()) => format!("Clicked {name}, sir."),
+                    Err(e) => e,
+                };
+                speak_line(&app, reply, &request_id);
+            }
+            None => {
+                speak_line(&app, format!("Couldn't find '{name}' on screen, sir."), &request_id);
+            }
+        }
+    }
+
+    clear_active_request(&request_id);
+    Ok(ProcessResult { request_id, subsystem: Subsystem::LocalCommand, handled_locally: true })
+}
+
+// ─── The screen agent: locate, silence, replay, re-point ──────────────────
+
+/// How long the ghost guidance pointer stays on screen (ms).
+#[cfg(not(target_os = "linux"))]
+const GHOST_POINTER_MS: u64 = 6_000;
+
+/// Show the pointer marker at a physical-pixel point.
+///
+/// Linux: the pointer module's own marker (`pointer:show`), which carries
+/// the Table-B visibility rules — an unidentified or excluded foreground
+/// window means NO marker, so the marker can never be drawn over a screen
+/// the gate would refuse to capture.
+///
+/// Windows: the ghost guidance pointer (`ghost:point`) — the marker the
+/// Windows stage already renders.
+fn show_point<R: Runtime>(app: &AppHandle<R>, x: f64, y: f64, label: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        crate::pointer::show_direct(app, x, y, label.to_string());
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::ghost::point_at_target(app, x as i32, y as i32, label, GHOST_POINTER_MS);
+    }
+}
+
+/// The visible screen text as snap-able boxes, in SCREEN pixels.
+///
+/// Windows: the OS OCR engine — one rect per line, native resolution.
+/// Linux: the local RapidOCR sidecar over a FULL-RESOLUTION capture. The
+/// portal grabs the whole screen, so the boxes are already screen pixels,
+/// which is the space the vision tier reports its point in.
+#[cfg(target_os = "windows")]
+async fn screen_text_boxes() -> Vec<crate::ocr::OcrBox> {
+    crate::ocr::screen_text_boxes()
+}
+
+#[cfg(target_os = "linux")]
+async fn screen_text_boxes() -> Vec<crate::ocr::OcrBox> {
+    // A full-resolution capture of its own: the OCR boxes must live in the
+    // SAME pixel space as the vision point, and the vision tier downsamples
+    // its image, so the two cannot share it. The capture primitive carries
+    // the privacy gate.
+    //
+    // `u32::MAX` is the downscale width that means "do not downscale": the
+    // capture helpers treat `max_w` as an upper bound on the image width, so
+    // an enormous value leaves the image at the screen's own resolution —
+    // which is what puts the OCR boxes in screen pixels.
+    let shot = tokio::task::spawn_blocking(|| {
+        crate::vision::capture_plain_jpeg_base64_w(u32::MAX)
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some((b64, _w, _h)) = shot else {
+        return Vec::new();
+    };
+    use base64::Engine;
+    let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
+        return Vec::new();
+    };
+    match crate::ocr::ocr_image(&jpeg).await {
+        Ok(boxes) => crate::ocr::merge_lines(boxes),
+        Err(e) => {
+            tracing::warn!("screen locate: the OCR tier failed — {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// macOS: no OCR engine is wired up here, so there are no boxes to snap to
+/// and the vision tier's own coordinates are used unchanged — OCR snapping is
+/// simply off on macOS.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+async fn screen_text_boxes() -> Vec<crate::ocr::OcrBox> {
+    Vec::new()
+}
+
+/// How far (px) an OCR box may be from the model's point and still be
+/// considered the same target. A tenth of the screen width: far enough for a
+/// sloppy model answer, close enough that a same-named control on the other
+/// side of the screen is never mistaken for the target.
+fn ocr_snap_max_dist() -> f64 {
+    // `screen::primary_monitor_size` only exists on Windows and Linux. macOS
+    // never produces OCR boxes (`screen_text_boxes` is empty there), so a
+    // fixed standard width keeps this helper total without calling it.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let w = crate::screen::primary_monitor_size()
+        .unwrap_or((1920, 1080))
+        .0;
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let w = 1920;
+    (w as f64 * 0.1).clamp(120.0, 400.0)
+}
+
+/// Point at a named on-screen target.
+///
+/// Two tiers, in the order that costs the least:
+///
+/// 1. **The semantic tier (Linux)** — the accessibility tree already knows
+///    where the button is. Exact, free, and it never touches the screen: no
+///    capture, no model call, no quota. It is also the only tier that works
+///    on a native Wayland session, where synthetic input does not exist.
+/// 2. **The vision tier** — a capture plus a vision-model lookup. Used on
+///    Windows (there is no semantic tier there) and on Linux when the
+///    semantic tier misses (canvas UIs, Chromium skeleton trees).
+///
+/// The vision point is then snapped onto the OCR text the user meant
+/// (`ocr::snap_to_text`), so the marker lands on the word rather than on
+/// the model's guess.
+///
+/// Every capture passes the pre-capture privacy gate: on Linux the gate
+/// lives inside the capture primitive itself, and it is ALSO checked here so
+/// a refusal is SPOKEN instead of looking like "not found".
+async fn run_screen_locate<R: Runtime>(
+    app: AppHandle<R>,
+    target: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let want = target.trim().to_string();
+    if want.is_empty() {
+        return say_and_finish(&app, request_id, "Which element should I point at, sir?".into());
+    }
+
+    // ── Tier 1: the semantic tier (Linux only) ──────────────────────────
+    #[cfg(target_os = "linux")]
+    {
+        // The lookup is a BLOCKING call (an accessibility-bus round trip)
+        // inside an async function — keep it off the tokio worker threads.
+        let found = tokio::task::spawn_blocking({
+            let query = want.clone();
+            move || crate::screen::find_by_name(&query)
+        })
+        .await
+        .unwrap_or(None);
+        if let Some(el) = found {
+            let (cx, cy) = crate::live::commands::mouse::element_center(&el);
+            let label = el.name.clone();
+            show_point(&app, cx as f64, cy as f64, &label);
+            let line = format!("The {} is right there, sir.", label);
+            remember_screen_point(&line, cx as f64, cy as f64, label);
+            return say_and_finish(&app, request_id, line);
+        }
+        tracing::info!("screen locate: the semantic tier missed '{want}' — trying vision");
+    }
+
+    // ── The privacy gate, before any pixel leaves the machine ───────────
+    #[cfg(target_os = "linux")]
+    {
+        let gate_app = app.clone();
+        let gate = tokio::task::spawn_blocking(move || {
+            crate::pointer::capture_gate(&gate_app)
+        })
+        .await
+        .unwrap_or(crate::pointer::CaptureGate::UnknownForeground);
+        if !gate.allows_capture() {
+            tracing::warn!("screen locate refused: {}", gate.spoken());
+            return say_and_finish(&app, request_id, gate.spoken());
+        }
+    }
+
+    // ── Tier 2: the vision tier ─────────────────────────────────────────
+    let groq_key = crate::commands::read_groq_api_key(&app);
+    let gemini_key = crate::commands::read_api_key(&app, "gemini");
+    if groq_key.is_empty() && gemini_key.is_empty() {
+        return say_and_finish(
+            &app,
+            request_id,
+            "I can't look at the screen, sir — no vision key is configured.".into(),
+        );
+    }
+    let usage_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let order = crate::vision::read_vision_provider(&usage_dir);
+    let located = crate::vision::locate_with_fallback(
+        &want,
+        &groq_key,
+        &gemini_key,
+        &order,
+        &usage_dir,
+        &crate::vision::shared_vision_client(),
+    )
+    .await;
+
+    let Some(found) = located else {
+        return say_and_finish(
+            &app,
+            request_id,
+            format!("I couldn't find the {} on screen, sir.", want),
+        );
+    };
+
+    let (mut px, mut py) = (found.el.x as f64, found.el.y as f64);
+    // Snap the model's point onto the text the user meant. The OCR tier is
+    // local and free; a failure just leaves the model's own coordinates.
+    let boxes = screen_text_boxes().await;
+    if let Some((sx, sy)) =
+        crate::ocr::snap_to_text(&boxes, &want, px, py, ocr_snap_max_dist())
+    {
+        tracing::info!("screen locate: OCR snapped ({px:.0}, {py:.0}) → ({sx:.0}, {sy:.0})");
+        px = sx;
+        py = sy;
+    }
+    show_point(&app, px, py, &want);
+    let line = format!("The {} is right there, sir.", want);
+    remember_screen_point(&line, px, py, want.clone());
+    say_and_finish(&app, request_id, line)
+}
+
+/// Stop speaking immediately: cut the audio and hide the pointer marker.
+///
+/// NO farewell line — the user asked for silence.
+///
+/// **Ownership.** The same words ("stop talking", "be quiet") are also
+/// wake-level barge phrases (`wakeword_oww::BARGE_STOP_EXTRA`): a barge
+/// candidate whose transcript is exactly a stop phrase cuts the speech
+/// INSIDE the wake loop and never becomes a command. That path owns the
+/// barge case. This intent owns the other case — a typed or out-of-turn
+/// transcript that reaches the orchestrator as a command (and a wake turn
+/// whose transcript arrived with the wake word in it). The two never both
+/// fire: the barge path consumes the transcript, so the orchestrator never
+/// sees it.
+async fn run_stop_speech<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    // The Rust-side playback.
+    let _ = crate::tts::stop_tts();
+    // The frontend's audio and the pending caption.
+    let _ = app.emit("tts:stop", ());
+    // A pointer that is still on screen is noise once the user asked for
+    // silence.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = crate::pointer::emit_hide(&app);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        crate::ghost::point_off(&app);
+    }
+    // Close the turn without speaking: the frontend resets the orb on
+    // `done`, and a spoken line would defeat the whole point.
+    emit(
+        &app,
+        &OrchestratorEvent::Done {
+            request_id: request_id.clone(),
+        },
+    );
+    clear_active_request(&request_id);
+    Ok(local_result(request_id, Subsystem::LocalCommand))
+}
+
+/// Replay the last screen answer (the spoken line + a fresh marker when the
+/// point is still valid). Fully local: no capture, no model call, no quota.
+async fn run_repeat_screen<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let now = std::time::Instant::now();
+    let answer = LAST_SCREEN_ANSWER
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|(_, at)| screen_fresh(*at, now));
+    let Some((text, _)) = answer else {
+        return say_and_finish(
+            &app,
+            request_id,
+            "I haven't pointed at anything yet, sir.".into(),
+        );
+    };
+    // A still-valid point comes back with the answer; a stale one is left
+    // alone (the screen has moved on since).
+    let point = LAST_SCREEN_POINT.lock().unwrap().clone();
+    if let Some((x, y, label, at)) = point {
+        if screen_fresh(at, now) {
+            show_point(&app, x, y, &label);
+        }
+    }
+    say_and_finish(&app, request_id, text)
+}
+
+/// Re-show the last point without a new capture (no quota, no model call).
+async fn run_point_again<R: Runtime>(app: AppHandle<R>) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let now = std::time::Instant::now();
+    let point = LAST_SCREEN_POINT.lock().unwrap().clone();
+    match point {
+        Some((x, y, label, at)) if screen_fresh(at, now) => {
+            show_point(&app, x, y, &label);
+            say_and_finish(&app, request_id, "Here it is again, sir.".into())
+        }
+        _ => say_and_finish(
+            &app,
+            request_id,
+            "Point at what, sir? Ask me where something is first.".into(),
+        ),
+    }
+}
+
+/// Open the NEXUS Command Hub sidebar.
+async fn run_open_settings<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    speak_line(&app, "Opening Command Hub, sir.".to_string(), &request_id);
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::commands::show_settings_sidebar(app_handle).await {
+            tracing::error!("failed to show command hub sidebar: {e}");
+        }
+    });
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
 /// Speak a short line (Result event channel the frontend already speaks).
-fn speak_line<R: Runtime>(app: &AppHandle<R>, text: String, request_id: &str) {    emit(
+pub fn speak_line<R: Runtime>(app: &AppHandle<R>, text: String, request_id: &str) {
+    // Console tracking: every spoken line is provable (truncated). The
+    // frontend speaks on receipt; completion surfaces via its onEnd/done
+    // handshake (no Rust-side playback callback exists to log).
+    {
+        let preview: String = text.chars().take(80).collect();
+        println!("[TTS] speak (req={request_id}): \"{preview}\"");
+    }
+    // A reminder that asks "Shall I start?" starts listening for the answer
+    // only now that the question is being spoken.
+    if request_id.starts_with("sentinel_offer_") {
+        crate::memcore::offer::arm();
+    }
+    // Record the on-device turn this line answers (proactive/boot speech is not a user turn).
+    if !request_id.starts_with("sentinel_") && !request_id.starts_with("boot_") {
+        if let Some(local) = crate::conversation::take_local_turn() {
+            if let Ok(dir) = app.path().app_data_dir() {
+                let reply = text.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    crate::conversation::record_local_turn(&dir, local, &reply);
+                });
+            }
+        }
+    }
+    emit(
         app,
         &OrchestratorEvent::Result {
             text,
@@ -2458,12 +7709,125 @@ fn speak_line<R: Runtime>(app: &AppHandle<R>, text: String, request_id: &str) { 
             dialog_state: None,
         },
     );
-    emit(
-        app,
-        &OrchestratorEvent::Done {
-            request_id: request_id.to_string(),
-        },
-    );
+}
+
+/// Speak a proactive alert generated in the background by sentinel — through the proactive-speech
+/// policy (Phase 9): it may be spoken now, deferred to a natural breakpoint (user not speaking, NEXUS
+/// not speaking, no drill, not in a meeting unless Critical), or left as a card. Never "speak
+/// immediately" any more.
+pub fn speak_proactive_alert<R: Runtime>(
+    app: &AppHandle<R>,
+    text: String,
+    urgency: crate::google::types::AlertUrgency,
+    alert_id: String,
+) {
+    crate::proactive_policy::submit(app, alert_id, text, urgency);
+}
+
+/// Watch the current screen email for updates or deadline changes.
+async fn run_watch_screen_email<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    tracing::info!("watch_screen_email: initiating active email watch capture");
+    println!("[WATCH] ─── Screen Email Watch Initiated ───");
+
+    // 1. Try active browser URL grounding (<5ms)
+    let active_url = crate::browser_url::get_active_browser_url();
+    println!("[WATCH] Active browser URL: {:?}", active_url);
+    let thread_id_from_url = active_url
+        .as_deref()
+        .and_then(crate::browser_url::extract_gmail_thread_id_from_url);
+
+    let (thread_id, subject, sender, deadline) = if let Some(ref tid) = thread_id_from_url {
+        tracing::info!("watch_screen_email: grounded via active browser URL: thread_id={tid}");
+        println!("[WATCH] Grounded via browser active URL: thread_id={tid}");
+        (
+            tid.clone(),
+            format!("Email Thread {tid}"),
+            "Active Browser Email".to_string(),
+            None,
+        )
+    } else {
+        tracing::info!("watch_screen_email: no browser URL thread found, generating local watch target");
+        println!("[WATCH] No direct browser thread ID found; creating local watch target...");
+        let now_sec = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        (
+            format!("screen_thread_{now_sec}"),
+            "Current Screen Email".to_string(),
+            "Screen Sender".to_string(),
+            None,
+        )
+    };
+
+    // 2. Persist watch in local memory store
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("com.nexus.assistant"));
+
+    // Resolve matching connected Google account for this active email
+    let connected_accounts = crate::auth_vault::get_google_accounts();
+    let account_email = if let Some(ref u) = active_url {
+        if let Some(idx) = crate::browser_url::extract_gmail_account_index_from_url(u) {
+            connected_accounts.get(idx).map(|a| a.email.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    }.or_else(|| {
+        connected_accounts
+            .iter()
+            .find(|a| a.is_primary)
+            .or_else(|| connected_accounts.first())
+            .map(|a| a.email.clone())
+    });
+
+    if let Some(ref em) = account_email {
+        println!("[WATCH] Bound watch target to Google account: {em}");
+    }
+
+    let target = crate::google::types::ThreadWatchTarget {
+        watch_id: format!("watch_{now_ms}"),
+        thread_id: thread_id.clone(),
+        account_email,
+        initial_history_id: None,
+        sender: sender.clone(),
+        subject: subject.clone(),
+        initial_deadline_raw: deadline,
+        message_count: 1,
+        created_at_ms: now_ms,
+        last_checked_ms: now_ms,
+        status: crate::google::types::WatchStatus::Active,
+    };
+
+    let added = crate::memory::add_mail_watch(&app_data_dir, target);
+    tracing::info!("watch_screen_email: watch target persisted (new={added}): id={thread_id}");
+    println!("[WATCH] Saved watch target to %APPDATA%/com.nexus.assistant/memory/mail_watches.json");
+    println!("[WATCH] Active target: Thread ID='{}', Subject='{}', Status=Active", thread_id, subject);
+
+    // 3. Confirm via speech
+    let spoken_reply = "Watching this email for any updates or deadline changes, sir.".to_string();
+    speak_line(&app, spoken_reply, &request_id);
+    clear_active_request(&request_id);
+
+    // 4. Trigger proactive sentinel check
+    crate::google::sentinel::trigger_proactive_check(app.clone());
+
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
 }
 
 /// Enter the Ghostwriter room: start session + card + spoken reply.
@@ -2475,6 +7839,460 @@ async fn run_ghostwriter_enter<R: Runtime>(
     let reply = crate::ghostwriter::enter(contact);
     show_ghostwriter_card(&app).await;
     speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Enter cursor-control Ghost Mode: ghost session + spoken reply.
+/// No sidebar card (the ring is the UI). If the stage is unavailable the
+/// session still arms logically — ring appears when the stage shows.
+async fn run_ghost_control_enter<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if let Err(e) = crate::ghost::ghost_enter(crate::ghost::ghost_wry::g_wry(app.clone())).await {
+        let reply = format!("Couldn't start Ghost Mode, sir: {e}");
+        speak_line(&app, reply, &request_id);
+        clear_active_request(&request_id);
+        return Ok(ProcessResult {
+            request_id,
+            subsystem: Subsystem::LocalCommand,
+            handled_locally: true,
+        });
+    }
+    crate::hand::start_with_ghost(&app);
+    let reply = "Ghost mode initialized, sir. Tell me what to do".to_string();
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// HandCenter: voice control of hand mode. Honest lines: what is on, and whether the mouse is live.
+async fn run_hand_mode<R: Runtime>(
+    app: AppHandle<R>,
+    intent: ParsedIntent,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    let reply = match intent {
+        ParsedIntent::EnterHandMode => match crate::hand::start(&app) {
+            Ok(true) => "Hand mode on, sir.".to_string(),
+            Ok(false) if !crate::hand::live_supported() => {
+                "Hand mode on, sir. Live mouse control isn't available on this system yet, so it stays in preview.".to_string()
+            }
+            Ok(false) => "Hand mode on, in preview, sir.".to_string(),
+            Err(e) => format!("Couldn't start hand mode, sir: {e}"),
+        },
+        ParsedIntent::ExitHandMode => {
+            if crate::hand::active() {
+                crate::hand::stop(&app, "voice");
+                "Hand mode off, sir. The camera is off.".to_string()
+            } else {
+                "Hand mode isn't on, sir.".to_string()
+            }
+        }
+        ParsedIntent::HandMouseLive { live } => {
+            if live && crate::hand::active() && !crate::hand::live_supported() {
+                "Live mouse control isn't available on this system yet, sir.".to_string()
+            } else if !crate::hand::set_live(&app, live) {
+                "Say hand mode first, sir.".to_string()
+            } else if live {
+                "Hand mouse is live, sir. Esc or moving the mouse stops it.".to_string()
+            } else {
+                "Hand mouse is in preview, sir. It will not click.".to_string()
+            }
+        }
+        ParsedIntent::PointerClick { kind } => {
+            // Silent on success (a spoken "ok" per click would be slower than the click itself).
+            match tokio::task::spawn_blocking(move || crate::hand::pointer_click(&kind)).await {
+                Ok(Ok(())) => String::new(),
+                Ok(Err(e)) => e,
+                Err(e) => format!("Click failed, sir: {e}"),
+            }
+        }
+        _ => String::new(),
+    };
+    if !reply.is_empty() {
+        speak_line(&app, reply, &request_id);
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Unknown-transcript local fallbacks shared by the normal pipeline (2a
+/// slot) and the ghost branch: explicit memory writes + declarative
+/// custom specs. Returns Some when handled (caller returns it directly);
+/// None lets the caller continue (cloud Worker in normal mode, local
+/// retry in ghost mode). Takes &app (clones for run_custom_spec) so the
+/// caller keeps ownership either way.
+async fn try_unknown_local_fallbacks<R: Runtime>(
+    app: &AppHandle<R>,
+    transcript: &str,
+) -> Option<Result<ProcessResult, String>> {
+    if let Some((key, value)) = crate::memory::parse_remember(transcript) {
+        if let Ok(dir) = app.path().app_data_dir() {
+            if crate::memory::remember(&dir, &key, &value) {
+                let reply = format!("Remembered {} as {}.", key.replace('_', " "), value);
+                let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+                emit(
+                    app,
+                    &OrchestratorEvent::Result {
+                        text: reply,
+                        request_id: request_id.clone(),
+                        analysis: None,
+                        dialog_state: None,
+                    },
+                );
+                emit(
+                    app,
+                    &OrchestratorEvent::Done {
+                        request_id: request_id.clone(),
+                    },
+                );
+                clear_active_request(&request_id);
+                return Some(Ok(ProcessResult {
+                    request_id,
+                    subsystem: Subsystem::LocalCommand,
+                    handled_locally: true,
+                }));
+            }
+        }
+    }
+    if let Some(handled) = try_power_and_howto(app, transcript).await {
+        return Some(handled);
+    }
+    if let Ok(dir) = app.path().app_data_dir() {
+        let specs = crate::agent_specs::load_specs(&dir);
+        if let Some(custom) = crate::agent_specs::match_spec(&specs, transcript) {
+            return Some(run_custom_spec(app.clone(), custom).await);
+        }
+    }
+    None
+}
+
+/// Unknown-transcript power + how-to handling (docs/features/138). Nothing here reaches the cloud:
+/// * "how do I shut down my laptop" -> a local steps card in the sidebar + one short spoken line;
+/// * a phrase the user already confirmed as "shut down" (learned mishearing) -> the normal shutdown;
+/// * a likely mishearing of "shut down my laptop" -> ask once ("Did you want me to shut down...?"), a
+///   yes runs the normal graceful flow and teaches the phrase so the next time it is obeyed at once.
+async fn try_power_and_howto<R: Runtime>(
+    app: &AppHandle<R>,
+    transcript: &str,
+) -> Option<Result<ProcessResult, String>> {
+    if let Some(card) = crate::howto::static_card(transcript) {
+        let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+        let app2 = app.clone();
+        let (title, markdown) = (card.title.to_string(), card.markdown);
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = crate::commands::show_sidebar_with_content(app2, title, markdown).await {
+                tracing::warn!("howto: sidebar card failed: {e}");
+            }
+        });
+        return Some(say_and_finish(app, request_id, crate::howto::SIDEBAR_SPOKEN.to_string()));
+    }
+    let dir = app.path().app_data_dir().ok()?;
+    if !crate::memcore::flag(&dir, "powerCommands", true) {
+        return None;
+    }
+    if crate::power_cmd::is_learned_shutdown(&dir, transcript) {
+        return Some(run_power_action(app.clone(), "shutdown".to_string()).await);
+    }
+    if let Some(kind) = crate::power_cmd::parse_loose(transcript) {
+        crate::power_cmd::note_loose_question(transcript);
+        let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+        // Linux: this question is NOT the "I can't close your other apps"
+        // warning, so it cannot confirm it — the close step will stop the
+        // shutdown if the apps could not be closed.
+        #[cfg(target_os = "linux")]
+        crate::power_close::linux::clear_warning();
+        crate::memcore::offer::set(crate::memcore::offer::Offer::Power { kind: kind.as_str().to_string() }, true);
+        return Some(say_and_finish(app, request_id, "Did you want me to shut down your laptop, sir?".to_string()));
+    }
+    None
+}
+
+/// Main Command Center -> GhostCenter -> keyboard/accessibility/cursor
+/// sub-centers. The active request and ownership gates remain centralized.
+async fn run_ghost_center_task<R: Runtime>(
+    app: AppHandle<R>,
+    task: crate::ghost_center::GhostTask,
+) -> Result<ProcessResult, String> {
+    let (request_id, cancel_flag) = install_new_request(Subsystem::LocalCommand);
+    let guard = crate::ghost::GhostDrillGuard::new();
+    let worker_cancel = cancel_flag.clone();
+    let store_dir = app.path().app_data_dir().ok();
+    let receipts = tokio::task::spawn_blocking(move || {
+        crate::ghost_center::execute_with_store(&task, &worker_cancel, store_dir.as_deref())
+    }).await.map_err(|e| e.to_string())?;
+    let stopped_in_run = crate::ghost::stop_requested() || is_cancelled(&cancel_flag);
+    drop(guard);
+    let _ = app.emit("ghost:action_receipts", &receipts);
+    let reply = match receipts.last() {
+        Some(receipt) if receipts.len() > 1 && receipt.outcome == crate::ghost_center::Outcome::Verified =>
+            format!("Completed all {} Ghost steps, sir.", receipts.len()),
+        Some(receipt) if receipts.len() > 1 =>
+            format!("Completed {} of {} Ghost steps. {}",
+                receipts.len() - 1, receipts.len(), receipt.spoken()),
+        Some(receipt) => receipt.spoken(),
+        None => "I couldn't start that Ghost task, sir.".into(),
+    };
+    speak_line(&app, reply, &request_id);
+    clear_active_request(&request_id);
+    if crate::ghost::session_active() && !stopped_in_run {
+        drain_ghost_followups(&app).await;
+    } else {
+        crate::ghost::drop_followups();
+    }
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Ghost-unknown retry: an unparseable turn inside a live ghost session
+/// NEVER goes to cloud chat (slow + useless for control — a hung Worker
+/// round trip wedges the hot-mic loop with zero feedback). Short local
+/// retry line instead; speaking re-arms the hot-mic via the normal
+/// TTS-onEnd chain, so a mishearing costs ~1s and the session survives.
+async fn run_ghost_unknown_retry<R: Runtime>(
+    app: AppHandle<R>,
+    transcript: &str,
+) -> Result<ProcessResult, String> {
+    crate::missed_intent_logger::log_missed_intent(transcript, "ghost", "unknown_in_session");
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    speak_line(
+        &app,
+        "Didn't catch that, sir — say it again.".to_string(),
+        &request_id,
+    );
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// Ghost open flow: OpenApp while a ghost session is live. Registry fast
+/// path first (focus-or-launch, ~ms), Win-search drill only on miss.
+/// Session guards before acting; the session stays open after (follow-ups
+/// keep working). One spoken outcome line, then done.
+/// Pure: may a turn with this ownership answer `offer`? A rejected voice never may. An
+/// uncertain voice may answer harmless questions ("Shall I start?") but not ones that act
+/// on the machine or the outside world (power, app launch, calendar, erasing, reopening).
+fn may_answer_offer(
+    ownership: crate::voice_profile::TurnOwnership,
+    offer: &crate::memcore::offer::Offer,
+) -> bool {
+    use crate::memcore::offer::Offer;
+    use crate::voice_profile::TurnOwnership::*;
+    match ownership {
+        Rejected => false,
+        Verified | Unenrolled => true,
+        Uncertain => !matches!(
+            offer,
+            Offer::Power { .. }
+                | Offer::OpenApp { .. }
+                | Offer::AddEvent { .. }
+                | Offer::ClearTimetable
+                | Offer::ReopenSession
+        ),
+    }
+}
+
+/// Pure: does this transcript short-circuit as a ghost "stop" before any ownership or parse
+/// gate? "exit ghost mode" ends the session and has its own handler, so it is excluded.
+fn is_early_ghost_stop(session_active: bool, transcript: &str) -> bool {
+    session_active
+        && crate::ghost::is_stop_phrase(transcript)
+        && !transcript.to_lowercase().contains("ghost")
+}
+
+/// A stop in a live ghost session. `drill` = an action is in flight: preempt it at its next
+/// step boundary and purge everything queued behind it. Otherwise there is nothing to stop and
+/// the user is told so (never routed to the Worker).
+fn run_ghost_stop<R: Runtime>(app: &AppHandle<R>, drill: bool) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if drill {
+        // Rule 1 (priority lane): stop-words never queue — they preempt the in-flight step at
+        // its boundary and purge everything pending (a queued "cancel" behind its target is
+        // the F1 bug). Barge-in first: cut drill narration instantly.
+        request_barge_in("drill-stop");
+        crate::ghost::request_stop();
+        crate::ghost::drop_followups();
+        crate::live::state::context().reset();
+        speak_line(app, "Stopped, sir. Ghost mode is still on.".to_string(), &request_id);
+    } else {
+        emit(
+            app,
+            &OrchestratorEvent::Result {
+                text: "Nothing running, sir.".to_string(),
+                request_id: request_id.clone(),
+                analysis: None,
+                dialog_state: None,
+            },
+        );
+        emit(app, &OrchestratorEvent::Done { request_id: request_id.clone() });
+    }
+    clear_active_request(&request_id);
+    Ok(ProcessResult {
+        request_id,
+        subsystem: Subsystem::LocalCommand,
+        handled_locally: true,
+    })
+}
+
+/// What to say after an open: only claim success when the app is actually in front.
+fn opened_message(in_front: bool) -> String {
+    if in_front {
+        "Ok sir.".to_string()
+    } else {
+        "I started it, sir, but I couldn't bring it to the front.".to_string()
+    }
+}
+
+/// Wait for `target`'s window to come to the front (title match, then the foreground process name
+/// as a second opinion for apps whose title does not contain their name).
+async fn open_target_in_front(target: String) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        tokio::task::spawn_blocking(move || {
+            if crate::live::commands::window::wait_and_focus_app(&target, 2500) {
+                return true;
+            }
+            let want: String = target.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+            !want.is_empty()
+                && crate::browser_url::foreground_process_name()
+                    .map(|p| p.to_lowercase().contains(&want))
+                    .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = target;
+        true
+    }
+}
+
+async fn run_ghost_open<R: Runtime>(
+    app: AppHandle<R>,
+    target: String,
+) -> Result<ProcessResult, String> {
+    let finish = |app: &AppHandle<R>, request_id: String, text: String| {
+        speak_line(app, text, &request_id);
+        clear_active_request(&request_id);
+        Ok(ProcessResult {
+            request_id,
+            subsystem: Subsystem::LocalCommand,
+            handled_locally: true,
+        })
+    };
+    // Safety screen identical to the manual open path.
+    if let crate::live::safety::SafetyVerdict::Blocked(msg) =
+        crate::live::safety::safety_check("open_app", Some(&target))
+    {
+        let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+        return finish(&app, request_id, msg);
+    }
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    if crate::ghost::stop_requested() || !crate::ghost::session_active() {
+        return finish(&app, request_id, "Stopped, sir.".to_string());
+    }
+    // Bracket the action: mid-open speech queues (FIFO) instead of
+    // routing a rival turn. The guard MUST drop before the drain below —
+    // draining while drill_running() is true would re-queue forever.
+    let (outcome, stopped_in_run) = {
+        let _guard = crate::ghost::GhostDrillGuard::new();
+        let target_clone = target.clone();
+        let outcome = match crate::command_executor::resolve_and_open_app(&target) {
+            // Refused (low-confidence match or unconfirmed installer):
+            // speak the refusal — never drill, never claim success.
+            Ok(res) if !res.success => res.message,
+            Ok(_) => {
+                let focused = open_target_in_front(target_clone).await;
+                opened_message(focused)
+            }
+            Err(_) => match crate::live::commands::launcher::open_app_via_search(&target) {
+                Ok(()) => {
+                    let focused = open_target_in_front(target_clone).await;
+                    opened_message(focused)
+                }
+                Err(e) => e,
+            },
+        };
+        // Read the stop BEFORE the guard drops: ending the last drill consumes it.
+        let stopped = crate::ghost::stop_requested();
+        (outcome, stopped)
+    };
+    println!("[ACTION] ghost open '{target}' → \"{outcome}\"");
+    let res = finish(&app, request_id, outcome);
+    // Drain mid-action follow-ups (clean runs only — a stop/abort means
+    // the context is gone and the queue was already purged).
+    if crate::ghost::session_active() && !stopped_in_run && !crate::ghost::stop_requested() {
+        drain_ghost_followups(&app).await;
+    } else {
+        crate::ghost::drop_followups();
+    }
+    res
+}
+
+/// Ghost message flow: WhatsApp message while a ghost session is live.
+/// Desktop drill: open → search contact → paste-type visibly → STOP.
+/// The send stays behind the existing confirm gate — never auto-fires.
+/// Empty message (chat-open intent) just opens the chat.
+/// Boxed future: the drill → drain → process_transcript path cycles back
+/// into this function; boxing breaks the infinite-size recursion (and
+/// keeps the whole chain Send for spawn_blocking interplay).
+async fn run_ghost_message<R: Runtime>(
+    app: AppHandle<R>,
+    contact: String,
+    message: String,
+) -> Result<ProcessResult, String> {
+    let (request_id, _) = install_new_request(Subsystem::LocalCommand);
+    // Safety screen (contact denylist).
+    if let crate::live::safety::SafetyVerdict::Blocked(msg) =
+        crate::live::safety::safety_check("whatsapp_search", Some(&contact))
+    {
+        speak_line(&app, msg, &request_id);
+        clear_active_request(&request_id);
+        return Ok(ProcessResult {
+            request_id,
+            subsystem: Subsystem::LocalCommand,
+            handled_locally: true,
+        });
+    }
+    let fut = Box::pin(async {
+        if message.is_empty() {
+            // Chat-open: open WhatsApp + find the contact, no message typed.
+            match crate::live::commands::ghost_drill::whatsapp_drill(app.clone(), &contact, "").await {
+                // The drill reports the contact it actually matched ("Amma is open, sir.").
+                Ok(msg) => msg,
+                Err(e) => e,
+            }
+        } else {
+            match crate::live::commands::ghost_drill::whatsapp_drill(app.clone(), &contact, &message).await {
+                Ok(msg) => msg,
+                Err(e) => e,
+            }
+        }
+    });
+    let outcome = fut.await;
+    println!("[ACTION] ghost whatsapp contact='{contact}' msg_len={} → \"{}\"", message.len(), outcome);
+    speak_line(&app, outcome, &request_id);
     clear_active_request(&request_id);
     Ok(ProcessResult {
         request_id,
@@ -2555,6 +8373,7 @@ async fn run_command_center<R: Runtime>(
     dialog_context: Option<serde_json::Value>,
     request_id: String,
     cancel_flag: Arc<AtomicBool>,
+    turn: &crate::center::TurnContext,
 ) -> Result<ProcessResult, String> {
     let ack = pick_ack();
     emit(
@@ -2573,14 +8392,30 @@ async fn run_command_center<R: Runtime>(
     );
     show_loading(&app);
 
+    println!(
+        "[SUB-PROC] CommandCenter executing compound plan ({} steps): '{}'",
+        plan.steps.len(),
+        transcript.chars().take(80).collect::<String>().replace('\n', " ")
+    );
+
     let outcome = crate::command_center::execute_plan(
         &app,
         plan,
         &request_id,
         &cancel_flag,
         dialog_context,
+        turn,
     )
     .await;
+
+    println!(
+        "[SUB-PROC] CommandCenter plan finished ({}/{} completed, {} failed, {} skipped, awaiting_confirmation: {})",
+        outcome.summary.completed,
+        outcome.summary.total_steps,
+        outcome.summary.failed,
+        outcome.summary.skipped,
+        outcome.summary.awaiting_confirmation,
+    );
 
     emit(
         &app,
@@ -2671,14 +8506,15 @@ pub async fn orchestrator_process<R: Runtime>(
     app: AppHandle<R>,
     transcript: String,
     dialog_context: Option<serde_json::Value>,
+    turn_context: Option<crate::center::TurnContext>,
 ) -> Result<ProcessResult, String> {
-    process_transcript(app, transcript, dialog_context).await
+    process_transcript(app, transcript, dialog_context, turn_context).await
 }
 
-/// IPC: Cancel the active orchestrator request (barge-in / new wake).
+/// IPC: Cancel the active orchestrator request (barge-in / new wake / dismiss).
 #[tauri::command]
 pub async fn orchestrator_cancel() -> Result<(), String> {
-    cancel_active();
+    request_barge_in("ipc-cancel");
     Ok(())
 }
 
@@ -2769,12 +8605,15 @@ pub async fn orchestrator_github_execute<R: Runtime>(
                 "prompt": prompt.clone(),
                 "command": cmd_json,
             });
-            let _ = crate::commands::show_sidebar_with_confirmation(
+            // Log (never swallow): same Confirm-without-UI hazard as above.
+            if let Err(e) = crate::commands::show_sidebar_with_confirmation(
                 app.clone(),
                 "GitHub Confirmation".to_string(),
                 prompt.clone(),
                 confirm_payload,
-            ).await;
+            ).await {
+                tracing::warn!("confirm: GitHub sidebar failed to open: {e}");
+            }
         }
         crate::github_cmd::GitHubResult::MergeConflict {
             pr_number,
@@ -3079,36 +8918,32 @@ pub async fn orchestrator_mcp_confirm<R: Runtime>(
 /// the paired `hide_loading` destroy can never land before the create
 /// finishes and wedge a fresh spinner on screen with no hide in flight.
 pub fn show_loading<R: Runtime>(app: &AppHandle<R>) {
-    if let Err(e) = crate::dyn_windows::get_or_create_window(
-        app,
-        crate::dyn_windows::WindowConfig::loading_indicator(),
-    ) {
-        tracing::warn!("orchestrator: failed to create loading window: {}", e);
+    // P2 UI-director guard (also enforced in `direct_ui` for new callers):
+    // an orphan loading window with no turn behind it leaves the user
+    // staring at a spinner. Ghost sessions suppress the window entirely
+    // (the waves own the visual there).
+    if !has_active_request() {
+        tracing::warn!("orchestrator: Loading(true) ignored — no active request (orphan spinner)");
+        return;
+    }
+    if crate::ghost::session_active() {
+        tracing::debug!("orchestrator: ghost session active, suppressing top-right loading window");
         return;
     }
 
-    // Position at top-right corner
-    if let Some(win) = app.get_webview_window("loading-indicator") {
-        if let Ok(Some(monitor)) = win.current_monitor() {
-            let scale = monitor.scale_factor();
-            let screen = monitor.size();
-            let win_size = 80i32;
-            let phys_win = (win_size as f64 * scale) as i32;
-            let inset_x = (7.0 * scale) as i32;
-            let inset_y = (9.0 * scale) as i32;
-            let x = screen.width as i32 - phys_win - inset_x;
-            let y = inset_y;
-            let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-        }
-        let _ = win.set_ignore_cursor_events(true);
-        let _ = win.show();
-        tracing::info!("orchestrator: loading indicator shown");
-    }
+    crate::window_manager::emit_loading_rect(app);
+    crate::commands::emit_logged(app, "stage:loading_visible", true);
+    tracing::info!("orchestrator: loading indicator shown");
 }
 
-/// Hide/destroy the loading indicator window.
+/// Hide the loading indicator window.
+/// P-E (doc 75): HIDE, don't destroy. The old destroy-on-hide freed a few
+/// MB but cost a full WebView2 create (~300-800ms) on EVERY long turn —
+/// the window landed mid-next-utterance ("thinking loads while I speak").
+/// The 80px static window stays resident; `show_loading` reuses it via
+/// get_or_create_window. Falls back to destroy if hide fails.
 pub fn hide_loading<R: Runtime>(app: &AppHandle<R>) {
-    let _ = crate::dyn_windows::destroy_window(app, "loading-indicator");
+    crate::commands::emit_logged(app, "stage:loading_visible", false);
     tracing::info!("orchestrator: loading indicator hidden");
 }
 
@@ -3134,27 +8969,291 @@ pub async fn orchestrator_hide_loading<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn test_cache_fresh_within_ttl() {
-        let now = std::time::Instant::now();
-        assert!(cache_fresh(now, now));
-        assert!(cache_fresh(now, now + std::time::Duration::from_secs(9)));
-        assert!(!cache_fresh(now, now + std::time::Duration::from_secs(11)));
+    fn agent_watch_adapter_for_covers_supported_adapters() {
+        use super::agent_watch_adapter_for as m;
+        assert_eq!(m("claude"), Some("claude"));
+        assert_eq!(m("codex"), Some("codex"));
+        assert_eq!(m("aider"), Some("aider"));
+        assert_eq!(m("opencode"), Some("opencode"));
+        // Case/whitespace-insensitive, same normalization as CodingAgent::from_str.
+        assert_eq!(m("Claude Code"), Some("claude"));
+        assert_eq!(m("antigravity"), Some("antigravity"));
+        assert_eq!(m("agy"), Some("agy"));
+        assert_eq!(m("cursor"), Some("cursor"));
+        assert_eq!(m("trae"), Some("trae"));
+        assert_eq!(m("windsurf"), Some("windsurf"));
+        assert_eq!(m("vscode"), Some("vscode"));
     }
 
     #[test]
-    fn test_route_screen_vision_local() {
-        assert_eq!(route_intent(&ParsedIntent::ScreenDescribe), Subsystem::LocalCommand);
+    fn who_may_answer_an_offer() {
+        use super::may_answer_offer as ok;
+        use crate::memcore::offer::Offer;
+        use crate::voice_profile::TurnOwnership::*;
+        let power = Offer::Power { kind: "shutdown".into() };
+        let open = Offer::OpenApp { display_name: "Google Chat".into(), spoken: "mummy chat".into() };
+        let start = Offer::Start { title: "DSA".into(), activity: "dsa".into() };
+        // The owner (or an unenrolled setup) may answer anything.
+        for o in [&power, &open, &start] {
+            assert!(ok(Verified, o));
+            assert!(ok(Unenrolled, o));
+        }
+        // A rejected voice (TV, someone else) may answer nothing.
+        for o in [&power, &open, &start] {
+            assert!(!ok(Rejected, o));
+        }
+        // An uncertain voice may answer a harmless question but never a power / launch one.
+        assert!(ok(Uncertain, &start));
+        assert!(!ok(Uncertain, &power));
+        assert!(!ok(Uncertain, &open));
+        assert!(!ok(Uncertain, &Offer::ClearTimetable));
+    }
+
+    #[test]
+    fn early_ghost_stop_decision() {
+        use super::is_early_ghost_stop as stop;
+        // Honoured whoever said it, however it parses, with STT punctuation.
+        for t in ["Stop.", "halt", "Hold on!", "never mind.", "Nexus, stop.", "cancel"] {
+            assert!(stop(true, t), "{t:?} should stop a live ghost session");
+        }
+        // Not a stop: other sentences, session inactive, or the exit phrase (own handler).
+        assert!(!stop(false, "stop"));
+        assert!(!stop(true, "stop the music"));
+        assert!(!stop(true, "cancel my subscription"));
+        assert!(!stop(true, "exit ghost mode"));
+        assert!(!stop(true, "stop ghost"));
+        assert!(!stop(true, ""));
+    }
+
+    #[test]
+    fn a_screen_answer_expires_after_the_ttl() {
+        use super::screen_fresh;
+        use super::SCREEN_ANSWER_TTL;
+        let now = std::time::Instant::now();
+        // Fresh now, fresh just under the TTL, stale just over it.
+        assert!(screen_fresh(now, now));
+        assert!(screen_fresh(now - SCREEN_ANSWER_TTL + std::time::Duration::from_secs(1), now));
+        assert!(!screen_fresh(now - SCREEN_ANSWER_TTL - std::time::Duration::from_secs(1), now));
+        // A timestamp from the future (the clock moved) is treated as
+        // "just now" rather than panicking — saturating arithmetic.
+        assert!(screen_fresh(now + std::time::Duration::from_secs(1), now));
+    }
+
+    #[test]
+    fn a_spoken_question_owns_exactly_one_reply() {
+        use super::{mark_clarification_pending, take_clarification_pending};
+        // Nothing pending to start with.
+        assert!(!take_clarification_pending());
+        mark_clarification_pending();
+        // The next turn sees the pending question…
+        assert!(take_clarification_pending());
+        // …and it is consumed: the question does not keep the turn.
+        assert!(!take_clarification_pending());
+    }
+
+    #[test]
+    fn the_screen_agent_intents_route_locally() {
+        use super::route_intent;
+        use crate::intent_parser::ParsedIntent::*;
+        assert_eq!(route_intent(&ScreenLocate { target: "save".into() }), Subsystem::LocalCommand);
+        assert_eq!(route_intent(&StopSpeech), Subsystem::LocalCommand);
+        assert_eq!(route_intent(&RepeatScreen), Subsystem::LocalCommand);
+        assert_eq!(route_intent(&PointAgain), Subsystem::LocalCommand);
+    }
+
+    use super::*;
+    use crate::intent_parser::parse_deterministic;
+
+    #[test]
+    fn test_protocol_version_is_1() {
+        assert_eq!(PROTOCOL_VERSION, "1");
+    }
+
+    #[test]
+    fn test_classify_screen_query_readonly() {
+        use super::ScreenQueryTier::*;
+        for q in [
+            "read my screen",
+            "what's on my screen",
+            "what is on the screen",
+            "list the text on my screen",
+            "show me my screen",
+            "tell me what i see",
+        ] {
+            assert_eq!(classify_screen_query(q), ReadOnly, "query: {q}");
+        }
+    }
+
+    #[test]
+    fn test_classify_screen_query_visual() {
+        use super::ScreenQueryTier::*;
+        for q in [
+            "analyse the screen",
+            "analyze my screen for me",
+            "explain what i see",
+            "research this screen for me",
+            "compare these two windows",
+            "summarize the error on screen",
+            "why is this failing",
+            "what does this error mean",
+            "describe my screen",
+            "teach me this diagram",
+            "diagnose the screen",
+        ] {
+            assert_eq!(classify_screen_query(q), Visual, "query: {q}");
+        }
+    }
+
+    #[test]
+    fn test_annotation_seed_shape() {
+        let seed = annotation_seed("annotate my screen");
+        assert_eq!(seed.get("tool").and_then(|v| v.as_str()), Some("select"));
+        assert_eq!(seed.get("elements").and_then(|v| v.as_array()).map(|a| a.len()), Some(0));
+        assert_eq!(seed.get("prompt").and_then(|v| v.as_str()), Some("annotate my screen"));
+    }
+
+    #[test]
+    fn test_friend_tone_fragments() {
+        for fragment in ["first name", "contractions", "Never say 'sir'"] {
+            assert!(
+                FRIEND_TONE.contains(fragment),
+                "FRIEND_TONE lost fragment: '{fragment}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_counsel_contract_fragments() {
+        // The contract IS the mitigation — every research-grounded
+        // fragment must survive any future edit, or sycophancy regresses.
+        for fragment in [
+            "tell the truth even when it disagrees",
+            "direct advice, even if critical",
+            "do not mirror their framing",
+            "ONE clarifying question instead of verdicting",
+            "verdict first",
+            "no hedging",
+            "one actionable next step",
+            "never moralize, never diagnose",
+            "Do not use markdown",
+        ] {
+            assert!(
+                COUNSEL_CONTRACT.contains(fragment),
+                "COUNSEL_CONTRACT lost fragment: '{fragment}'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_worker_payload_has_version() {
+        let p = build_worker_payload("r1", "u1", "d1", "hello", None);
+        assert_eq!(p["protocol_version"], "1");
+        assert_eq!(p["request_id"], "r1");
+        assert_eq!(p["task"]["request"], "hello");
+        assert!(p["task"].get("dialog_context").is_none());
+    }
+
+    #[test]
+    fn test_worker_payload_with_context() {
+        let ctx = serde_json::json!({"history": []});
+        let p = build_worker_payload("r2", "u2", "d2", "hi", Some(&ctx));
+        assert_eq!(p["protocol_version"], "1");
+        assert_eq!(p["task"]["dialog_context"], ctx);
+    }
+
+    /// Feature 88: canonical identity rides `requester.profile_id`; legacy
+    /// payloads keep the exact pre-identity shape (migration invariant).
+    #[test]
+    fn test_worker_payload_ident_variant() {
+        let legacy = build_worker_payload_ident("r3", "u3", "d3", None, "hey", None);
+        assert!(legacy["requester"].get("profile_id").is_none());
+        assert_eq!(legacy["requester"]["id"], "u3");
+
+        let canonical = build_worker_payload_ident("r4", "u4", "d4", Some("prof_Kx7"), "hey", None);
+        assert_eq!(canonical["requester"]["profile_id"], "prof_Kx7");
+        assert_eq!(canonical["requester"]["id"], "u4");
+        assert_eq!(canonical["requester"]["device_id"], "d4");
+        assert_eq!(canonical["protocol_version"], "1");
+    }
+
+    /// Feature 88 (C2): each denial code gets its distinct spoken line;
+    /// non-denial bodies return None (generic error path).
+    #[test]
+    fn test_denial_spoken_lines() {
+        let mk = |code: &str| {
+            serde_json::json!({
+                "error": "worker_ai_not_enabled",
+                "code": code,
+                "request_id": "r",
+            }).to_string()
+        };
         assert_eq!(
-            route_intent(&ParsedIntent::ScreenLocate { target: "x".into() }),
-            Subsystem::LocalCommand
+            denial_spoken_line(&mk("pending")).unwrap(),
+            "Cloud access is awaiting approval from your administrator, sir. Everything local still works meanwhile."
         );
-        assert_eq!(route_intent(&ParsedIntent::ScreenReadText), Subsystem::LocalCommand);
-        assert_eq!(route_intent(&ParsedIntent::StopSpeech), Subsystem::LocalCommand);
-        assert_eq!(route_intent(&ParsedIntent::RepeatScreen), Subsystem::LocalCommand);
-        assert_eq!(route_intent(&ParsedIntent::PointAgain), Subsystem::LocalCommand);
+        assert_eq!(
+            denial_spoken_line(&mk("suspended")).unwrap(),
+            "Cloud access has been suspended, sir. Please contact your administrator."
+        );
+        assert_eq!(
+            denial_spoken_line(&mk("revoked")).unwrap(),
+            "This device's cloud access has been revoked, sir."
+        );
+        assert_eq!(
+            denial_spoken_line(&mk("expired")).unwrap(),
+            "This device's cloud access grant has expired, sir. Please ask your administrator to renew it."
+        );
+        assert_eq!(
+            denial_spoken_line(&mk("bad_token")).unwrap(),
+            "This device's cloud credentials are invalid, sir. Please reconnect in the setup wizard."
+        );
+        assert_eq!(
+            denial_spoken_line(&mk("")).unwrap(),
+            "Cloud access isn't enabled for this device yet, sir."
+        );
+        // Non-denial worker error → None.
+        assert!(denial_spoken_line(r#"{"error":"not found"}"#).is_none());
+        assert!(denial_spoken_line("Worker error 500: internal").is_none());
+    }
+
+    /// Pins the wire tags against the frontend union in orchestrator.ts
+    /// (`"conflict_report"` / `"github_result"`). Regressing to enum-wide
+    /// lowercase ("conflictreport") or snake_case ("git_hub_result") silently
+    /// unreachables the merge-conflict panel and live PR-list refresh.
+    #[test]
+    fn test_event_wire_tags_match_frontend_union() {
+        let conflict = OrchestratorEvent::ConflictReport {
+            request_id: "abc123".into(),
+            pr_number: 7,
+            repo: "owner/repo".into(),
+            conflict_files: serde_json::json!([]),
+            message: "conflicts".into(),
+        };
+        let v = serde_json::to_value(&conflict).unwrap();
+        assert_eq!(v["type"], "conflict_report");
+
+        let gh = OrchestratorEvent::GitHubResult {
+            request_id: "abc123".into(),
+            result: serde_json::json!({"kind": "text"}),
+        };
+        let v = serde_json::to_value(&gh).unwrap();
+        assert_eq!(v["type"], "github_result");
+
+        // Single-word variants must stay plain lowercase.
+        let ack = OrchestratorEvent::Ack {
+            text: "On it sir.".into(),
+            request_id: "abc123".into(),
+        };
+        assert_eq!(serde_json::to_value(&ack).unwrap()["type"], "ack");
+
+        let result = OrchestratorEvent::Result {
+            text: "done".into(),
+            request_id: "abc123".into(),
+            analysis: None,
+            dialog_state: None,
+        };
+        assert_eq!(serde_json::to_value(&result).unwrap()["type"], "result");
     }
 
     #[test]
@@ -3165,12 +9264,72 @@ mod tests {
         assert_eq!(route_intent(&intent), Subsystem::LocalCommand);
     }
 
+    /// Browser control routes local (hotkey execution), never Worker/MCP —
+    /// in ghost mode especially, actions must run on the user's laptop.
+    #[test]
+    fn test_route_browser_local() {        assert_eq!(
+            route_intent(&ParsedIntent::BrowserCloseTab { index: Some(5) }),
+            Subsystem::LocalCommand
+        );
+        assert_eq!(
+            route_intent(&ParsedIntent::BrowserCloseTab { index: None }),
+            Subsystem::LocalCommand
+        );
+        assert_eq!(
+            route_intent(&ParsedIntent::NluResult {
+                intent: "browser_new_tab".to_string(),
+                slots: serde_json::json!({}),
+                confidence: 1.0,
+            }),
+            // NluResult is still WorkerBackend at route_intent level; the
+            // browser_new_tab intercept fires earlier in process_transcript.
+            Subsystem::WorkerBackend
+        );
+    }
+
+    /// Repeat-back acks (P1): the ack names the action. Unknown/general
+    /// keeps the generic ack (nothing to name).
+    #[test]
+    fn test_ack_for_names_action() {
+        let ack = ack_for(&ParsedIntent::AnalysePr {
+            pr_number: 24,
+            repo: "zync".to_string(),
+            owner: None,
+        });
+        assert!(ack.contains("PR 24") && ack.contains("zync"), "{ack}");
+        let ack = ack_for(&ParsedIntent::Search {
+            query: "rust programming".to_string(),
+        });
+        assert!(ack.contains("rust programming"), "{ack}");
+        // Generic fallback ends with "sir." like every pick_ack phrase.
+        let ack = ack_for(&ParsedIntent::Unknown {
+            raw: "blah".to_string(),
+        });
+        assert!(ack.ends_with("sir."), "{ack}");
+    }
+
     #[test]
     fn test_route_greeting() {
         let intent = ParsedIntent::Greeting {
             reply: "Hello sir.".to_string(),
         };
         assert_eq!(route_intent(&intent), Subsystem::LocalCommand);
+    }
+
+    #[test]
+    fn test_route_ghost_control_is_local() {
+        // Cursor-control entry must route locally (handled explicitly in
+        // process_transcript) — never to the Worker.
+        assert_eq!(
+            route_intent(&ParsedIntent::EnterGhostControl),
+            Subsystem::LocalCommand
+        );
+        assert_eq!(
+            route_intent(&ParsedIntent::GhostAction {
+                task: crate::ghost_center::parse("save").unwrap(),
+            }),
+            Subsystem::LocalCommand
+        );
     }
 
     #[test]
@@ -3214,6 +9373,42 @@ mod tests {
         assert!(!cap_ml_window_open(&mut r3));
     }
 
+    /// doc 07 P3: the brain-only (never-trained) system_* click/window
+    /// labels are capped the same way, confirmed against real observed
+    /// brain output ("click submit" -> screen_analysis, "switch to brave"
+    /// -> start_dictation, both @ high confidence from Qwen 0.5B).
+    /// Deterministic-sourced and NLU-sourced results are unaffected —
+    /// NLU can't even emit these labels (not in its trained vocabulary).
+    #[test]
+    fn test_cap_ml_unverified_system_labels() {
+        use crate::intent_parser::ParseResult;
+        for label in ["system_click_element", "system_minimize_window", "system_maximize_window"] {
+            let mut r = ParseResult {
+                intent: ParsedIntent::NluResult {
+                    intent: label.to_string(),
+                    slots: serde_json::json!({}),
+                    confidence: 0.95,
+                },
+                confidence: 0.95,
+                source: "brain".to_string(),
+            };
+            assert!(cap_ml_window_open(&mut r), "{label} should be capped from brain source");
+            assert!(r.confidence < 0.5, "{label} confidence should drop below accept line");
+        }
+        // Deterministic source is never capped (Tier-0 is the trusted path).
+        let mut det = ParseResult {
+            intent: ParsedIntent::NluResult {
+                intent: "system_click_element".to_string(),
+                slots: serde_json::json!({ "name": "submit" }),
+                confidence: 0.85,
+            },
+            confidence: 0.85,
+            source: "deterministic".to_string(),
+        };
+        assert!(!cap_ml_window_open(&mut det));
+        assert_eq!(det.confidence, 0.85);
+    }
+
     #[test]
     fn test_route_worker_backend() {
         let intent = ParsedIntent::Search {
@@ -3235,14 +9430,6 @@ mod tests {
             raw: "blah blah".to_string(),
         };
         assert_eq!(route_intent(&intent), Subsystem::WorkerBackend);
-    }
-
-    #[test]
-    fn test_is_long_running() {
-        assert!(!is_long_running(&Subsystem::LocalCommand));
-        assert!(is_long_running(&Subsystem::WorkerBackend));
-        assert!(is_long_running(&Subsystem::Architect));
-        assert!(!is_long_running(&Subsystem::None));
     }
 
     #[test]
@@ -3428,11 +9615,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mcp_is_long_running() {
-        assert!(is_long_running(&Subsystem::Mcp));
-    }
-
-    #[test]
     fn test_is_auth_failure_narrow() {
         assert!(is_auth_failure("HTTP 401: invalid_token"));
         assert!(is_auth_failure("Unauthorized"));
@@ -3555,9 +9737,33 @@ mod tests {
     }
 
     #[test]
+    fn test_request_barge_in_clears_active() {
+        // Barge-in choke point: active turn cancelled, slot cleared,
+        // idempotent when nothing is playing (second call must not panic).
+        let (_, cancel) = install_new_request(Subsystem::WorkerBackend);
+        request_barge_in("test");
+        assert!(is_cancelled(&cancel), "barge-in must cancel the active turn");
+        assert!(!has_active_request(), "barge-in must clear the active slot");
+        request_barge_in("test-idle");
+    }
+
+    #[test]
     fn test_signal_done_doesnt_panic() {
         // Just verify signal_done doesn't panic with any ID
         signal_done("test_id_123");
+    }
+
+    #[test]
+    fn test_install_new_request_with_id_registers_and_clears() {
+        // Proactive alerts must register with ACTIVE_REQUEST exactly like
+        // any other turn, using their own caller-supplied id (so the
+        // sentinel_offer_ prefix match in speak_line keeps working) rather
+        // than a freshly generated one.
+        let id = format!("sentinel_test_{}", new_request_id());
+        let cancel = install_new_request_with_id(id.clone(), Subsystem::LocalCommand);
+        assert!(!is_cancelled(&cancel), "a fresh registration must not start cancelled");
+        clear_active_request(&id);
+        assert!(!has_active_request(), "clearing our own just-installed request must leave the slot empty");
     }
 
     #[test]
@@ -3569,28 +9775,6 @@ mod tests {
         // If we get here without panicking, the test passes.
         // (We can't assert the global state because parallel tests may have
         // changed it between install and check.)
-    }
-
-    // ─── Subsystem classification tests ───
-
-    #[test]
-    fn test_local_commands_are_not_long_running() {
-        assert!(!is_long_running(&Subsystem::LocalCommand));
-    }
-
-    #[test]
-    fn test_worker_backend_is_long_running() {
-        assert!(is_long_running(&Subsystem::WorkerBackend));
-    }
-
-    #[test]
-    fn test_architect_is_long_running() {
-        assert!(is_long_running(&Subsystem::Architect));
-    }
-
-    #[test]
-    fn test_none_is_not_long_running() {
-        assert!(!is_long_running(&Subsystem::None));
     }
 
     // ─── Request ID tests ───
@@ -3611,5 +9795,45 @@ mod tests {
         for c in id.chars() {
             assert!(c.is_ascii_alphanumeric(), "ID should be alphanumeric, found: {}", c);
         }
+    }
+
+    #[test]
+    fn test_screen_key_guidance_matrix() {
+        // No key → onboarding funnel (points at Command Hub, Accounts).
+        let g = screen_key_guidance(false, false).unwrap();
+        assert!(g.contains("Gemini key"));
+        assert!(g.contains("Command Hub"));
+        // Key present but quota spent → quota line, no key nag.
+        let g = screen_key_guidance(true, true).unwrap();
+        assert!(g.contains("quota"));
+        assert!(!g.contains("Command Hub"));
+        // Key + quota → silent (VLM path speaks for itself).
+        assert_eq!(screen_key_guidance(true, false), None);
+    }
+
+    #[test]
+    fn directions_line_wording() {
+        assert_eq!(directions_line("Central Park", None), "Finding the best route to Central Park, sir.");
+        assert_eq!(
+            directions_line("Central Park", Some("28 minutes via FDR Drive")),
+            "Finding route to Central Park. About 28 minutes via FDR Drive, sir."
+        );
+    }
+
+    #[test]
+    fn saved_places_and_places_line() {
+        assert_eq!(saved_place_kind("home"), Some("home"));
+        assert_eq!(saved_place_kind("my office"), Some("work"));
+        assert_eq!(saved_place_kind("Central Park"), None);
+        let hits = vec![("my_home".to_string(), " 12 High St ".to_string()), ("employer".to_string(), "Acme".to_string())];
+        assert_eq!(pick_saved_place(&hits, "home").as_deref(), Some("12 High St"));
+        assert_eq!(pick_saved_place(&hits, "work"), None);
+        use crate::google::types::PlaceItem;
+        let p = |n: &str, a: &str, o: Option<bool>| PlaceItem { name: n.into(), address: a.into(), rating: None, open_now: o };
+        assert_eq!(places_line("pharmacy", None, &[]), "Searching maps for pharmacy, sir.");
+        assert_eq!(
+            places_line("pharmacy", Some("12 High St"), &[p("Boots", "5 Mill Rd, London", Some(true)), p("Lloyds", "x", None)]),
+            "Top result for pharmacy near 12 High St: Boots, 5 Mill Rd, open now. Also Lloyds."
+        );
     }
 }

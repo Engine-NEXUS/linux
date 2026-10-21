@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "main-cap",
-  "description": "Capabilities for the NEXUS app (main + setup windows)",
-  "windows": ["main", "setup", "loading", "loading-indicator"],
+  "identifier": "setup-settings-cap",
+  "description": "Capabilities for the setup + settings windows (the orb and loading indicator moved into stage-cap.json's stage window).",
+  "windows": ["setup", "settings"],
   "permissions": [
     "core:default",
     "core:window:allow-set-ignore-cursor-events",

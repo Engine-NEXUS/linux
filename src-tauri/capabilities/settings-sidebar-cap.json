@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "settings-sidebar-cap",
-  "description": "Capabilities for the NEXUS Settings sidebar window — event listening (backdrop), settings get/save, orb position, TTS speak, OAuth.",
-  "windows": ["settings-sidebar"],
+  "description": "Capabilities for the companion HUD window (calibration pill) — event listening for backdrop + glass hitboxes.",
+  "windows": ["companion-hud"],
   "permissions": [
     "core:default",
     "core:event:allow-emit",

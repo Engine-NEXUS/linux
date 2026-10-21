@@ -36,15 +36,16 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+use crate::center::TurnContext;
 use crate::intent_parser::{parse_deterministic, ParsedIntent};
 use crate::orchestrator::{route_intent, Subsystem};
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
 /// One step in a compound task plan.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlanStep {
     /// Step index (0-based).
     pub step_id: usize,
@@ -61,7 +62,7 @@ pub struct PlanStep {
 }
 
 /// Per-step execution status.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     Pending,
@@ -75,7 +76,7 @@ pub enum StepStatus {
 }
 
 /// The result of executing one plan step.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct StepResult {
     pub step_id: usize,
     pub subsystem: Subsystem,
@@ -87,7 +88,7 @@ pub struct StepResult {
 }
 
 /// The unified task state — the "one state" for a compound command.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TaskPlan {
     /// Unique task ID (matches the orchestrator request_id).
     pub task_id: String,
@@ -148,10 +149,118 @@ pub struct PendingCompound {
     /// The orchestrator request_id this compound belongs to.
     pub request_id: String,
     /// The full original transcript.
+    #[allow(dead_code)]
     pub transcript: String,
+    /// Provenance inherited from the turn that created the compound, so
+    /// resumed steps keep the original ownership decision.
+    pub turn: TurnContext,
 }
 
 static PENDING_COMPOUND: Mutex<Option<PendingCompound>> = Mutex::new(None);
+
+// ─── Durable execution: crash-safe checkpoints (B5) ────────────────
+// After every loop iteration the plan state is written to
+// `compound_<task_id>.json` under the app data dir. A crash leaves the
+// record behind (no silent loss); stale files (>1h) are swept on boot
+// with a log line. Clean completion and confirmation-pause clear the
+// file (confirmation resume stays owned by PENDING_COMPOUND).
+
+/// On-disk checkpoint record.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PlanCheckpoint {
+    pub task_id: String,
+    pub transcript: String,
+    pub steps: Vec<PlanStep>,
+    pub results: Vec<StepResult>,
+    pub next_index: usize,
+    pub updated_at: i64,
+}
+
+/// Checkpoints older than this are swept on boot.
+#[allow(dead_code)]
+pub const CHECKPOINT_STALE_SECS: i64 = 3600;
+
+fn sanitize_task_id(task_id: &str) -> String {
+    task_id
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(64)
+        .collect()
+}
+
+fn checkpoint_path(app_data_dir: &std::path::Path, task_id: &str) -> std::path::PathBuf {
+    app_data_dir.join(format!("compound_{}.json", sanitize_task_id(task_id)))
+}
+
+/// Write the current plan state. Best-effort — failures only warn.
+pub fn write_checkpoint(
+    app_data_dir: &std::path::Path,
+    plan: &TaskPlan,
+    next_index: usize,
+) {
+    let cp = PlanCheckpoint {
+        task_id: plan.task_id.clone(),
+        transcript: plan.transcript.clone(),
+        steps: plan.steps.clone(),
+        results: plan.results.clone(),
+        next_index,
+        updated_at: chrono::Utc::now().timestamp(),
+    };
+    match serde_json::to_string_pretty(&cp) {
+        Ok(s) => {
+            if let Err(e) = std::fs::write(checkpoint_path(app_data_dir, &plan.task_id), s) {
+                tracing::warn!("command_center: checkpoint write failed: {}", e);
+            }
+        }
+        Err(e) => tracing::warn!("command_center: checkpoint serialize failed: {}", e),
+    }
+}
+
+/// Delete a task's checkpoint (clean completion / confirmation-pause).
+pub fn clear_checkpoint(app_data_dir: &std::path::Path, task_id: &str) {
+    let _ = std::fs::remove_file(checkpoint_path(app_data_dir, task_id));
+}
+
+/// Read a checkpoint back (roundtrip / future resume UI).
+#[allow(dead_code)]
+pub fn read_checkpoint(
+    app_data_dir: &std::path::Path,
+    task_id: &str,
+) -> Option<PlanCheckpoint> {
+    let content = std::fs::read_to_string(checkpoint_path(app_data_dir, task_id)).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Delete checkpoints older than CHECKPOINT_STALE_SECS. Returns count.
+/// Called once on boot — a crash never auto-executes, it only leaves a
+/// record that is swept here with a log line.
+#[allow(dead_code)]
+pub fn sweep_stale_checkpoints(app_data_dir: &std::path::Path) -> usize {
+    let now = chrono::Utc::now().timestamp();
+    let Ok(entries) = std::fs::read_dir(app_data_dir) else {
+        return 0;
+    };
+    let mut swept = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("compound_") || !name.ends_with(".json") {
+            continue;
+        }
+        let path = entry.path();
+        let stale = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str::<PlanCheckpoint>(&c).ok())
+            .map(|cp| now - cp.updated_at > CHECKPOINT_STALE_SECS)
+            .unwrap_or(true);
+        if stale && std::fs::remove_file(&path).is_ok() {
+            swept += 1;
+        }
+    }
+    if swept > 0 {
+        tracing::info!("command_center: swept {} stale compound checkpoint(s)", swept);
+    }
+    swept
+}
 
 /// Stash a pending compound task (overwrites any previous — only one
 /// active request exists at a time).
@@ -398,6 +507,7 @@ pub(crate) async fn execute_step<R: Runtime>(
     request_id: &str,
     cancel_flag: &Arc<AtomicBool>,
     dialog_context: Option<&serde_json::Value>,
+    turn: &TurnContext,
 ) -> StepOutcome {
     let start = Instant::now();
     let mk = |status: StepStatus, text: String, error: Option<String>| StepResult {
@@ -471,6 +581,9 @@ pub(crate) async fn execute_step<R: Runtime>(
                 dialog_context.cloned(),
                 request_id.to_string(),
                 cancel_flag.clone(),
+                turn,
+                crate::intent_parser::intent_to_label(&step.intent),
+                false,
             )
             .await
             {
@@ -516,17 +629,19 @@ pub(crate) async fn execute_step<R: Runtime>(
                     StepOutcome::Done(mk(StepStatus::Succeeded, text, None))
                 }
                 crate::github_cmd::GitHubResult::NeedsConfirmation { prompt, command } => {
-                    // Emit the Confirm event — same shape as the GitHub path.
+                    // Emit the Confirm event — constructed from the real
+                    // enum (not hand-typed JSON) so this can never silently
+                    // drift from the GitHub path's own Confirm shape if the
+                    // enum ever changes.
                     let cmd_json =
                         serde_json::to_value(command).unwrap_or(serde_json::Value::Null);
                     app.emit(
                         "orchestrator:event",
-                        serde_json::json!({
-                            "type": "confirm",
-                            "prompt": prompt,
-                            "request_id": request_id,
-                            "command": cmd_json,
-                        }),
+                        &crate::orchestrator::OrchestratorEvent::Confirm {
+                            prompt: prompt.clone(),
+                            request_id: request_id.to_string(),
+                            command: cmd_json,
+                        },
                     )
                     .ok();
                     StepOutcome::AwaitingConfirmation(mk(
@@ -595,6 +710,7 @@ pub async fn execute_plan<R: Runtime>(
     request_id: &str,
     cancel_flag: &Arc<AtomicBool>,
     dialog_context: Option<serde_json::Value>,
+    turn: &TurnContext,
 ) -> PlanOutcome {
     tracing::info!(
         "command_center: executing {}-step plan for request {}",
@@ -602,10 +718,13 @@ pub async fn execute_plan<R: Runtime>(
         request_id
     );
 
-    for i in 0..plan.steps.len() {
-        let step = plan.steps[i].clone();
-
-        if crate::orchestrator::is_cancelled_pub(cancel_flag) {
+    let mut i = 0;
+    while i < plan.steps.len() {
+        // B5: checkpoint before each step — a crash leaves the record behind.
+        if let Ok(dir) = app.path().app_data_dir() {
+            write_checkpoint(&dir, &plan, i);
+        }
+        if crate::orchestrator::is_cancelled_pub(cancel_flag) {            let step = plan.steps[i].clone();
             plan.results.push(StepResult {
                 step_id: step.step_id,
                 subsystem: step.subsystem.clone(),
@@ -617,22 +736,88 @@ pub async fn execute_plan<R: Runtime>(
             break;
         }
 
+        // B4: maximal run of parallel-safe (WorkerBackend Q&A) steps runs
+        // concurrently; everything else stays sequential.
+        let end = batch_end(&plan.steps, i);
+        if end - i > 1 {
+            tracing::info!(
+                "command_center: executing {}-step parallel batch (steps {}-{})",
+                end - i,
+                i,
+                end - 1
+            );
+            let batch: Vec<PlanStep> = plan.steps[i..end].to_vec();
+            let outs = execute_batch(app, &batch, request_id, cancel_flag, dialog_context.as_ref(), turn).await;
+            let mut aborted = false;
+            for (idx, (_id, outcome)) in outs.into_iter().enumerate() {
+                let step = &batch[idx];
+                match outcome {
+                    StepOutcome::Done(res) => {
+                        let failed = res.status == StepStatus::Failed;
+                        plan.results.push(res);
+                        if failed && !step.optional {
+                            for remaining in plan.steps.iter().skip(end) {
+                                plan.results.push(StepResult {
+                                    step_id: remaining.step_id,
+                                    subsystem: remaining.subsystem.clone(),
+                                    status: StepStatus::Skipped,
+                                    text: "skipped (previous step failed)".to_string(),
+                                    error: None,
+                                    latency_ms: 0,
+                                });
+                            }
+                            aborted = true;
+                            break;
+                        }
+                    }
+                    StepOutcome::AwaitingConfirmation(res) => {
+                        plan.results.push(res);
+                        let mut remaining = batch[idx + 1..].to_vec();
+                        remaining.extend_from_slice(&plan.steps[end..]);
+                        set_pending_compound(PendingCompound {
+                            remaining_steps: remaining,
+                            prior_results: plan.results.clone(),
+                            request_id: request_id.to_string(),
+                            transcript: plan.transcript.clone(),
+                            turn: turn.clone(),
+                        });
+                        if let Ok(dir) = app.path().app_data_dir() {
+                            clear_checkpoint(&dir, &plan.task_id);
+                        }
+                        return PlanOutcome {
+                            text: merge_results(&plan.results),
+                            summary: plan.summary(),
+                            awaiting_confirmation: true,
+                        };
+                    }
+                }
+            }
+            if aborted {
+                break;
+            }
+            i = end;
+            continue;
+        }
+
+        let step = plan.steps[i].clone();
+
         let outcome = execute_step(
             app,
             &step,
             request_id,
             cancel_flag,
             dialog_context.as_ref(),
+            turn,
         )
         .await;
 
         match outcome {
-            StepOutcome::Done(res) => {
-                let failed = res.status == StepStatus::Failed;
-                plan.results.push(res);
-                if failed && !step.optional {
-                    // Abort remaining steps — mark them skipped.
-                    for remaining in &plan.steps[i + 1..] {
+                StepOutcome::Done(res) => {
+                    let failed = res.status == StepStatus::Failed;
+                    plan.results.push(res);
+                    if failed && !step.optional {
+                        // Abort remaining steps — mark them skipped.
+                        for remaining in &plan.steps[i + 1..] {
                         plan.results.push(StepResult {
                             step_id: remaining.step_id,
                             subsystem: remaining.subsystem.clone(),
@@ -654,7 +839,11 @@ pub async fn execute_plan<R: Runtime>(
                     prior_results: plan.results.clone(),
                     request_id: request_id.to_string(),
                     transcript: plan.transcript.clone(),
+                    turn: turn.clone(),
                 });
+                if let Ok(dir) = app.path().app_data_dir() {
+                    clear_checkpoint(&dir, &plan.task_id);
+                }
                 return PlanOutcome {
                     text: merge_results(&plan.results),
                     summary: plan.summary(),
@@ -662,13 +851,88 @@ pub async fn execute_plan<R: Runtime>(
                 };
             }
         }
+        i += 1;
+    }
+
+    if let Ok(dir) = app.path().app_data_dir() {
+        clear_checkpoint(&dir, &plan.task_id);
+    }
+
+    let summary = plan.summary();
+    if let Ok(dir) = app.path().app_data_dir() {
+        crate::diary::log_event(
+            &dir,
+            "compound_done",
+            &format!("{} steps, {} ok", summary.total_steps, summary.completed),
+        );
+        if summary.failed > 0 {
+            crate::diary::log_event(
+                &dir,
+                "compound_failed",
+                &format!("{} of {} steps failed: {}", summary.failed, summary.total_steps, plan.transcript.chars().take(120).collect::<String>()),
+            );
+        }
     }
 
     PlanOutcome {
         text: merge_results(&plan.results),
-        summary: plan.summary(),
+        summary,
         awaiting_confirmation: false,
     }
+}
+
+/// A step is parallel-safe if it is side-effect-free and never hits a
+/// confirmation gate: WorkerBackend Q&A only. LocalCommand opens apps,
+/// Mcp/GitHub mutate external state — always sequential. Pure.
+pub fn is_parallel_safe(step: &PlanStep) -> bool {
+    matches!(step.subsystem, Subsystem::WorkerBackend)
+}
+
+/// End index (exclusive) of the maximal parallel-safe run from `start`.
+/// Pure + unit-tested.
+pub fn batch_end(steps: &[PlanStep], start: usize) -> usize {
+    let mut end = start;
+    while end < steps.len() && is_parallel_safe(&steps[end]) {
+        end += 1;
+    }
+    end
+}
+
+/// Execute a batch of parallel-safe steps concurrently (JoinSet), returning
+/// outcomes sorted by step_id so results merge in plan order.
+async fn execute_batch<R: Runtime>(
+    app: &AppHandle<R>,
+    steps: &[PlanStep],
+    request_id: &str,
+    cancel_flag: &Arc<AtomicBool>,
+    dialog_context: Option<&serde_json::Value>,
+    turn: &TurnContext,
+) -> Vec<(usize, StepOutcome)> {
+    let mut set = tokio::task::JoinSet::new();
+    for step in steps {
+        let app_c = app.clone();
+        let step_c = step.clone();
+        let req_c = request_id.to_string();
+        let flag_c = Arc::clone(cancel_flag);
+        let ctx_c = dialog_context.cloned();
+        let turn_c = turn.clone();
+        set.spawn(async move {
+            let out =
+                execute_step(&app_c, &step_c, &req_c, &flag_c, ctx_c.as_ref(), &turn_c).await;
+            (step_c.step_id, out)
+        });
+    }
+    let mut outs = Vec::with_capacity(steps.len());
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(pair) => outs.push(pair),
+            Err(e) => {
+                tracing::error!("command_center: batch task panicked: {}", e);
+            }
+        }
+    }
+    outs.sort_by_key(|(id, _)| *id);
+    outs
 }
 
 /// Resume a pending compound after the gated step was confirmed.
@@ -706,7 +970,16 @@ pub async fn resume_compound<R: Runtime>(
             break;
         }
 
-        match execute_step(app, step, &pending.request_id, &cancel_flag, None).await {
+            match execute_step(
+                app,
+                step,
+                &pending.request_id,
+                &cancel_flag,
+                None,
+                &pending.turn,
+            )
+            .await
+            {
             StepOutcome::Done(res) => {
                 let failed = res.status == StepStatus::Failed;
                 results.push(res);
@@ -999,6 +1272,7 @@ mod tests {
             prior_results: vec![],
             request_id: "req-xyz".to_string(),
             transcript: "test".to_string(),
+            turn: TurnContext::default(),
         };
         set_pending_compound(pending);
         assert!(has_pending_compound("req-xyz"));
@@ -1016,10 +1290,132 @@ mod tests {
             prior_results: vec![],
             request_id: "req-a".to_string(),
             transcript: "test".to_string(),
+            turn: TurnContext::default(),
         };
         set_pending_compound(pending);
         assert!(take_pending_compound("req-b").is_none());
         // Still there for the right id
         assert!(take_pending_compound("req-a").is_some());
+    }
+
+    fn mk_step(id: usize, subsystem: Subsystem) -> PlanStep {
+        let intent = match subsystem {
+            Subsystem::WorkerBackend => ParsedIntent::Unknown { raw: "q".into() },
+            Subsystem::LocalCommand => ParsedIntent::OpenApp { target: "x".into() },
+            Subsystem::Mcp => ParsedIntent::OpenApp { target: "y".into() },
+            _ => ParsedIntent::Unknown { raw: "z".into() },
+        };
+        PlanStep {
+            step_id: id,
+            transcript: "t".into(),
+            intent,
+            subsystem,
+            depends_on: vec![],
+            optional: false,
+        }
+    }
+
+    #[test]
+    fn test_is_parallel_safe_worker_only() {
+        assert!(is_parallel_safe(&mk_step(0, Subsystem::WorkerBackend)));
+        assert!(!is_parallel_safe(&mk_step(0, Subsystem::LocalCommand)));
+        assert!(!is_parallel_safe(&mk_step(0, Subsystem::Mcp)));
+        assert!(!is_parallel_safe(&mk_step(0, Subsystem::GitHub)));
+        assert!(!is_parallel_safe(&mk_step(0, Subsystem::Architect)));
+    }
+
+    #[test]
+    fn test_batch_end_all_parallel() {
+        let steps = vec![
+            mk_step(0, Subsystem::WorkerBackend),
+            mk_step(1, Subsystem::WorkerBackend),
+            mk_step(2, Subsystem::WorkerBackend),
+        ];
+        assert_eq!(batch_end(&steps, 0), 3);
+    }
+
+    #[test]
+    fn test_batch_end_mixed() {
+        let steps = vec![
+            mk_step(0, Subsystem::LocalCommand),
+            mk_step(1, Subsystem::WorkerBackend),
+            mk_step(2, Subsystem::WorkerBackend),
+            mk_step(3, Subsystem::Mcp),
+        ];
+        assert_eq!(batch_end(&steps, 0), 0);
+        assert_eq!(batch_end(&steps, 1), 3);
+        assert_eq!(batch_end(&steps, 3), 3);
+    }
+
+    #[test]
+    fn test_batch_end_single_is_not_batch() {
+        // A lone parallel-safe step still runs the sequential path
+        // (execute_plan only batches runs of length > 1).
+        let steps = vec![
+            mk_step(0, Subsystem::LocalCommand),
+            mk_step(1, Subsystem::WorkerBackend),
+            mk_step(2, Subsystem::LocalCommand),
+        ];
+        assert_eq!(batch_end(&steps, 1), 2);
+    }
+
+    #[test]
+    fn test_batch_end_empty() {
+        let steps: Vec<PlanStep> = vec![];
+        assert_eq!(batch_end(&steps, 0), 0);
+    }
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("nexus_cc_test_{}_{}", name, std::process::id()));
+        let _ = std::fs::create_dir_all(&p);
+        p
+    }
+
+    #[test]
+    fn test_checkpoint_roundtrip() {
+        let d = tmpdir("roundtrip");
+        let plan = build_plan("open chrome then search for cats", "t-ckpt").unwrap();
+        write_checkpoint(&d, &plan, 1);
+        let cp = read_checkpoint(&d, "t-ckpt").expect("checkpoint readable");
+        assert_eq!(cp.task_id, "t-ckpt");
+        assert_eq!(cp.steps.len(), 2);
+        assert_eq!(cp.next_index, 1);
+        assert_eq!(cp.transcript, "open chrome then search for cats");
+        clear_checkpoint(&d, "t-ckpt");
+        assert!(read_checkpoint(&d, "t-ckpt").is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_checkpoint_sweep_stale() {
+        let d = tmpdir("sweep");
+        let plan = build_plan("open chrome then search for cats", "t-stale").unwrap();
+        write_checkpoint(&d, &plan, 0);
+        // Backdate the checkpoint beyond the stale window.
+        let path = checkpoint_path(&d, "t-stale");
+        let mut cp = read_checkpoint(&d, "t-stale").unwrap();
+        cp.updated_at -= CHECKPOINT_STALE_SECS + 10;
+        std::fs::write(&path, serde_json::to_string_pretty(&cp).unwrap()).unwrap();
+        assert_eq!(sweep_stale_checkpoints(&d), 1);
+        assert!(read_checkpoint(&d, "t-stale").is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_checkpoint_sweep_keeps_fresh() {
+        let d = tmpdir("fresh");
+        let plan = build_plan("open chrome then search for cats", "t-fresh").unwrap();
+        write_checkpoint(&d, &plan, 0);
+        assert_eq!(sweep_stale_checkpoints(&d), 0);
+        assert!(read_checkpoint(&d, "t-fresh").is_some());
+        clear_checkpoint(&d, "t-fresh");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_checkpoint_task_id_sanitized() {
+        assert_eq!(sanitize_task_id("req-abc-123"), "req-abc-123");
+        assert_eq!(sanitize_task_id("../../etc"), "______etc");
     }
 }

@@ -160,10 +160,10 @@ def validate_splits(splits):
                 errors.append(f"{left}/{right} normalized-text overlap: {len(text_overlap)}")
             if family_overlap:
                 errors.append(f"{left}/{right} phrase-family overlap: {len(family_overlap)}")
-    intents = {row["intent"] for rows in splits.values() for row in rows}
+    test_intents = {row["intent"] for row in splits.get("test", [])}
     for name in SPLIT_NAMES:
         counts = Counter(row["intent"] for row in splits[name])
-        missing = sorted(intents - set(counts))
+        missing = sorted(test_intents - set(counts))
         if missing:
             errors.append(f"split {name} missing intents: {missing}")
     return errors

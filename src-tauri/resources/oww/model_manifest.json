@@ -12,12 +12,12 @@
     1
   ],
   "runtime": {
-    "wake_threshold": 0.35,
-    "silence_rms_threshold": 0.002,
-    "target_rms": 0.03,
-    "max_gain": 20.0,
-    "restart_grace_seconds": 10,
-    "refractory_milliseconds": 3000
+    "threshold_source": "acoustic_profile.json kws_threshold",
+    "startup_grace_milliseconds": 1500,
+    "refractory_milliseconds": 3000,
+    "smoothing_frames": 12,
+    "agc_target_rms": 0.035,
+    "agc_max_gain": 30.0
   },
   "models": [
     {
@@ -32,8 +32,8 @@
     },
     {
       "file": "nexus.onnx",
-      "bytes": 860071,
-      "sha256": "b6eb462256ec8b33311826a32bd066996d6b395eab2a53d6ec51f2ecce2f6a19"
+      "bytes": 860081,
+      "sha256": "622afbfcf7ac24a25139d3d8b19e1cfdc453e9d66747061eb2fd3020d7062b04"
     }
   ]
 }

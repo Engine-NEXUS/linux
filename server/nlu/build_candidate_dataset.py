@@ -33,6 +33,7 @@ PHASE8_FAMILIES = SCRIPT_DIR / "data" / "phase8_commerce_social.json"
 PHASE9_FAMILIES = SCRIPT_DIR / "data" / "phase9_mcp_verbs.json"
 PHASE10_FAMILIES = SCRIPT_DIR / "data" / "phase10_thin_topup.json"
 PHASE11_FAMILIES = SCRIPT_DIR / "data" / "phase11_pr_verbs.json"
+PHASE86_FAMILIES = SCRIPT_DIR / "data" / "phase86_screen_analysis.json"
 
 FILLERS = {"please", "could", "would", "you", "kindly", "can"}
 
@@ -211,6 +212,17 @@ def load_phase11_families():
     ]
 
 
+def load_phase86_families():
+    if not PHASE86_FAMILIES.exists():
+        raise FileNotFoundError(f"Phase 86 families not found: {PHASE86_FAMILIES}")
+    with PHASE86_FAMILIES.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    return [
+        {"text": ex["text"], "intent": ex["intent"], "slots": ex.get("slots", {})}
+        for ex in data["examples"]
+    ]
+
+
 def verify_no_family_overlap(new_rows, test_rows):
     test_families = {family_key(r) for r in test_rows}
     for row in new_rows:
@@ -283,6 +295,9 @@ def main():
     phase11 = load_phase11_families()
     print(f"Phase 11 PR verbs: {len(phase11)}")
 
+    phase86 = load_phase86_families()
+    print(f"Phase 86 screen analysis: {len(phase86)}")
+
     candidate = {
         "train": list(production["train"]),
         "validation": list(production["validation"]),
@@ -297,19 +312,34 @@ def main():
         + candidate["calibration"] + candidate["test"]
     )
     active_texts = {normalize_text(row["text"]) for row in active_rows}
+    test_families = {family_key(r) for r in candidate["test"]}
 
     def dedupe_new(rows, label):
-        """Skip rows already present in active splits (idempotent rebuild).
+        """Skip rows already present in active splits (idempotent rebuild)
+        AND rows whose phrase family collides with the frozen test split
+        (quarantined rows re-entering as "new" — they must never train;
+        fixed 2026-10-01: "bring me vada pav" / "overdraft fee" class).
 
         Production train already contains the CLINC OOS + phase4-7 merges,
-        so re-adding them would duplicate rows. Only genuinely new texts
-        are appended; skipped counts are logged for auditability.
+        so re-adding them would duplicate rows. Only genuinely new,
+        family-clean texts are appended; skipped counts are logged.
         """
-        new_rows = [r for r in rows if normalize_text(r["text"]) not in active_texts]
-        skipped = len(rows) - len(new_rows)
-        if skipped:
-            print(f"  (skipped {skipped} {label} rows already in active splits)")
-        return new_rows
+        kept = []
+        skipped_active = 0
+        skipped_family = 0
+        for r in rows:
+            if normalize_text(r["text"]) in active_texts:
+                skipped_active += 1
+                continue
+            if family_key(r) in test_families:
+                skipped_family += 1
+                continue
+            kept.append(r)
+        if skipped_active:
+            print(f"  (skipped {skipped_active} {label} rows already in active splits)")
+        if skipped_family:
+            print(f"  (skipped {skipped_family} {label} rows sharing frozen-test families)")
+        return kept
 
     reviewed_new = dedupe_new(reviewed, "CLINC OOS")
     phase4_new = dedupe_new(phase4, "Phase 4")
@@ -320,8 +350,9 @@ def main():
     phase9_new = dedupe_new(phase9, "Phase 9")
     phase10_new = dedupe_new(phase10, "Phase 10")
     phase11_new = dedupe_new(phase11, "Phase 11")
+    phase86_new = dedupe_new(phase86, "Phase 86")
     verify_no_family_overlap(
-        reviewed_new + phase4_new + phase5_new + phase6_new + phase7_new + phase8_new + phase9_new + phase10_new + phase11_new,
+        reviewed_new + phase4_new + phase5_new + phase6_new + phase7_new + phase8_new + phase9_new + phase10_new + phase11_new + phase86_new,
         candidate["test"],
     )
 
@@ -334,6 +365,7 @@ def main():
     candidate["train"].extend(phase9_new)
     candidate["train"].extend(phase10_new)
     candidate["train"].extend(phase11_new)
+    candidate["train"].extend(phase86_new)
 
     verify_locked_splits(candidate, lock)
 
@@ -352,6 +384,7 @@ def main():
     print(f"  + {len(phase9)} Phase 9 MCP verb alternates")
     print(f"  + {len(phase10)} Phase 10 thin top-up")
     print(f"  + {len(phase11)} Phase 11 PR verbs")
+    print(f"  + {len(phase86)} Phase 86 screen analysis")
     print(f"Candidate train sha256: {train_hash}")
     print(f"Validation rows: {len(candidate['validation'])} (unchanged)")
     print(f"Calibration rows: {len(candidate['calibration'])} (unchanged)")

@@ -17,7 +17,7 @@
 //!   `{ "type": "done" }`
 
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use parking_lot::Mutex;
 use serde::Serialize;
 
@@ -63,10 +63,6 @@ impl ServerEvent {
     }
     fn result_with_analysis_and_dialog(text: &str, analysis: serde_json::Value, dialog_state: serde_json::Value) -> Self {
         Self { kind: "result".into(), state: None, data: Some(text.into()), message: None, analysis: Some(analysis), dialog_state: Some(dialog_state) }
-    }
-    #[allow(dead_code)]
-    fn done() -> Self {
-        Self { kind: "done".into(), state: None, data: None, message: None, analysis: None, dialog_state: None }
     }
     fn error(msg: &str) -> Self {
         Self { kind: "error".into(), state: None, data: None, message: Some(msg.into()), analysis: None, dialog_state: None }
@@ -211,12 +207,33 @@ pub async fn send_transcript<R: Runtime>(
             "request": text,
         })
     };
+    // Feature 88: canonical clients attach the Worker-issued profile_id
+    // and authenticate with the device token (OS keyring, never plaintext).
+    let (profile_id, device_token) = {
+        let mut found = (None, None);
+        if let Ok(dir) = app.path().app_data_dir() {
+            let cfg = crate::identity_state::read_identity_config(&dir);
+            if cfg.identity == crate::identity_state::IDENTITY_CANONICAL
+                && !cfg.profile_id.is_empty()
+            {
+                found.0 = Some(cfg.profile_id.clone());
+                found.1 = crate::auth_vault::get_api_key(
+                    crate::identity_state::DEVICE_TOKEN_SERVICE,
+                );
+            }
+        }
+        found
+    };
+    let mut requester = serde_json::json!({
+        "id": user_id,
+        "device_id": device_id,
+    });
+    if let Some(p) = &profile_id {
+        requester["profile_id"] = serde_json::Value::String(p.clone());
+    }
     let payload = serde_json::json!({
         "request_id": session_id,
-        "requester": {
-            "id": user_id,
-            "device_id": device_id,
-        },
+        "requester": requester,
         "task": task,
     });
 
@@ -227,10 +244,23 @@ pub async fn send_transcript<R: Runtime>(
         .build()
         .map_err(|e| format!("http client: {e}"))?;
 
+    crate::usage_counter::bump("worker");
     eprintln!("[NEXUS] sending transcript to worker: url={} text={}", worker_url, text.chars().take(80).collect::<String>());
 
-    let resp = crate::device_auth::apply_to(client.post(&worker_url))
+    let resp = client
+        .post(&worker_url)
         .json(&payload)
+        .headers({
+            let mut h = reqwest::header::HeaderMap::new();
+            if let Some(tok) = &device_token {
+                if !tok.is_empty() {
+                    if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("Bearer {tok}")) {
+                        h.insert(reqwest::header::AUTHORIZATION, v);
+                    }
+                }
+            }
+            h
+        })
         .send()
         .await
         .map_err(|e| {

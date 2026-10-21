@@ -344,8 +344,23 @@ async fn trigger_retrain() {
     let result = tokio::task::spawn_blocking(|| {
         let script = std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("resources").join("server").join("nlu").join("merge_and_train.py")))
-            .unwrap_or_else(|| PathBuf::from("server/nlu/merge_and_train.py"));
+            .and_then(|p| {
+                let candidate = p.parent().map(|d| d.join("resources").join("server").join("nlu").join("merge_and_train.py"));
+                if let Some(ref c) = candidate {
+                    if c.exists() {
+                        return candidate;
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| {
+                let local = PathBuf::from("server/nlu/merge_and_train.py");
+                if local.exists() {
+                    local
+                } else {
+                    PathBuf::from("../server/nlu/merge_and_train.py")
+                }
+            });
 
         std::process::Command::new("python")
             .arg(&script)

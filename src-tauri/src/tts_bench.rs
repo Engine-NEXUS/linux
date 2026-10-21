@@ -18,6 +18,15 @@ fn fmt_s(d: std::time::Duration) -> String {
 mod tests {
     use super::*;
 
+    /// Load the local engine lazily (managed slot or dev copy) and synthesize.
+    async fn local_synthesize(
+        engine: &crate::tts_kokoro::KokoroEngine,
+        text: &str,
+    ) -> Result<(Vec<f32>, u32), String> {
+        crate::tts_kokoro::ensure_loaded(engine).await?;
+        crate::tts_kokoro::synthesize(engine, text, 1.0).await
+    }
+
     // ─── Test texts of varying length ──────────────────────────────────────
 
     const SHORT_TEXT: &str = "On it sir";
@@ -110,7 +119,7 @@ mod tests {
         let elapsed = start.elapsed();
 
         match &result {
-            Ok((samples, sr)) => {
+            Ok((samples, sr, _boundaries)) => {
                 let audio_dur_ms = samples.len() as u64 * 1000 / *sr as u64;
                 println!("┌─────────────────────────────────────────────────────────┐");
                 println!("│ bench_edge_tts_pcm_decode (full pipeline)               │");
@@ -221,22 +230,23 @@ mod tests {
         println!("└─────────────────────────────────────────────────────────┘");
     }
 
-    // ─── Piper (local fallback) benchmark ──────────────────────────────────
+    // ─── Kokoro (local fallback) benchmark ──────────────────────────────────
 
     #[tokio::test]
-    async fn bench_piper_short() {
-        let engine = crate::tts_piper::new_engine();
+    #[ignore] // ~real-time local synthesis: run manually with -- --ignored
+    async fn bench_kokoro_short() {
+        let engine = crate::tts_kokoro::new_engine();
         let text = "On it sir";
 
         let start = Instant::now();
-        let result = crate::tts_piper::synthesize(&engine, text).await;
+        let result = local_synthesize(&engine, text).await;
         let elapsed = start.elapsed();
 
         match &result {
             Ok((samples, sr)) => {
                 let audio_dur_ms = samples.len() as u64 * 1000 / *sr as u64;
                 println!("┌─────────────────────────────────────────────────────────┐");
-                println!("│ bench_piper_short (local fallback)                      │");
+                println!("│ bench_kokoro_short (local fallback)                      │");
                 println!("│   text:       \"{}\"", text);
                 println!("│   time:       {} (includes model load)                  │", fmt_s(elapsed));
                 println!("│   audio dur:   {} ms ({} samples @ {}Hz)                  │", audio_dur_ms, samples.len(), sr);
@@ -244,29 +254,30 @@ mod tests {
                 println!("└─────────────────────────────────────────────────────────┘");
             }
             Err(e) => {
-                println!("│ bench_piper_short: FAILED — {}                          │", e);
+                println!("│ bench_kokoro_short: FAILED — {}                          │", e);
                 println!("│   time:       {}                                        │", fmt_s(elapsed));
             }
         }
     }
 
     #[tokio::test]
-    async fn bench_piper_medium_warm() {
-        let engine = crate::tts_piper::new_engine();
+    #[ignore] // ~real-time local synthesis: run manually with -- --ignored
+    async fn bench_kokoro_medium_warm() {
+        let engine = crate::tts_kokoro::new_engine();
 
-        // Warm up Piper (first call loads the model)
-        let _ = crate::tts_piper::synthesize(&engine, "warmup").await;
+        // Warm up Kokoro (first call loads the model)
+        let _ = local_synthesize(&engine, "warmup").await;
 
         let text = MEDIUM_TEXT;
         let start = Instant::now();
-        let result = crate::tts_piper::synthesize(&engine, text).await;
+        let result = local_synthesize(&engine, text).await;
         let elapsed = start.elapsed();
 
         match &result {
             Ok((samples, sr)) => {
                 let audio_dur_ms = samples.len() as u64 * 1000 / *sr as u64;
                 println!("┌─────────────────────────────────────────────────────────┐");
-                println!("│ bench_piper_medium_warm (model already loaded)          │");
+                println!("│ bench_kokoro_medium_warm (model already loaded)          │");
                 println!("│   text len:   {} chars                                  │", text.len());
                 println!("│   time:       {}                                      │", fmt_ms(elapsed));
                 println!("│   audio dur:   {} ms ({} samples @ {}Hz)                  │", audio_dur_ms, samples.len(), sr);
@@ -275,7 +286,7 @@ mod tests {
                 println!("└─────────────────────────────────────────────────────────┘");
             }
             Err(e) => {
-                println!("│ bench_piper_medium_warm: FAILED — {}                    │", e);
+                println!("│ bench_kokoro_medium_warm: FAILED — {}                    │", e);
                 println!("│   time:       {}                                        │", fmt_ms(elapsed));
             }
         }
@@ -293,7 +304,7 @@ mod tests {
         println!("│ bench_edge_tts_invalid_voice (the old bug)              │");
         println!("│   voice:      af_sky (invalid Kokoro voice)             │");
         println!("│   time wasted: {}                                    │", fmt_ms(elapsed));
-        println!("│   result:     {}                                       │", if result.is_err() { "REJECTED → Piper fallback" } else { "unexpected OK" });
+        println!("│   result:     {}                                       │", if result.is_err() { "REJECTED → local fallback" } else { "unexpected OK" });
         println!("│   impact:     this delay was added to EVERY speak()     │");
         println!("│               call before the fix                       │");
         println!("└─────────────────────────────────────────────────────────┘");
@@ -345,33 +356,33 @@ mod tests {
         println!("║ Invalid voice (old bug)       │ Cloud     │ {:<10} │ {:<11} ║",
             fmt_ms(t), if r.is_err() { "REJECTED" } else { "OK" });
 
-        // 6. Piper cold (first load)
-        let engine = crate::tts_piper::new_engine();
+        // 6. Kokoro cold (first load)
+        let engine = crate::tts_kokoro::new_engine();
         let start = Instant::now();
-        let r = crate::tts_piper::synthesize(&engine, SHORT_TEXT).await;
+        let r = local_synthesize(&engine, SHORT_TEXT).await;
         let t = start.elapsed();
-        println!("║ Piper cold (model load)       │ Local     │ {:<10} │ {:<11} ║",
+        println!("║ Kokoro cold (model load)     │ Local     │ {:<10} │ {:<11} ║",
             fmt_s(t), if r.is_ok() { "OK" } else { "FAIL" });
 
-        // 7. Piper warm
+        // 7. Kokoro warm
         let start = Instant::now();
-        let r = crate::tts_piper::synthesize(&engine, SHORT_TEXT).await;
+        let r = local_synthesize(&engine, SHORT_TEXT).await;
         let t = start.elapsed();
-        println!("║ Piper warm (model loaded)     │ Local     │ {:<10} │ {:<11} ║",
+        println!("║ Kokoro warm (model loaded)   │ Local     │ {:<10} │ {:<11} ║",
             fmt_ms(t), if r.is_ok() { "OK" } else { "FAIL" });
 
-        // 8. Piper warm medium
+        // 8. Kokoro warm medium
         let start = Instant::now();
-        let r = crate::tts_piper::synthesize(&engine, MEDIUM_TEXT).await;
+        let r = local_synthesize(&engine, MEDIUM_TEXT).await;
         let t = start.elapsed();
-        println!("║ Piper warm medium (130 chars) │ Local     │ {:<10} │ {:<11} ║",
+        println!("║ Kokoro warm medium (130 chars) │ Local     │ {:<10} │ {:<11} ║",
             fmt_ms(t), if r.is_ok() { "OK" } else { "FAIL" });
 
         println!("╠═══════════════════════════════╧═══════════╧════════════╧═════════════╣");
-        println!("║ RAM: Edge TTS = 0 MB | Piper = ~80 MB (after load)                   ║");
-        println!("║ Cost: Edge TTS = $0 (free cloud) | Piper = $0 (local)               ║");
-        println!("║ Network down: Piper used directly (no Edge TTS wait)                ║");
-        println!("║ Network up 10+ min: Piper unloaded → 80 MB freed                    ║");
+        println!("║ RAM: Edge TTS = 0 MB | Kokoro = ~260-370 MB (after load)             ║");
+        println!("║ Cost: Edge TTS = $0 (free cloud) | Kokoro = $0 (local)              ║");
+        println!("║ Network down: Kokoro used directly (no Edge TTS wait)               ║");
+        println!("║ Network up 10+ min: Kokoro unloaded → RAM freed                     ║");
         println!("╚══════════════════════════════════════════════════════════════════════╝");
         println!();
     }

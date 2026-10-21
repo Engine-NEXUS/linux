@@ -1,6 +1,7 @@
 import { useAssistant } from "../store/assistant";
 import {
   openSession,
+  ensureSessionOpen,
   sendTranscript,
   setLongRunningInFlight,
   setLocalAckGiven,
@@ -10,7 +11,13 @@ import {
 import { transcribeAudio } from "./stt";
 import { speak, speakCached, isRustTtsPlaying } from "./ttsPlayer";
 import { parseIntent, type Intent } from "../intent/parser";
-import { processViaOrchestrator, cancelOrchestrator } from "../net/orchestrator";
+import {
+  processViaOrchestrator,
+  cancelOrchestrator,
+  clearClarificationRequest,
+  type TurnProvenance,
+} from "../net/orchestrator";
+import { GHOST_INVOKE_BUDGET_MS, shouldGhostRoute } from "../net/ghostHotMic";
 
 /**
  * Parse a transcript using the Rust-side enhanced intent parser.
@@ -29,7 +36,16 @@ import { processViaOrchestrator, cancelOrchestrator } from "../net/orchestrator"
  */
 async function parseTranscriptEnhanced(
   transcript: string,
+  preParsed?: { intent: Intent; confidence: number; source: string },
 ): Promise<{ intent: Intent; confidence: number; source: string }> {
+  // If Rust already pre-parsed a deterministic intent during STT capture,
+  // consume it directly to eliminate the redundant IPC invoke round-trip.
+  if (preParsed?.intent) {
+    console.log(
+      `[NEXUS] pre-parsed fast-path: action=${preParsed.intent.action}, confidence=${preParsed.confidence}, source=${preParsed.source}`,
+    );
+    return preParsed;
+  }
   // Try Rust parser first
   try {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -120,10 +136,25 @@ function processNextQueuedCommand(): void {
   // Send it — the session should still be open from the previous command.
   setLongRunningInFlight(next, processNextQueuedCommand);
   // The orb is already hidden from the previous command's "On it sir".
+  // Re-show the loading indicator for this queued command.
   void sendTranscript(next).then(() => {
     console.log(`[NEXUS] queue: sent "${next}" to worker`);
-  }).catch((e) => {
-    console.warn(`[NEXUS] queue: failed to send "${next}":`, e);
+  }).catch(async () => {
+    // Session may have lapsed (barge-in closes it) — reopen once and retry.
+    // If the Worker is unreachable, the command is dropped with a warning
+    // (same as before; local-only mode can't run Worker analysis).
+    console.warn(`[NEXUS] queue: send failed, reopening session for "${next}"`);
+    if (await ensureSessionOpen()) {
+      try {
+        await sendTranscript(next);
+        console.log(`[NEXUS] queue: sent "${next}" to worker (retry)`);
+        return;
+      } catch (e) {
+        console.warn(`[NEXUS] queue: retry failed for "${next}":`, e);
+      }
+    } else {
+      console.warn(`[NEXUS] queue: dropping "${next}" (backend unreachable)`);
+    }
   });
 }
 
@@ -165,24 +196,18 @@ async function handleDuplicateOrQueuedLongRunning(transcript: string): Promise<v
 function isLongRunningQuery(transcript: string): boolean {
   const t = transcript.toLowerCase();
   // PR analysis: "analyse PR 5 in servx", "review PR 3", "analyse the pull request"
-  // Also matches "analysis" (noun form) — e.g. "deep analysis for the PR 24"
-  // Also matches "check"/"show" for branch commands — e.g. "check the latest branch of servx"
-  const hasAnalyse = /\b(analy[sz]e|analy[sz]ing|analy[sz]is|review|deep\s*dive|critique|evaluate|assess|inspect|examine|map|understand|explore|create|build|show|generate|check|what\s+is)\b/.test(t);
+  // Strictly require analysis verbs (no generic "create", "show", "check", "what is")
+  const hasAnalyse = /\b(analy[sz]e|analy[sz]ing|analy[sz]is|review|deep\s*dive|critique|evaluate|assess|inspect|examine|blast\s+radius)\b/.test(t);
   const hasPR = /\b(pr|pull\s*request)\b/.test(t);
-  const hasRepo = /\b(repo|repository|codebase|project|architecture|code)\b/.test(t);
+  // Code repo context: strictly repo/repository/codebase (not generic "code" or "project")
+  const hasRepo = /\b(repo|repository|codebase)\b/.test(t);
   // Also catch "PR <number>" patterns even without "analyse" (STT may mishear)
   const hasPRNumber = /\bpr\s*#?\s*\d+\b/.test(t);
-  // Branch analysis: "analyse branch X", "check the latest branch", "show branch"
+  // Branch analysis: "analyse branch X", "review branch"
   const hasBranch = /\bbranch(es)?\b/.test(t);
-  // Architecture mapper: "analyze this repo", "map the codebase", "create architecture in servx"
-  // Also catch "open architecture mapper" (no analyse word, but clearly architect intent)
-  const isArchitectQuery = (hasAnalyse && hasRepo)
-    || (/\barchitecture\b/.test(t) && /\b(in|of|for|from)\b/.test(t))
-    || /\bopen\s+architecture\b/.test(t)
-    || /\barchitecture\s+mapper\b/.test(t);
-  // "check the latest branch of servx by eesha" → hasAnalyse (check) + hasBranch
-  // "analyse the pr in zync" → hasAnalyse + hasPR
-  // "analyse the pr by prem in servx" → hasAnalyse + hasPR
+  // Architecture mapper: strictly require explicit architecture mapper phrases
+  const isArchitectQuery =
+    /\b(open\s+architecture\s+mapper|architecture\s+mapper|codebase\s+diagram|open\s+codebase\s+mapper)\b/.test(t);
   return (hasAnalyse && (hasPR || hasRepo || hasBranch)) || hasPRNumber || isArchitectQuery;
 }
 
@@ -205,6 +230,25 @@ function correctSttTranscript(transcript: string): string {
     t = t.replace(/^and\s+/i, "");
     logFixes.push("and→(stripped)");
   }
+
+  // Fix "ghost mode" mishearings (Groq/Whisper acoustic soundalikes)
+  if (/^(?:the\s+)?(?:goes to mode|goes to mold|go to mode|post mode|post modern|postmodern|coast mode|gold mode|toast mode|host mode|dose mode|close mode|ghost mood|ghost node|ghost mod)[.?!]?$/i.test(t.trim())) {
+    t = "ghost mode";
+    logFixes.push("soundalike→ghost mode");
+  } else if (/^(?:activate|start|open|enable|turn on)\s+(?:goes to mode|goes to mold|ghost)\b/i.test(t)) {
+    t = t.replace(/^(?:activate|start|open|enable|turn on)\s+(?:goes to mode|goes to mold|ghost)\b/i, "start ghost mode");
+    logFixes.push("start goes to mode→start ghost mode");
+  }
+
+  // Fix app name phonetic mishearings in commands
+  t = t.replace(/\b(open|launch|start|close|exit|quit|on|in|to|via)\s+(?:what's up|whats up|what sap|what app|watch app|watts app)\b/gi, "$1 whatsapp");
+  t = t.replace(/\b(open|launch|start)\s+(?:vs coat|vs chord|vs cord|visual studio coat)\b/gi, "$1 vs code");
+  t = t.replace(/\b(open|launch|start)\s+(?:spot if i|spot a file|spotty fy|spot ify)\b/gi, "$1 spotify");
+  t = t.replace(/\b(open|launch|start)\s+(?:this cord|dis cord)\b/gi, "$1 discord");
+  t = t.replace(/\b(open|launch|start)\s+(?:u tube|you tube)\b/gi, "$1 youtube");
+  t = t.replace(/\b(open|launch|start)\s+(?:note pad|not pad)\b/gi, "$1 notepad");
+  t = t.replace(/^(?:stand down|stop it now)[.?!]?$/i, "stop");
+  t = t.replace(/^(?:cancel action|cancel task|cancel that)[.?!]?$/i, "cancel");
 
   // Fix "analyse" mishearings: "unless", "analyze", "and let's", "anlsys",
   // "anlyss", "anlys", "anlss", "analis", "analys" (without trailing e),
@@ -310,15 +354,7 @@ function correctSttTranscript(transcript: string): string {
     }
   }
 
-  // Fix truncated "open-" / "open " from Intel SST mic silence.
-  // When the mic driver cuts out mid-utterance, STT only captures the
-  // first word. "open architecture mapper" becomes "open-" or "open".
-  // Since "open" is almost always followed by "architecture" in this
-  // app's context, expand the truncation to the full command.
-  if (/^open-?$/i.test(t.trim())) {
-    t = "open architecture mapper";
-    logFixes.push("open-→open architecture mapper (mic truncation recovery)");
-  }
+
 
   if (logFixes.length > 0 || t !== transcript) {
     console.log(`[NEXUS] STT correction: "${transcript}" → "${t}"`);
@@ -434,6 +470,14 @@ export async function startRecording(stream: MediaStream): Promise<void> {
 
   floatBuffer = []; // reset buffer for new turn
 
+  // Live caption (plan Phase 4): open the live-partial-transcript stream
+  // for this turn, bracketing the same window as the batch capture below.
+  // Fire-and-forget — a connection failure just leaves the live caption
+  // silent for this turn; the batch path never waits on this.
+  void import("@tauri-apps/api/core")
+    .then(({ invoke }) => invoke("stt_stream_start"))
+    .catch(() => {});
+
   // Use native sample rate — don't force 16kHz. This avoids resampling issues
   // in WebView2's audio pipeline. We downsample to 16kHz after recording.
   audioCtx = new AudioContext();
@@ -460,6 +504,15 @@ export async function startRecording(stream: MediaStream): Promise<void> {
     if (frameCount === 1) {
       console.log(`[NEXUS] first audio frame received (${input.length} samples @ ${nativeSampleRate}Hz)`);
     }
+    // Live caption (plan Phase 4) — a SECOND, non-blocking push of this
+    // same chunk to the live-partial-transcript stream. Purely additive:
+    // never touches floatBuffer (the batch path above is untouched), and
+    // any failure here (stream not started, server unreachable) is
+    // swallowed — the live caption just silently stays empty.
+    const livePcm = downsampleAndConvert(new Float32Array(input), nativeSampleRate, 16000);
+    void import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("stt_stream_push_chunk", { samples: Array.from(livePcm) }))
+      .catch(() => {});
   };
 
   // CRITICAL: Connect source → node → destination DIRECTLY.
@@ -474,6 +527,11 @@ export async function startRecording(stream: MediaStream): Promise<void> {
 }
 
 export async function stopRecording(): Promise<void> {
+  // Live caption (plan Phase 4): close the live-partial-transcript stream.
+  // Fire-and-forget, same tolerance as the start() call above.
+  void import("@tauri-apps/api/core")
+    .then(({ invoke }) => invoke("stt_stream_stop"))
+    .catch(() => {});
   if (scriptNode) {
     scriptNode.disconnect();
     scriptNode.onaudioprocess = null;
@@ -564,14 +622,14 @@ function releaseMicStream(): void {
  *
  * CRITICAL FIX: This now checks BOTH the Rust/rodio TTS playback state
  * AND the Web Speech API. Previously it only checked speechSynthesis.speaking,
- * which was always false for Rust TTS (Edge TTS / Piper via rodio). This caused
+ * which was always false for Rust TTS (Edge TTS / Kokoro via rodio). This caused
  * waitForTtsIdle() to return immediately while audio was still playing, creating
  * an echo feedback loop where TTS audio was captured by the mic.
  *
  * The rustTtsPlaying flag is set by speak()/speakCached() when invoke("speak_text")
  * starts and cleared when the invoke resolves (playback complete) or stopTts() is called.
  *
- * Polls every 100ms. Times out after 10s as a safety net (Piper cold-load can take ~7s).
+ * Polls every 100ms. Times out after 10s as a safety net (local Kokoro cold-load + first sentence can take several seconds).
  */
 function waitForTtsIdle(): Promise<void> {
   return new Promise((resolve) => {
@@ -604,22 +662,212 @@ function waitForTtsIdle(): Promise<void> {
  * Called when the Rust cpal stream captures audio, transcribes it,
  * and emits the "stt:transcript" event.
  */
-export async function processTranscript(transcript: string): Promise<void> {
+/**
+ * Main Center UI-director rule (doc 74 P2): the orb stays visible for the
+ * WHOLE ghost session. Every turn-end hide in this file goes through here —
+ * 27 sites. Outside ghost mode this is exactly setVisible(false).
+ * (Ghost enter already forces visible=true via setGhostActive.)
+ */
+export function hideOrbIfIdle(): void {
+  if (useAssistant.getState().ghostActive) return;
+  useAssistant.getState().setVisible(false);
+}
+
+/**
+ * Consecutive empty-turn streak (non-ghost only; approach E).
+ * 1st miss → silent auto-relisten · 2nd consecutive miss → one nag.
+ * Any heard speech resets to 0 (wired next to the ghost-silence reset).
+ * Pure decision fn so the escalation policy is unit-tested, not re-read.
+ */
+let missStreak = 0;
+
+export function nextMissAction(misses: number): "relisten" | "nag" {
+  return misses <= 1 ? "relisten" : "nag";
+}
+
+/** Test hook: read/reset the streak without touching turn flow. */
+export function __testMissStreak(): number {
+  return missStreak;
+}
+export function __testSetMissStreak(n: number): void {
+  missStreak = n;
+}
+
+/**
+ * End-of-turn reset that keeps the ghost hot-mic loop alive.
+ * Outside ghost mode this is exactly reset() (relisten no-ops);
+ * inside a live ghost session it reopens the mic BEFORE resetting
+ * so follow-up commands need no wake word. NEVER call from abort /
+ * barge-in / silent-park paths — an explicit cancel (or the park
+ * after GHOST_SILENT_CAP misses) must stay silent.
+ */
+async function endTurn(): Promise<void> {
+  const { endGhostTurn } = await import("../net/ghostHotMic");
+  await endGhostTurn();
+}
+
+export interface SttTurnMetadata {
+  ownership?: "verified" | "uncertain" | "rejected" | "unenrolled";
+  ownerScore?: number;
+  decoderBias?: string;
+  language?: string;
+  initiation?: "explicit" | "ghost";
+  intentLabel?: string;
+  preParsed?: {
+    intent: Intent;
+    confidence: number;
+    source: string;
+  };
+}
+
+export async function processTranscript(
+  transcript: string,
+  turn: SttTurnMetadata = { ownership: "unenrolled" },
+): Promise<void> {
+  // A new transcript always retires a pending clarification window: the
+  // backend installs a new request and cancels the held turn.
+  clearClarificationRequest();
+  // TEMPORARY tracer (see debug_trace): mark receipt so a silent death
+  // downstream is provable from `nexus start` alone. Approach C appends
+  // the mic-holder audit: who (if anyone) held a WebView2 mic stream
+  // during this turn — the Intel SST hog suspect with no other trace.
+  const { invoke: traceInvoke } = await import("@tauri-apps/api/core");
+  const { micHoldersSummary } = await import("./micHolders");
+  void traceInvoke("debug_trace", { msg: `p0 receipt len=${transcript?.length ?? 0} ghost=${useAssistant.getState().ghostActive} owner=${turn?.ownership ?? "unenrolled"} ${micHoldersSummary()}` }).catch(() => {});
+  if (turn?.ownership === "rejected") {
+    // Provenance-gated ambient audio: another speaker, television, or media.
+    // It must not relisten automatically, nag, action, learn, or remember.
+    console.log("[NEXUS] non-owner turn rejected — ambient drop");
+    void traceInvoke("debug_trace", { msg: "p0 ambient-drop owner=rejected" }).catch(() => {});
+    if (!useAssistant.getState().ghostActive) {
+      missStreak = 0;
+      useAssistant.getState().setVisible(false);
+      // turn-end:keep-raw non-ghost ambient drop; ghost sessions return above and keep the hot mic
+      setTimeout(() => useAssistant.getState().reset(), 550);
+    }
+    return;
+  }
   if (!transcript) {
-    // Failed capture — speak "Didn't catch that" and go back to idle.
-    // Do NOT auto-retry. Wait for explicit user input (hotkey or wake word)
-    // before capturing again. Auto-retry caused the system to keep waking
-    // up and capturing room noise/hallucinations without user input.
-    console.warn("[NEXUS] Rust STT returned empty transcript — going to idle");
+    // Ghost hot-mic: silence during an open ghost session must NOT nag.
+    // Ghost turns re-listen quietly, up to GHOST_SILENT_CAP consecutive
+    // empties, then park with ONE nag.
+    const ghostOn = useAssistant.getState().ghostActive;
+    if (ghostOn) {
+      const { recordSilentMiss, resetSilentMisses, GHOST_SILENT_CAP } =
+        await import("../net/ghostHotMic");
+      const misses = recordSilentMiss();
+      if (misses < GHOST_SILENT_CAP) {
+        console.log(`[NEXUS] ghost hot-mic: silent (${misses}/${GHOST_SILENT_CAP}) — re-listening quietly`);
+        // A phantom capture ends without the orb ever reaching `thinking`, so the state is
+        // still `listening` and the relisten below would read as a second-press CANCEL
+        // (live log: "second press while listening → aborting capture", mic dead).
+        // reset() keeps ghostActive and visibility; it only returns the state to idle.
+        // turn-end:keep-raw reset FIRST so the relisten is not read as a second-press cancel
+        useAssistant.getState().reset();
+        const { triggerFollowupListen } = await import("../stage/orbRuntime");
+        triggerFollowupListen(true);
+        return;
+      }
+      resetSilentMisses();
+      // Fall through to the single nag + park below.
+    }
+    // Empty transcript (non-ghost): retry-with-escalation (approach E).
+    // 1st consecutive miss → silent auto-relisten (no nag, no hide — the
+    // turn restarts as if re-woken). 2nd consecutive miss → ONE spoken
+    // line, then the legacy hide+reset. Streak resets on any heard speech.
+    missStreak += 1;
+    if (nextMissAction(missStreak) === "relisten") {
+      console.log("[NEXUS] empty turn: silent auto-relisten (miss 1/2)");
+      // reset() FIRST (state idle unlocks startListening's second-press
+      // guard — without this the relisten below reads as a cancel), then
+      // re-wake. Orb stays visible: continuous listening, no flicker.
+      // turn-end:keep-raw reset FIRST so the relisten below is not read as a second-press cancel
+      useAssistant.getState().reset();
+      const { triggerFollowupListen } = await import("../stage/orbRuntime");
+      triggerFollowupListen();
+      return;
+    }
+    missStreak = 0;
+    console.log("[NEXUS] empty turn: nagging once (miss 2/2)");
+    // turn-end:keep-raw (nag turn — closed by the speak promise below)
+    useAssistant.getState().setVisible(true);
     useAssistant.getState().setState("speaking");
-    useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
-    await speak("Didn't catch that sir");
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    useAssistant.getState().addAssistantMessage("I didn't hear you, sir.");
+    {
+      const { speak } = await import("./ttsPlayer");
+      void speak("I didn't hear you, sir.")
+        .then(() => {
+          hideOrbIfIdle();
+          // turn-end:keep-raw nag turn ends here, then orb closes (non-ghost path)
+          useAssistant.getState().reset();
+        })
+        .catch(() => {
+          hideOrbIfIdle();
+          // turn-end:keep-raw nag turn ends here, then orb closes (non-ghost path)
+          useAssistant.getState().reset();
+        });
+    }
     return;
   }
 
-  // Successful transcript
+  // Phase 8 — directed-speech gate. Only in a live ghost session (open mic): speech that is not
+  // addressed to NEXUS (TV, side talk, our own TTS echo, STT hallucination loops) must not reach the
+  // command pipeline or the cloud LLM. Explicit turns (wake / hotkey / confirm window) are always
+  // accepted by the Rust side; the gate fails open if it is unavailable.
+  if (useAssistant.getState().ghostActive) {
+    const { askDirectedGate, gateAction } = await import("../net/directedGate");
+    const { recordIgnoredTurn, resetIgnoredTurns, markGhostParked, GHOST_IGNORED_CAP } =
+      await import("../net/ghostHotMic");
+    const verdict = await askDirectedGate(applyLearnedCorrections(correctSttTranscript(transcript)));
+    if (!verdict.accept) {
+      // Ignored speech (TV, side talk, echo) has its OWN streak, windowed in time:
+      // it used to share the silent-capture counter, so three sentences from the TV
+      // parked the mic with no word and the next real command went nowhere.
+      const action = gateAction(verdict, recordIgnoredTurn(), GHOST_IGNORED_CAP);
+      void traceInvoke("debug_trace", { msg: `p0 directed-gate ignored reason=${verdict.reason} action=${action}` }).catch(() => {});
+      console.log(`[NEXUS] directed gate: ignored (${verdict.reason}) — ${action}`);
+      if (action === "relisten") {
+        // Same reason as the silent-miss path: leave `thinking`/`listening` behind first.
+        // turn-end:keep-raw reset FIRST so the relisten is not read as a second-press cancel
+        useAssistant.getState().reset();
+        const { triggerFollowupListen } = await import("../stage/orbRuntime");
+        triggerFollowupListen(true);
+      } else {
+        // Parked: the hot mic stops re-arming until the user wakes NEXUS (the ghost session
+        // itself stays live). Say so once instead of going deaf with no explanation.
+        resetIgnoredTurns();
+        markGhostParked();
+        const parkLine = "Pausing the mic, sir. Say Nexus when you need me.";
+        const st = useAssistant.getState();
+        st.setVisible(true);
+        st.setState("speaking");
+        st.addAssistantMessage(parkLine);
+        const { speak } = await import("./ttsPlayer");
+        void speak(parkLine)
+          .catch(() => {})
+          .finally(() => {
+            // turn-end:keep-raw directed-gate park: no relisten until a wake or hotkey; announced once
+            useAssistant.getState().reset();
+          });
+      }
+      return;
+    }
+  }
+
+  // Successful transcript — any heard speech resets the ghost silence and ignored-turn streaks.
+  const { resetSilentMisses: resetGhostSilence, resetIgnoredTurns: resetGhostIgnored, clearGhostParked: clearParked } =
+    await import("../net/ghostHotMic");
+  resetGhostSilence();
+  resetGhostIgnored();
+  clearParked();
+  missStreak = 0;
+  const provenance: TurnProvenance = {
+    ownership: turn.ownership ?? "unenrolled",
+    ownerScore: turn.ownerScore ?? 1,
+    decoderBias: turn.decoderBias ?? "owner",
+    language: turn.language ?? "en",
+    initiation: useAssistant.getState().ghostActive ? "ghost" : "explicit",
+  };
 
   // 1b. Post-process the transcript to fix common STT mishearings.
   let corrected = correctSttTranscript(transcript);
@@ -627,6 +875,9 @@ export async function processTranscript(transcript: string): Promise<void> {
 
   // Log successful transcript for self-learning
   void logSuccessfulTranscript(corrected);
+
+  // TEMPORARY tracer: corrected text (catches correction-chain crashes).
+  void traceInvoke("debug_trace", { msg: `p1 corrected="${corrected.slice(0, 60)}"` }).catch(() => {});
 
   // 2. Add the transcript to the UI.
   useAssistant.getState().addUserMessage(corrected);
@@ -643,17 +894,23 @@ export async function processTranscript(transcript: string): Promise<void> {
     useAssistant.getState().addAssistantMessage("On it sir.");
     setLocalAckGiven();
     void speakCached("On it sir");
+  } else {
+    useAssistant.getState().setState("thinking");
   }
 
-  // 3. LOCAL-FIRST: Parse the intent locally.
-  const { intent } = await parseTranscriptEnhanced(corrected);
+  // 3. LOCAL-FIRST: Parse the intent locally (consumes Rust pre-parsed intent if available).
+  const { intent } = await parseTranscriptEnhanced(corrected, turn.preParsed);
+  // TEMPORARY tracer: the parsed action (split Rust-parse vs TS-fallback).
+  void traceInvoke("debug_trace", { msg: `p2 action=${intent.action}` }).catch(() => {});
 
   // Special case: open architecture mapper window directly
   if (intent.action === "open_architect") {
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 1200));
-    useAssistant.getState().setVisible(false);
-    useAssistant.getState().setLoadingVisible(true);
+    if (!useAssistant.getState().ghostActive) {
+      hideOrbIfIdle();
+      useAssistant.getState().setLoadingVisible(true);
+    }
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("open_architect_with_auto_detect");
@@ -668,8 +925,10 @@ export async function processTranscript(transcript: string): Promise<void> {
         void speak("No repository found sir. Open a repo in your browser or GitHub Desktop.");
         await waitForTtsIdle();
         await new Promise((resolve) => setTimeout(resolve, 800));
-        useAssistant.getState().setVisible(false);
-        setTimeout(() => useAssistant.getState().reset(), 550);
+        if (!useAssistant.getState().ghostActive) {
+          hideOrbIfIdle();
+        }
+        setTimeout(() => { void endTurn(); }, 550);
       } else {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
@@ -678,7 +937,7 @@ export async function processTranscript(transcript: string): Promise<void> {
       }
     }
     useAssistant.getState().setLoadingVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    setTimeout(() => { void endTurn(); }, 550);
     return;
   }
 
@@ -686,14 +945,14 @@ export async function processTranscript(transcript: string): Promise<void> {
   if (intent.action === "open_settings") {
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
+    hideOrbIfIdle();
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("show_settings_sidebar");
     } catch (err) {
       console.error("[NEXUS] failed to open settings sidebar:", err);
     }
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    setTimeout(() => { void endTurn(); }, 550);
     return;
   }
 
@@ -707,8 +966,8 @@ export async function processTranscript(transcript: string): Promise<void> {
     void speak(prompt.replace(/,/g, ""));
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     return;
   } else if (intent.action === "greeting") {
     useAssistant.getState().setLoadingVisible(false);
@@ -720,11 +979,44 @@ export async function processTranscript(transcript: string): Promise<void> {
     void speak(reply.replace(/,/g, ""));
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
+    return;
+  } else if (shouldGhostRoute(intent.action, useAssistant.getState().ghostActive)) {
+    // Ghost session owns open_app / whatsapp_chat: route to the
+    // orchestrator's ghost runners (narration + focus verify + session
+    // stays open) instead of silent local execute. Fallback: plain
+    // local execute + endTurn (never silent).
+    void traceInvoke("debug_trace", { msg: "p3 branch=ghost-route" }).catch(() => {});
+    useAssistant.getState().setLoadingVisible(false);
+    try {
+      const result = await processViaOrchestrator(corrected, undefined, provenance);
+      console.log("[NEXUS] ghost-routed intent result:", result);
+    } catch (err) {
+      console.warn("[NEXUS] ghost route failed, falling back local:", err);
+      useAssistant.getState().setLoadingVisible(false);
+      useAssistant.getState().setVisible(true);
+      useAssistant.getState().setState("speaking");
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const result = await invoke<{ success: boolean; message: string }>("execute_command", { intent });
+        if (result.message) {
+          useAssistant.getState().addAssistantMessage(result.message);
+          void speak(result.message.replace(/,/g, ""));
+        }
+      } catch {
+        useAssistant.getState().addAssistantMessage("Couldn't do that, sir.");
+        void speak("Couldn't do that sir.");
+      }
+      await waitForTtsIdle();
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      hideOrbIfIdle();
+      setTimeout(() => { void endTurn(); }, 550);
+    }
     return;
   } else if (isLocalExecutableIntent(intent)) {
     // Known local command — execute it directly.
+    void traceInvoke("debug_trace", { msg: "p3 branch=local-execute" }).catch(() => {});
     useAssistant.getState().setLoadingVisible(false);
     useAssistant.getState().setVisible(true);
     useAssistant.getState().setState("speaking");
@@ -746,8 +1038,8 @@ export async function processTranscript(transcript: string): Promise<void> {
     }
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     return;
   }
 
@@ -755,6 +1047,8 @@ export async function processTranscript(transcript: string): Promise<void> {
   try {
     const isLongFinal = isLong || isLongRunningSubsystemIntent(intent);
     console.log("[NEXUS] processTranscript: intent=", intent.action, "isLongRunning=", isLongFinal, "transcript=", corrected);
+    // TEMPORARY tracer: branch taken + orchestrator outcome.
+    void traceInvoke("debug_trace", { msg: "p3 branch=orchestrator" }).catch(() => {});
 
     if (isLongFinal && !isLongRunningInFlight()) {
       setLongRunningInFlight(corrected, processNextQueuedCommand);
@@ -763,15 +1057,47 @@ export async function processTranscript(transcript: string): Promise<void> {
       // a gap where neither the orb nor the loading animation is visible.
     }
 
-    const result = await processViaOrchestrator(corrected);
-    console.log("[NEXUS] orchestrator process result:", result);
+    // Ghost turns (never long-running here — isLongFinal is false) get a
+    // 12s invoke budget: a hung backend previously wedged the hot-mic
+    // loop with zero feedback. On expiry the Rust side is cancelled and
+    // the throw below falls through to the "Didn't catch that" + relisten
+    // path instead of dying silently.
+    const ghostTurn = useAssistant.getState().ghostActive && !isLongFinal;
+    const result = await processViaOrchestrator(corrected, undefined, provenance, {
+      timeoutMs: ghostTurn ? GHOST_INVOKE_BUDGET_MS : undefined,
+    });
+    // Serialized: CDP forwards console args without remote-object
+    // resolution, so a raw object arrives as useless "Object".
+    console.log(
+      "[NEXUS] orchestrator process result:",
+      JSON.stringify(result)?.slice(0, 160) ?? String(result),
+    );
+    void traceInvoke("debug_trace", { msg: `p4 orch result=${result ? result.subsystem : "null"}` }).catch(() => {});
 
     if (result?.handled_locally) {
+      // Rust returns handled_locally WITHOUT any event for rejected turns,
+      // ambient drops, unrecognised phrases and queued commands. Ghost turns
+      // are owned by the hot-mic loop: close one that no event closed, right
+      // now, and re-arm the mic (it used to wait ~28 s for the stall watchdog).
+      const { closeHandledLocallyTurn } = await import("../net/ghostHotMic");
+      if (await closeHandledLocallyTurn()) return;
+      // Non-ghost: if nothing moved the orb within 8 s it is parked in
+      // `thinking` forever; close the turn (long-running work shows the
+      // loading indicator, which also exempts it).
+      setTimeout(() => {
+        const s = useAssistant.getState();
+        if (s.state === "thinking" && !s.ghostActive && !s.loadingVisible && !s.awaitingInput) {
+          console.warn("[ORB] handled_locally turn left the orb in thinking; closing it");
+          // turn-end:keep-raw non-ghost stuck-in-thinking guard; ghost turns are owned by the hot-mic loop
+          s.reset();
+        }
+      }, 8000);
       return;
     }
     return;
   } catch (err) {
     console.warn("[NEXUS] orchestrator unavailable for query:", err);
+    void traceInvoke("debug_trace", { msg: `p4 orch threw=${String(err).slice(0, 80)}` }).catch(() => {});
   }
 
   // 5. Neither local intent nor backend available.
@@ -781,8 +1107,8 @@ export async function processTranscript(transcript: string): Promise<void> {
   useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
   await speak("Didn't catch that sir");
   void logFailedTranscript(corrected);
-  useAssistant.getState().setVisible(false);
-  setTimeout(() => useAssistant.getState().reset(), 550);
+  hideOrbIfIdle();
+  setTimeout(() => { void endTurn(); }, 550);
 }
 
 /**
@@ -815,8 +1141,8 @@ export async function finishCapture(): Promise<void> {
     console.warn("no audio captured");
     releaseMicStream();
     // Hide FIRST, then reset after slide-down completes (prevents animation glitch).
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   }
@@ -840,8 +1166,8 @@ export async function finishCapture(): Promise<void> {
     useAssistant.getState().setState("speaking");
     useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
     await speak("Didn't catch that sir");
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   }
@@ -909,9 +1235,10 @@ export async function finishCapture(): Promise<void> {
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 1200));
 
-    // Step 2: Now hide the orb and show the loading animation.
-    useAssistant.getState().setVisible(false);
-    useAssistant.getState().setLoadingVisible(true);
+    if (!useAssistant.getState().ghostActive) {
+      hideOrbIfIdle();
+      useAssistant.getState().setLoadingVisible(true);
+    }
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -931,8 +1258,10 @@ export async function finishCapture(): Promise<void> {
         void speak("No repository found sir. Open a repo in your browser or GitHub Desktop.");
         await waitForTtsIdle();
         await new Promise((resolve) => setTimeout(resolve, 800));
-        useAssistant.getState().setVisible(false);
-        setTimeout(() => useAssistant.getState().reset(), 550);
+        if (!useAssistant.getState().ghostActive) {
+          hideOrbIfIdle();
+        }
+        setTimeout(() => { void endTurn(); }, 550);
       } else {
         // Other error — fallback: open without auto-detect
         try {
@@ -945,7 +1274,7 @@ export async function finishCapture(): Promise<void> {
     // The architect window is now open with the map ready.
     // Hide the loading indicator and reset.
     useAssistant.getState().setLoadingVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   }
@@ -954,14 +1283,14 @@ export async function finishCapture(): Promise<void> {
   if (intent.action === "open_settings") {
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
+    hideOrbIfIdle();
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("show_settings_sidebar");
     } catch (err) {
       console.error("[NEXUS] failed to open settings sidebar:", err);
     }
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   }
@@ -976,8 +1305,8 @@ export async function finishCapture(): Promise<void> {
     void speak(prompt.replace(/,/g, ""));
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   } else if (intent.action === "greeting") {
@@ -995,8 +1324,8 @@ export async function finishCapture(): Promise<void> {
 
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   } else if (isLocalExecutableIntent(intent)) {
@@ -1022,8 +1351,8 @@ export async function finishCapture(): Promise<void> {
 
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   }
@@ -1055,7 +1384,10 @@ export async function finishCapture(): Promise<void> {
     // It emits events on the "orchestrator:event" channel which the
     // frontend listener (net/orchestrator.ts) translates to UI state.
     const result = await processViaOrchestrator(transcript);
-    console.log("[NEXUS] orchestrator process result:", result);
+    console.log(
+      "[NEXUS] orchestrator process result:",
+      JSON.stringify(result)?.slice(0, 160) ?? String(result),
+    );
 
     if (result?.handled_locally) {
       // Local command — orchestrator emitted "done", we're finished.
@@ -1079,8 +1411,8 @@ export async function finishCapture(): Promise<void> {
   await speak("Didn't catch that sir");
   // Log failed transcript for self-learning
   void logFailedTranscript(transcript);
-  useAssistant.getState().setVisible(false);
-  setTimeout(() => useAssistant.getState().reset(), 550);
+  hideOrbIfIdle();
+  setTimeout(() => { void endTurn(); }, 550);
   captureInProgress = false;
 }
 
@@ -1102,6 +1434,7 @@ export async function abortCapture(): Promise<void> {
   // calls. The session should persist for the app lifetime.
   void cancelOrchestrator();
   releaseMicStream();
+  // turn-end:keep-raw (explicit user cancel/barge-in must stay cancelled)
   useAssistant.getState().reset();
 }
 
@@ -1132,8 +1465,8 @@ export async function finishCaptureFromVad(
       console.warn("[NEXUS] captureInProgress stuck for 12s — force resetting");
       captureInProgress = false;
       useAssistant.getState().setState("idle");
-      useAssistant.getState().setVisible(false);
-      setTimeout(() => useAssistant.getState().reset(), 550);
+      hideOrbIfIdle();
+      setTimeout(() => { void endTurn(); }, 550);
     }
   }, 12000);
 
@@ -1154,8 +1487,8 @@ async function _finishCaptureFromVadInner(
   if (!audio || audio.length === 0) {
     console.warn("no audio from VAD");
     releaseMicStream();
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   }
@@ -1205,8 +1538,8 @@ async function _finishCaptureFromVadInner(
     useAssistant.getState().setState("speaking");
     useAssistant.getState().addAssistantMessage("Didn't catch that, sir.");
     await speak("Didn't catch that sir");
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   }
@@ -1274,9 +1607,10 @@ async function _finishCaptureFromVadInner(
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 1200));
 
-    // Step 2: Now hide the orb and show the loading animation.
-    useAssistant.getState().setVisible(false);
-    useAssistant.getState().setLoadingVisible(true);
+    if (!useAssistant.getState().ghostActive) {
+      hideOrbIfIdle();
+      useAssistant.getState().setLoadingVisible(true);
+    }
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -1296,8 +1630,10 @@ async function _finishCaptureFromVadInner(
         void speak("No repository found sir. Open a repo in your browser or GitHub Desktop.");
         await waitForTtsIdle();
         await new Promise((resolve) => setTimeout(resolve, 800));
-        useAssistant.getState().setVisible(false);
-        setTimeout(() => useAssistant.getState().reset(), 550);
+        if (!useAssistant.getState().ghostActive) {
+          hideOrbIfIdle();
+        }
+        setTimeout(() => { void endTurn(); }, 550);
       } else {
         // Other error — fallback: open without auto-detect
         try {
@@ -1310,7 +1646,7 @@ async function _finishCaptureFromVadInner(
     // The architect window is now open with the map ready.
     // Hide the loading indicator and reset.
     useAssistant.getState().setLoadingVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   }
@@ -1325,8 +1661,8 @@ async function _finishCaptureFromVadInner(
     void speak(prompt.replace(/,/g, ""));
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   } else if (intent.action === "greeting") {
@@ -1344,8 +1680,8 @@ async function _finishCaptureFromVadInner(
 
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   } else if (isLocalExecutableIntent(intent)) {
@@ -1371,8 +1707,8 @@ async function _finishCaptureFromVadInner(
 
     await waitForTtsIdle();
     await new Promise((resolve) => setTimeout(resolve, 800));
-    useAssistant.getState().setVisible(false);
-    setTimeout(() => useAssistant.getState().reset(), 550);
+    hideOrbIfIdle();
+    setTimeout(() => { void endTurn(); }, 550);
     captureInProgress = false;
     return;
   }
@@ -1395,7 +1731,10 @@ async function _finishCaptureFromVadInner(
     // response arrives, so we don't need to block here.
     captureInProgress = false;
     const result = await processViaOrchestrator(transcript);
-    console.log("[NEXUS] orchestrator process result (vad):", result);
+    console.log(
+      "[NEXUS] orchestrator process result (vad):",
+      JSON.stringify(result)?.slice(0, 160) ?? String(result),
+    );
     return;
   } catch (err) {
     console.warn("[NEXUS] orchestrator unavailable for query (vad):", err);
@@ -1411,7 +1750,7 @@ async function _finishCaptureFromVadInner(
   await speak("Didn't catch that sir");
   // Log failed transcript for self-learning
   void logFailedTranscript(transcript);
-  useAssistant.getState().setVisible(false);
-  setTimeout(() => useAssistant.getState().reset(), 550);
+  hideOrbIfIdle();
+  setTimeout(() => { void endTurn(); }, 550);
   captureInProgress = false;
 }

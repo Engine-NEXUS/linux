@@ -72,6 +72,28 @@ describe("checkQuota", () => {
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain("search");
   });
+
+  // P3.2 quota-aware narration: every denial reason must be speakable —
+  // human sentence, names the limit, gives the recovery (tomorrow /
+  // midnight / rephrase). A silent or empty reason = silent denial.
+  test("every denial reason is speakable guidance", async () => {
+    const cases: Array<[string, any, string, string]> = [
+      ["requests", { requests: LIMITS.requests_per_day }, "user-a", "limit"],
+      ["deep", { deep_calls: LIMITS.deep_calls_per_day }, "user-b", "deep"],
+      ["search", { search_calls: LIMITS.search_calls_per_day }, "user-c", "search"],
+      ["neurons", { ai_neurons: LIMITS.ai_neurons_per_day }, "user-d", "limit"],
+    ];
+    for (const [label, seed, user, mustContain] of cases) {
+      await incrementUsage(mockEnv, user, seed);
+      const isDeep = label === "deep";
+      const isSearch = label === "search";
+      const result = await checkQuota(mockEnv, user, isDeep, isSearch);
+      expect(result.allowed, `${label} must deny`).toBe(false);
+      expect(result.reason, `${label} reason must exist`).toBeTruthy();
+      expect(result.reason!.length, `${label} reason must be a sentence`).toBeGreaterThan(15);
+      expect(result.reason!.toLowerCase(), `${label} reason must guide`).toContain(mustContain);
+    }
+  });
 });
 
 describe("incrementUsage", () => {

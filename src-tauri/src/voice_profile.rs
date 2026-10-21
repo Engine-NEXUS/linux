@@ -36,6 +36,34 @@ pub const MAX_ENROLLMENT_VECTORS: usize = 40;
 /// Minimum number of enrollment clips required.
 pub const MIN_ENROLLMENT_CLIPS: usize = 3;
 
+/// Authorship decision for one captured turn. This is separate from wake-word
+/// detection: a loud television can pass energy gates and produce fluent
+/// English, but it must never be treated as the enrolled owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOwnership {
+    Verified,
+    Uncertain,
+    Rejected,
+    #[default]
+    Unenrolled,
+}
+
+impl TurnOwnership {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TurnOwnership::Verified => "verified",
+            TurnOwnership::Uncertain => "uncertain",
+            TurnOwnership::Rejected => "rejected",
+            TurnOwnership::Unenrolled => "unenrolled",
+        }
+    }
+}
+
+/// Similarity band below the acceptance threshold that still permits neutral
+/// parsing. Anything farther below the owner profile is ambient audio.
+pub const TURN_REVIEW_MARGIN: f32 = 0.10;
+
 /// Sound-alike phrases that should NOT trigger wake word.
 /// Used for negative training and display in the UI.
 pub const SOUND_ALIKES: &[&str] = &[
@@ -107,7 +135,28 @@ impl VoiceProfile {
         !self.embeddings.is_empty()
     }
 
+    /// Acceptance threshold configured by enrollment.
+    #[allow(dead_code)]
+    pub fn acceptance_threshold(&self) -> f32 {
+        self.threshold
+    }
+
+    /// Classify one turn embedding against this profile.
+    pub fn classify_turn(&self, similarity: Option<f32>) -> TurnOwnership {
+        let Some(similarity) = similarity else {
+            return TurnOwnership::Uncertain;
+        };
+        if similarity >= self.threshold {
+            TurnOwnership::Verified
+        } else if similarity >= self.threshold - TURN_REVIEW_MARGIN {
+            TurnOwnership::Uncertain
+        } else {
+            TurnOwnership::Rejected
+        }
+    }
+
     /// Get the number of enrolled embeddings.
+    #[allow(dead_code)]
     pub fn num_embeddings(&self) -> usize {
         self.embeddings.len()
     }
@@ -139,6 +188,18 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (norm_a * norm_b)
+}
+
+/// Classify turn authorship for an optional profile. Absence of enrollment is
+/// explicitly `Unenrolled`; it must not be conflated with a verified owner.
+pub fn classify_turn_owner(
+    profile: Option<&VoiceProfile>,
+    similarity: Option<f32>,
+) -> TurnOwnership {
+    match profile {
+        Some(profile) => profile.classify_turn(similarity),
+        None => TurnOwnership::Unenrolled,
+    }
 }
 
 /// Verify a speaker embedding against an enrolled profile.
@@ -242,6 +303,7 @@ impl SpeakerVerifier {
 
     /// Add an accepted embedding to the profile (implicit enrollment).
     /// This grows the profile up to MAX_ENROLLMENT_VECTORS.
+    #[allow(dead_code)]
     pub fn implicit_enroll(&mut self, embedding: Vec<f32>) -> anyhow::Result<()> {
         if let Some(profile) = &mut self.profile {
             profile.add_embedding(embedding);
@@ -251,6 +313,7 @@ impl SpeakerVerifier {
     }
 
     /// Delete the voice profile.
+    #[allow(dead_code)]
     pub fn delete(&mut self) -> anyhow::Result<()> {
         if self.profile_path.exists() {
             std::fs::remove_file(&self.profile_path)?;
@@ -321,6 +384,32 @@ mod tests {
             profile.add_embedding(vec![i as f32; 96]);
         }
         assert_eq!(profile.num_embeddings(), MAX_ENROLLMENT_VECTORS);
+    }
+
+    #[test]
+    fn test_turn_ownership_zones() {
+        let profile = VoiceProfile::new(0.45);
+        assert_eq!(
+            classify_turn_owner(Some(&profile), Some(0.72)),
+            TurnOwnership::Verified
+        );
+        assert_eq!(
+            classify_turn_owner(Some(&profile), Some(0.40)),
+            TurnOwnership::Uncertain
+        );
+        assert_eq!(
+            classify_turn_owner(Some(&profile), Some(0.12)),
+            TurnOwnership::Rejected
+        );
+        assert_eq!(
+            classify_turn_owner(Some(&profile), None),
+            TurnOwnership::Uncertain
+        );
+        assert_eq!(
+            classify_turn_owner(None, Some(0.99)),
+            TurnOwnership::Unenrolled
+        );
+        assert_eq!(TurnOwnership::Rejected.as_str(), "rejected");
     }
 
     #[test]

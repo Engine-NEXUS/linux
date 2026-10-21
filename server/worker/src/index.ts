@@ -2,7 +2,6 @@
  * NEXUS Cloudflare Worker — fully serverless. No sidecar, no server needed.
  *
  * Handles everything:
- *   - User/device registration (POST /api/register)
  *   - OAuth authorization URL generation (GET /oauth/auth-url)
  *   - OAuth code exchange (POST /oauth/exchange)
  *   - OAuth status (GET /oauth/status)
@@ -20,28 +19,44 @@
  *   npx wrangler d1 execute nexus-db --file=schema.sql  --remote  # creates tables
  *   npx wrangler secret put GOOGLE_CLIENT_ID
  *   npx wrangler secret put GOOGLE_CLIENT_SECRET
- *   npx wrangler secret put GITHUB_CLIENT_ID
- *   npx wrangler secret put GITHUB_CLIENT_SECRET
- *   npx wrangler secret put NEXUS_ENCRYPTION_KEY  # Fernet key for API keys
- *   npx wrangler deploy
+  *   npx wrangler secret put GITHUB_CLIENT_ID
+  *   npx wrangler secret put GITHUB_CLIENT_SECRET
+  *   npx wrangler deploy
  */
 
 // ---- Module imports ----
-import { checkQuota, incrementUsage, getUsage, type UsageRow } from "./quota";
+import { checkQuota, incrementUsage } from "./quota";
+import { buildHealthBody, withProtocolVersion } from "./protocol";
 import { cacheGet, cacheSet, contentHash, prAnalysisKey, searchKey } from "./cache";
-import { retrieve, retrieveCascade, buildSearchSynthesisPrompt, isSearchQuestion, searchWikipedia, type SearchResult } from "./research";
+import { retrieveCascade, buildSearchSynthesisPrompt, isSearchQuestion, searchWikipedia } from "./research";
 import { synthesizeWithCascade, callGroq, callGemini } from "./external_llm";
-import { dedupeSources, stripInjection, buildResponse, extractCaveats } from "./clean";
+import { dedupeSources } from "./clean";
 import {
-  ANALYSIS_FALLBACK_CHAIN, DEEP_ANALYSIS_FALLBACK_CHAIN, SUMMARY_FALLBACK_CHAIN,
-  SEARCH_SYNTHESIS_FALLBACK_CHAIN, CHEAP_FALLBACK_MODEL,
-  selectAnalysisModel, selectSearchModel, selectSummaryModel,
-  truncateContext, FLASH_CONTEXT_LIMIT_CHARS,
-} from "./models";
+  d1Store, claimProfile, resolveProfile, rotateDeviceToken, selfRevokeDevice,
+  type ClaimBody, type MigrationMode,
+} from "./identity";
 import {
-  authenticateDevice, consumeOAuthState, createOAuthState, registerDevice,
-  PUBLIC_ROUTES,
+  gateTranscript, recordDenial, denialStatus, DENIAL_ERROR,
+} from "./entitlement";
+import {
+  adminAuth, listPendingProfiles, listProfiles, approveProfile, suspendProfile,
+  revokeProfileCascade, revokeDevice, setEntitlement, listProfileEvents,
+  type AdminBody,
+} from "./admin";
+// SECURITY (Linux port J1): the deny-by-default device gate. `auth.ts` was
+// written against a `user_devices` table the branch dropped; it is re-pointed
+// at the Feature-88 `devices` table (see the header comment there).
+import {
+  authenticateDevice,
+  consumeOAuthState,
+  corsHeaders,
+  createOAuthState,
+  isPublicRoute,
+  parseAllowedOrigins,
+  resolveAuthUserId,
 } from "./auth";
+// NOTE: ./models was deleted (audit M3) — it was imported but every symbol
+// was shadowed by local consts below, so edits to it silently did nothing.
 
 // ---- Types ----
 
@@ -57,8 +72,10 @@ interface Env {
   GITHUB_CLIENT_SECRET: string;
   SWIGGY_CLIENT_ID: string;
   SWIGGY_CLIENT_SECRET: string;
-  NEXUS_ENCRYPTION_KEY: string;
   NEXUS_ADMIN_TOKEN?: string;  // gates POST /models/nlu/publish
+  NEXUS_ADMIN_IDENTITY_TOKEN?: string;  // gates /v1/admin/* (Feature 88, W2)
+  MIGRATION_MODE?: string;     // identity migration: off | strict | revoke-legacy (Feature 88)
+  ALLOWED_ORIGINS?: string;    // extra CORS origins, comma-separated (Linux port J1)
 }
 
 // ---- OAuth configuration ----
@@ -90,12 +107,15 @@ const SWIGGY_SCOPES = "read write";
 // three Swiggy MCP endpoints (food/im/dineout).
 const SWIGGY_RESOURCE = "https://mcp.swiggy.com";
 
-// ---- Model constants (re-exported from models.ts for backward compat) ----
+// ---- Model constants (single source of truth — ./models.ts was deleted,
+// it shadowed these and edits to it silently did nothing) ----
 const INTENT_MODEL = "@cf/meta/llama-3.2-1b-instruct";
 const SUMMARY_MODEL = "@cf/mistral/mistral-small-3.1-24b-instruct";
 const SMALL_SUMMARY_MODEL = "@cf/meta/llama-3.2-3b-instruct";
 const ANALYSIS_MODEL = "@cf/zai-org/glm-4.7-flash";
 const DEEP_ANALYSIS_MODEL = "@cf/zai-org/glm-5.3-flash";
+// GLM-flash context ceiling: requests larger than this are truncated.
+const FLASH_CONTEXT_LIMIT_CHARS = 520000;
 
 // Track recent analyses to detect re-evaluation requests
 // Maps "user_id:repo:prNumber" → timestamp of last analysis
@@ -295,26 +315,8 @@ function githubErrorMessage(status: number, context: string): string {
   }
   return `GitHub API error: ${status}`;
 }
-
-async function getCredentialsFromD1(env: Env, userId: string): Promise<{
-  google?: { access_token: string; scopes: string; refresh_token?: string; expires_at?: number };
-  github?: { access_token: string };
-}> {
-  const result = await env.DB.prepare(
-    "SELECT provider, access_token, refresh_token, expires_at, scopes FROM oauth_tokens WHERE user_id = ?"
-  ).bind(userId).all();
-
-  const creds: Record<string, any> = {};
-  for (const row of result.results || []) {
-    creds[row.provider as string] = {
-      access_token: row.access_token as string,
-      refresh_token: row.refresh_token as string | undefined,
-      expires_at: row.expires_at as number | undefined,
-      scopes: row.scopes as string | undefined,
-    };
-  }
-  return creds;
-}
+// NOTE: getCredentialsFromD1 was deleted (audit M4) — defined but zero
+// call-sites. Token reads go through getValidGoogleToken / vault paths.
 
 async function refreshGoogleToken(env: Env, refreshToken: string): Promise<{ access_token: string; expires_in: number }> {
   const resp = await fetch(GOOGLE_TOKEN_URL, {
@@ -1710,7 +1712,6 @@ async function handleCalendar(req: NexusRequest, env: Env, token: string): Promi
 
 async function handleSearch(req: NexusRequest, env: Env): Promise<string> {
   const query = req.task.request;
-  const userId = req.requester.id;
 
   // Check cache first
   const cacheK = searchKey("en", query);
@@ -1724,13 +1725,13 @@ async function handleSearch(req: NexusRequest, env: Env): Promise<string> {
   const deduped = dedupeSources(retrievalResult.results);
 
   if (deduped.length === 0) {
-    // No sources found — fall back to LLM with honest framing
-    const fallback = await summarize(
+    // No sources found — fall back to LLM with honest framing.
+    // Quota is charged ONCE by handleTranscript after this returns —
+    // incrementing here as well double-counted every search (audit H1).
+    return await summarize(
       `Answer this question concisely. If you're not confident in the answer, say so:\n\n${query}`,
       env
     );
-    await incrementUsage(env, userId, { requests: 1, ai_neurons: 50, search_calls: 1 });
-    return fallback;
   }
 
   // Build synthesis prompt with sources + prompt-injection guard
@@ -1790,20 +1791,25 @@ async function handleSearch(req: NexusRequest, env: Env): Promise<string> {
   // Cache for 24 hours
   await cacheSet(env, cacheK, fullReply, 86400);
 
-  // Track usage
-  await incrementUsage(env, userId, { requests: 1, ai_neurons: 100, search_calls: 1 });
-
+  // Quota is charged ONCE by handleTranscript after this returns —
+  // incrementing here as well double-counted every search (audit H1).
   return fullReply;
 }
 
+async function handleCounsel(req: NexusRequest, env: Env): Promise<string> {
+  const { buildCounselPrompt, COUNSEL_SYSTEM, memoryPreamble } = await import("./counsel");
+  const prompt = memoryPreamble(req.task.dialog_context?.memory) + buildCounselPrompt(req.task.request);
+  const llmResult = await synthesizeWithCascade(prompt, env, COUNSEL_SYSTEM, 500);
+  if (llmResult) return llmResult.text;
+  // Fallback to Cloudflare summarize if cascade failed
+  return await summarize(prompt, env);
+}
+
 async function handleGeneral(req: NexusRequest, env: Env): Promise<string> {
-  const prompt = `You are NEXUS, a helpful personal assistant. Answer the user's request concisely and naturally, as if speaking aloud:\n\n${req.task.request}`;
-  const llmResult = await synthesizeWithCascade(
-    prompt,
-    env,
-    "You are NEXUS, a helpful personal assistant. Answer concisely and naturally, as if speaking aloud. Never show reasoning steps.",
-    500,
-  );
+  const { generalSystem, memoryPreamble } = await import("./counsel");
+  const persona = (req.task as { persona?: string }).persona;
+  const prompt = `${memoryPreamble(req.task.dialog_context?.memory)}You are NEXUS, a helpful personal assistant. Answer the user's request concisely and naturally, as if speaking aloud:\n\n${req.task.request}`;
+  const llmResult = await synthesizeWithCascade(prompt, env, generalSystem(persona), 500);
   if (llmResult) return llmResult.text;
   // Fallback to Cloudflare summarize if cascade failed
   return await summarize(prompt, env);
@@ -1817,11 +1823,27 @@ interface NexusRequest {
   task: { type: string; request: string; dialog_context?: DialogContext };
 }
 
+/** Extract the device token from an Authorization: Bearer header. */
+function bearerToken(request: Request): string | null {
+  const header = request.headers.get("Authorization");
+  if (!header) return null;
+  const m = header.match(/^Bearer\s+(\S+)$/i);
+  return m ? m[1] : null;
+}
+
+/** Read the identity migration mode (Feature 88). Default: off. */
+function migrationMode(env: Env): MigrationMode {
+  const mode = (env.MIGRATION_MODE || "off").toLowerCase();
+  return mode === "strict" ? "strict" : mode === "revoke-legacy" ? "revoke-legacy" : "off";
+}
+
 /** Dialog context sent by the client on a follow-up turn. */
 interface DialogContext {
   pending_intent: string;
   original_request: string;
   missing: string[];
+  /** Memory Core context pack from the device (facts + recent turns). Optional. */
+  memory?: string;
 }
 
 /** Dialog state returned to the client when more info is needed. */
@@ -1839,28 +1861,27 @@ export default {
     const path = url.pathname;
     const method = request.method;
 
+    // SECURITY (Linux port J1): the request origin is REFLECTED, never "*",
+    // and only when it is on the allowlist. `Access-Control-Allow-Origin: *`
+    // let any web page read the token routes cross-origin. `Vary: Origin` is
+    // always set so a shared cache never serves one origin's response to
+    // another. CORS is not authentication — the device gate below is.
+    const cors = corsHeaders(
+      request.headers.get("Origin"),
+      parseAllowedOrigins(env.ALLOWED_ORIGINS),
+    );
+
     const json = (data: unknown, status = 200) =>
       new Response(JSON.stringify(data), {
         status,
-        // SECURITY (2026-10-02): was `Access-Control-Allow-Origin: "*"`, which
-        // let any origin read these responses. The Worker is called from a Tauri
-        // WebView (an opaque-ish origin) and by `curl`, neither of which needs a
-        // permissive CORS policy. Reflecting the request origin and requiring
-        // the device credential is the correct pairing: CORS is not
-        // authentication, but `*` was advertising that we had none.
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": request.headers.get("Origin") || "null",
-          "Vary": "Origin",
-        },
+        headers: { "Content-Type": "application/json", ...cors },
       });
 
     // ---- CORS preflight ----
     if (method === "OPTIONS") {
       return new Response(null, {
         headers: {
-          "Access-Control-Allow-Origin": request.headers.get("Origin") || "null",
-          "Vary": "Origin",
+          ...cors,
           "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
           "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Nexus-Device-Token",
           "Access-Control-Max-Age": "600",
@@ -1868,23 +1889,27 @@ export default {
       });
     }
 
-    // ---- Authentication gate (deny by default) ----
+    // ---- Deny-by-default device gate ----
     //
-    // SECURITY (2026-10-02): before this, only 1 of 19 routes was gated, and
-    // the three routes that return live OAuth access tokens were not gated at
-    // all. Anything not on the public allowlist now requires a valid device
-    // credential. `/models/nlu/publish` is admin-token gated further down and
-    // is deliberately reached before this check.
+    // SECURITY (Linux port J1): before this, the admin plane was the only
+    // gated surface and the three routes that return live OAuth access tokens
+    // were not gated at all — `?user_id=X` was the only thing standing between
+    // a stranger and somebody's Gmail, Calendar and private-repo token.
     //
-    // `authUserId` is the ONLY user identity any handler below is allowed to
-    // trust. A `user_id` query parameter or body field is a routing hint, never
-    // an authorization input — that was the root cause of the token leak.
+    // Anything not on the public allowlist now requires a valid device
+    // credential. `/models/nlu/publish` and `/v1/admin/*` keep their own
+    // admin-token gate and are reached before this check.
+    //
+    // `authUserId` is the ONLY user identity a handler below is allowed to
+    // trust. A `user_id` query parameter or body field is a routing hint,
+    // never an authorization input — that was the root cause of the leak.
     let authUserId: string | null = null;
-    const routeKey = `${method} ${path}`;
-    if (!PUBLIC_ROUTES.has(routeKey)) {
+    if (!isPublicRoute(method, path)) {
       const auth = await authenticateDevice(request, env, json);
       if ("error" in auth) return auth.error;
-      authUserId = auth.device.user_id;
+      // Transition: a client may still send `user_id` alongside its bearer
+      // during the grace period. The id is ignored; the device decides.
+      authUserId = resolveAuthUserId(auth.device, url.searchParams.get("user_id"));
     }
     /** Handlers call this instead of reading `user_id` off the request. */
     const requireAuthUserId = (): string | Response => {
@@ -1894,12 +1919,150 @@ export default {
 
     // ---- Health ----
     if (path === "/health" && method === "GET") {
-      return json({ ok: true, service: "NEXUS Worker", protocol: "text-only", serverless: true });
+      return json(buildHealthBody());
     }
 
-    // ---- User registration ----
-    if (path === "/api/register" && method === "POST") {
-      return handleRegister(request, env, json);
+    // ---- Feature 88: canonical laptop identity (claim handshake) ----
+    // Claim is the bootstrap — no prior auth, but rate-limited + pending-cap.
+    if (path === "/v1/profiles/claim" && method === "POST") {
+      let body: ClaimBody;
+      try {
+        body = await request.json() as ClaimBody;
+      } catch {
+        return json({ error: "invalid body" }, 400);
+      }
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      const result = await claimProfile(d1Store(env), body, ip, Date.now());
+      if (!result.ok) {
+        const status = result.code === "rate_limited" || result.code === "pending_cap" ? 429 : 401;
+        return json({ error: result.code }, status);
+      }
+      return json(withProtocolVersion(result as unknown as Record<string, unknown>));
+    }
+
+    // ---- Feature 88: profile status (Bearer device token) ----
+    if (path === "/v1/profiles/me" && method === "GET") {
+      const store = d1Store(env);
+      const result = await resolveProfile(store, {
+        profileId: url.searchParams.get("profile_id") || undefined,
+        deviceId: url.searchParams.get("device_id") || undefined,
+        authHeader: request.headers.get("Authorization"),
+        mode: migrationMode(env),
+      }, Date.now());
+      if (!result.ok) return json({ error: result.code, code: result.code, status: result.status }, 403);
+      const entitlements = await store.listEntitlements(result.profileId);
+      return json(withProtocolVersion({
+        profile_id: result.profileId,
+        device_id: result.deviceId,
+        status: "approved",
+        quota_tier: result.quotaTier,
+        entitlements: entitlements.map(e => ({ scope: e.scope, allowed: e.allowed, expires_at: e.expires_at })),
+      } as Record<string, unknown>));
+    }
+
+    // ---- Feature 88: rotate device token ----
+    if (path === "/v1/devices/rotate-token" && method === "POST") {
+      let body: { profile_id?: string; device_id?: string };
+      try {
+        body = await request.json() as typeof body;
+      } catch {
+        return json({ error: "invalid body" }, 400);
+      }
+      if (!body.profile_id || !body.device_id) return json({ error: "profile_id and device_id required" }, 400);
+      const token = bearerToken(request);
+      if (!token) return json({ error: "device token required" }, 401);
+      const result = await rotateDeviceToken(d1Store(env), body.profile_id, body.device_id, token, Date.now());
+      if (!result.ok) return json({ error: result.code }, 401);
+      return json(withProtocolVersion({ device_token: result.device_token } as Record<string, unknown>));
+    }
+
+    // ---- Feature 88: self-revoke current device (reinstall path) ----
+    if (path === "/v1/devices/current" && method === "DELETE") {
+      let body: { profile_id?: string; device_id?: string };
+      try {
+        body = await request.json() as typeof body;
+      } catch {
+        return json({ error: "invalid body" }, 400);
+      }
+      if (!body.profile_id || !body.device_id) return json({ error: "profile_id and device_id required" }, 400);
+      const token = bearerToken(request);
+      if (!token) return json({ error: "device token required" }, 401);
+      const result = await selfRevokeDevice(d1Store(env), body.profile_id, body.device_id, token, Date.now());
+      if (!result.ok) return json({ error: result.code }, 401);
+      return json(withProtocolVersion({ revoked: true } as Record<string, unknown>));
+    }
+
+    // ---- Feature 88: admin control plane (Phase 1: CLI only) ----
+    if (path.startsWith("/v1/admin/")) {
+      if (!adminAuth(request, env)) return json({ error: "admin auth required" }, 401);
+      const store = d1Store(env);
+      const adminRead = async () => {
+        let body: AdminBody = {};
+        if (method === "POST") {
+          try { body = await request.json() as AdminBody; } catch { return null; }
+        }
+        return body;
+      };
+
+      if (path === "/v1/admin/profiles/pending" && method === "GET") {
+        const r = await listPendingProfiles(store);
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(r.data.map(p => ({
+          profile_id: p.profile_id, status: p.status, quota_tier: p.quota_tier,
+          created_at: p.created_at, provision_hint: p.provision_hint,
+        })));
+      }
+      if (path === "/v1/admin/profiles/list" && method === "GET") {
+        const r = await listProfiles(store, url.searchParams.get("status") || undefined);
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(r.data.map(p => ({
+          profile_id: p.profile_id, status: p.status, quota_tier: p.quota_tier,
+          created_at: p.created_at, approved_at: p.approved_at, expires_at: p.expires_at,
+        })));
+      }
+      if (path === "/v1/admin/profiles/approve" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await approveProfile(store, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/profiles/suspend" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await suspendProfile(store, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/profiles/revoke" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await revokeProfileCascade(store, env.DB, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/devices/revoke" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await revokeDevice(store, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/entitlements/set" && method === "POST") {
+        const body = await adminRead();
+        if (!body) return json({ error: "invalid body" }, 400);
+        const r = await setEntitlement(store, body, Date.now());
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(withProtocolVersion(r.data as unknown as Record<string, unknown>));
+      }
+      if (path === "/v1/admin/profiles/events" && method === "GET") {
+        const profileId = url.searchParams.get("profile_id") || "";
+        if (!profileId) return json({ error: "profile_id required" }, 400);
+        const r = await listProfileEvents(store, profileId);
+        if (!r.ok) return json({ error: r.error }, r.status);
+        return json(r.data);
+      }
+      return json({ error: "not found" }, 404);
     }
 
     // ---- OAuth: get auth URL ----
@@ -1909,7 +2072,9 @@ export default {
       return handleAuthUrl(url, env, json, userId);
     }
 
-    // ---- OAuth: browser callback (for testing — exchanges code automatically) ----
+    // ---- OAuth: browser callback (the provider redirects the browser here) ----
+    // Public on purpose: the browser cannot attach a device credential. It is
+    // protected by the single-use, hashed, TTL-bound `state` instead.
     if (path === "/oauth/callback" && method === "GET") {
       return handleOAuthBrowserCallback(url, env, json);
     }
@@ -1930,11 +2095,11 @@ export default {
 
     // ---- OAuth: get github token (for architect) ----
     //
-    // SECURITY (2026-10-02): these three endpoints used to key purely on
-    // `?user_id=`, returning a live access token to anyone who supplied a string.
-    // The user is now taken from the authenticated device. `user_id` is no
-    // longer read from the query at all — a device can only ever mint a token
-    // for the account it registered as.
+    // SECURITY (Linux port J1): these three endpoints used to key purely on
+    // `?user_id=`, returning a live access token to anyone who supplied a
+    // string. The user is now taken from the authenticated device.
+    // `user_id` is no longer read from the query at all — a device can only
+    // ever mint a token for the account it registered as.
     if (path === "/oauth/github-token" && method === "GET") {
       const userId = requireAuthUserId();
       if (typeof userId !== "string") return userId;
@@ -1990,16 +2155,6 @@ export default {
       return handleListApiKeys(env, json, userId);
     }
 
-    // ---- Config check ----
-    if (path === "/config/check" && method === "GET") {
-      return json({
-        google: { configured: !!env.GOOGLE_CLIENT_ID, scopes: GOOGLE_SCOPES },
-        github: { configured: !!env.GITHUB_CLIENT_ID, scopes: GITHUB_SCOPES },
-        swiggy: { configured: !!env.SWIGGY_CLIENT_ID, scopes: SWIGGY_SCOPES },
-        redirect_uri: OAUTH_REDIRECT_URI,
-      });
-    }
-
     // ---- NLU model distribution (family devices) ----
     // Admin retrains BERT-Mini locally, uploads files to R2 via
     // `wrangler r2 object put`, then POSTs the manifest here. Family
@@ -2012,7 +2167,7 @@ export default {
       const manifest = await env.CACHE.get("nlu_model_latest");
       if (!manifest) return json({ error: "no model published yet" }, 404);
       return new Response(manifest, {
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        headers: { "Content-Type": "application/json", ...cors },
       });
     }
 
@@ -2032,7 +2187,7 @@ export default {
       return new Response(obj.body, {
         headers: {
           "Content-Type": "application/octet-stream",
-          "Access-Control-Allow-Origin": "*",
+          ...cors,
         },
       });
     }
@@ -2060,25 +2215,6 @@ export default {
       }
     }
 
-    // ---- STT: Transcribe audio via Workers AI Whisper ----
-    if (path === "/api/transcribe" && method === "POST") {
-      try {
-        const body = await request.json() as { audio_base64?: string };
-        if (!body.audio_base64) return json({ error: "missing audio_base64" }, 400);
-        const binaryStr = atob(body.audio_base64);
-        const bytes = new Uint8Array(binaryStr.length);
-        for (let i = 0; i < binaryStr.length; i++) {
-          bytes[i] = binaryStr.charCodeAt(i);
-        }
-        const whisperResp = await env.AI.run("@cf/openai/whisper", {
-          audio: [...bytes],
-        });
-        return json({ text: (whisperResp as any)?.text || "" });
-      } catch (e) {
-        return json({ error: (e as Error).message, text: "" }, 500);
-      }
-    }
-
     // ---- Main: process transcript ----
     if (path === "/" && method === "POST") {
       return handleTranscript(request, env, json);
@@ -2088,82 +2224,37 @@ export default {
   },
 };
 
-// ---- Registration handler ----
-
-async function handleRegister(
-  request: Request,
-  env: Env,
-  json: (d: unknown, s?: number) => Response,
-): Promise<Response> {
-  let body: any;
-  try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-
-  const userId = body.user_id || "";
-  const deviceId = body.device_id || "";
-  if (!userId || !deviceId) return json({ error: "user_id and device_id required" }, 400);
-
-  const now = Date.now() / 1000;
-
-  // SECURITY (2026-10-02): this previously stored a client-supplied
-  // `device_token` verbatim in a column nothing ever read. Registration now
-  // mints a bearer token server-side, returns it exactly once, and persists only
-  // its SHA-256. Re-registering rotates the credential.
-  //
-  // This route is intentionally public (it is the bootstrap), which is safe
-  // because it can only ever write a hash of a caller-chosen token for a
-  // caller-chosen device_id. It grants no access to anything.
-  const deviceToken = await registerDevice(
-    env,
-    userId,
-    deviceId,
-    body.device_name || null,
-    body.os || null,
-    now,
-  );
-
-  return json({
-    ok: true,
-    user_id: userId,
-    device_id: deviceId,
-    // Returned once, at registration only. The client must persist this; the
-    // Worker will never disclose it again.
-    device_token: deviceToken,
-    server_config: {
-      worker_url: new URL(request.url).origin,
-      ws_url: "",  // no WebSocket — HTTP only
-    },
-    providers: {
-      google: { configured: !!env.GOOGLE_CLIENT_ID, scopes: GOOGLE_SCOPES },
-      github: { configured: !!env.GITHUB_CLIENT_ID, scopes: GITHUB_SCOPES },
-    },
-  });
-}
-
 // ---- OAuth auth URL handler ----
 
 async function handleAuthUrl(
   url: URL,
   env: Env,
   json: (d: unknown, s?: number) => Response,
-  authUserId: string,
+  userId: string,
 ): Promise<Response> {
   const provider = (url.searchParams.get("provider") || "").toLowerCase();
-  if (!provider) return json({ error: "provider required" }, 400);
-  // SECURITY (2026-10-02): the user comes from the authenticated device, never
-  // from the query string.
-  const userId = authUserId;
   const codeChallenge = url.searchParams.get("code_challenge") || "";
   const workerOrigin = url.origin;
   const callbackUrl = `${workerOrigin}/oauth/callback`;
 
-  // SECURITY (2026-10-02): `state` was the literal "provider:userId" — not
-  // random (so not a CSRF token) and it published the user_id in the provider
-  // redirect URL. It is now 32 random bytes, stored hashed, single-use, TTL'd,
-  // and bound server-side to this user/provider pair.
+  // Provider and client id are checked BEFORE the state is minted, so a bogus
+  // provider cannot litter the state table.
+  if (provider === "google" && !env.GOOGLE_CLIENT_ID) return json({ error: "Google OAuth not configured" }, 500);
+  if (provider === "github" && !env.GITHUB_CLIENT_ID) return json({ error: "GitHub OAuth not configured" }, 500);
+  if (provider === "swiggy" && !env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
+  if (provider !== "google" && provider !== "github" && provider !== "swiggy") {
+    return json({ error: `unsupported provider: ${provider}` }, 400);
+  }
+
+  // SECURITY (Linux port J1): the state used to be the literal string
+  // "provider:userId" — not random (so not a CSRF token) and it published the
+  // user id in the provider redirect URL, the browser history and every proxy
+  // log. It is now 32 random bytes, stored only as a hash, single-use and
+  // TTL-bound; the user is bound to the state ROW, which the callback
+  // redeems. `user_id` from the query is ignored entirely.
   const state = await createOAuthState(env, userId, provider, Date.now() / 1000);
 
   if (provider === "google") {
-    if (!env.GOOGLE_CLIENT_ID) return json({ error: "Google OAuth not configured" }, 500);
     const authUrl = (
       `https://accounts.google.com/o/oauth2/v2/auth`
       + `?client_id=${encodeURIComponent(env.GOOGLE_CLIENT_ID)}`
@@ -2179,7 +2270,6 @@ async function handleAuthUrl(
   }
 
   if (provider === "github") {
-    if (!env.GITHUB_CLIENT_ID) return json({ error: "GitHub OAuth not configured" }, 500);
     const authUrl = (
       `https://github.com/login/oauth/authorize`
       + `?client_id=${encodeURIComponent(env.GITHUB_CLIENT_ID)}`
@@ -2190,35 +2280,46 @@ async function handleAuthUrl(
     return json({ url: authUrl, redirect_uri: callbackUrl });
   }
 
-  if (provider === "swiggy") {
-    if (!env.SWIGGY_CLIENT_ID) return json({ error: "Swiggy OAuth not configured" }, 500);
-    const authUrl = (
-      `${SWIGGY_AUTH_URL}`
-      + `?client_id=${encodeURIComponent(env.SWIGGY_CLIENT_ID)}`
-      + `&redirect_uri=${encodeURIComponent(callbackUrl)}`
-      + `&response_type=code`
-      + `&scope=${encodeURIComponent(SWIGGY_SCOPES)}`
-      + (codeChallenge ? `&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256` : "")
-      + `&resource=${encodeURIComponent(SWIGGY_RESOURCE)}`
-      + `&state=${encodeURIComponent(state)}`
-      + `&access_type=offline`
-      + `&prompt=consent`
-    );
-    return json({ url: authUrl, redirect_uri: callbackUrl });
-  }
+  const authUrl = (
+    `${SWIGGY_AUTH_URL}`
+    + `?client_id=${encodeURIComponent(env.SWIGGY_CLIENT_ID)}`
+    + `&redirect_uri=${encodeURIComponent(callbackUrl)}`
+    + `&response_type=code`
+    + `&scope=${encodeURIComponent(SWIGGY_SCOPES)}`
+    + (codeChallenge ? `&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256` : "")
+    + `&resource=${encodeURIComponent(SWIGGY_RESOURCE)}`
+    + `&state=${encodeURIComponent(state)}`
+    + `&access_type=offline`
+    + `&prompt=consent`
+  );
+  return json({ url: authUrl, redirect_uri: callbackUrl });
+}
 
-  return json({ error: `unsupported provider: ${provider}` }, 400);
+/**
+ * One-line, length-capped error text for a deep link.
+ *
+ * The deep link ends up in the OS URL handler, the browser history and every
+ * log line that records it, so it carries a short reason — never a user id.
+ */
+function deepLinkErrorText(message: string): string {
+  return (message || "").replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
 function renderOAuthHtml(
   provider: string,
   success: boolean,
   errorMsg: string,
-  userId: string,
   accountId = "",
 ): string {
   const providerDisplay = provider.toLowerCase() === "google" ? "Google" : provider.toLowerCase() === "github" ? "GitHub" : provider.toLowerCase() === "swiggy" ? "Swiggy" : provider;
-  const deepLink = `nexus://oauth/callback?provider=${encodeURIComponent(provider.toLowerCase())}&user_id=${encodeURIComponent(userId)}&status=${success ? "success" : "error"}`;
+  // SECURITY (Linux port J1): the deep link used to carry `user_id`, which put
+  // the owner's identity into the browser history, the OS deep-link handler
+  // and every log line that recorded the URL. It now carries the provider and
+  // the outcome only.
+  const errorParam = success
+    ? ""
+    : `&error=${encodeURIComponent(deepLinkErrorText(errorMsg))}`;
+  const deepLink = `nexus://oauth/callback?provider=${encodeURIComponent(provider.toLowerCase())}&status=${success ? "success" : "error"}${errorParam}`;
 
   if (!success) {
     return `<!DOCTYPE html>
@@ -2293,37 +2394,35 @@ async function handleOAuthBrowserCallback(
   const workerOrigin = url.origin;
   const callbackUrl = `${workerOrigin}/oauth/callback`;
 
-  // SECURITY (2026-10-02): `state` is no longer parsed for identity. It is an
-  // opaque single-use value; redeeming it returns the bound user and provider.
-  // Parsing "provider:userId" out of the query string was both non-random (so
-  // not a CSRF defence) and a user_id disclosure channel.
-  const redeemed = state ? await consumeOAuthState(env, state, Date.now() / 1000) : null;
-
+  // SECURITY (Linux port J1): the state is the only credential the browser
+  // can present — 32 random bytes, hashed at rest, single-use, TTL-bound. It
+  // resolves to the user and the provider that started the flow. An unknown,
+  // expired or already-redeemed state is REFUSED, never guessed at: the old
+  // code parsed "provider:userId" straight out of the parameter, which is
+  // exactly the CSRF hole a random state closes.
+  const redeemed = await consumeOAuthState(env, state, Date.now() / 1000);
   if (!redeemed) {
-    // Unknown, expired, or already-used state. Refuse rather than guess — this
-    // is the CSRF boundary for the whole OAuth flow.
-    const providerGuess = (url.searchParams.get("scope") || "").includes("google")
-      ? "google"
-      : "Service";
-    const message = error
-      ? `Authorization error: ${error}`
-      : "This sign-in link is invalid or has expired. Please start the connection again from NEXUS.";
-    return new Response(renderOAuthHtml(providerGuess, false, message, ""), {
-      headers: { "Content-Type": "text/html; charset=utf-8" },
-    });
+    return new Response(
+      renderOAuthHtml(
+        "Service",
+        false,
+        "This authorization link is invalid or has expired. Please start the connection again from NEXUS.",
+      ),
+      { headers: { "Content-Type": "text/html; charset=utf-8" } },
+    );
   }
 
-  const provider = redeemed.provider.toLowerCase();
   const userId = redeemed.user_id;
+  const provider = (redeemed.provider || "").toLowerCase();
 
   if (error) {
-    return new Response(renderOAuthHtml(provider || "Service", false, `Authorization error: ${error}`, userId), {
+    return new Response(renderOAuthHtml(provider || "Service", false, `Authorization error: ${error}`), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
 
   if (!code) {
-    return new Response(renderOAuthHtml(provider || "Service", false, "Missing authorization code from provider.", userId), {
+    return new Response(renderOAuthHtml(provider || "Service", false, "Missing authorization code from provider."), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
@@ -2332,7 +2431,9 @@ async function handleOAuthBrowserCallback(
     let accessToken = "";
     let refreshToken: string | null = null;
     let expiresIn = 0;
-    let accountId = userId;
+    // The account label shown on the completion page. It is the PROVIDER's
+    // account (Google email / GitHub login) — never the owner's id.
+    let accountId = "";
 
     if (provider === "google") {
       const resp = await fetch(GOOGLE_TOKEN_URL, {
@@ -2349,7 +2450,7 @@ async function handleOAuthBrowserCallback(
 
       if (!resp.ok) {
         const errText = await resp.text();
-        return new Response(renderOAuthHtml("Google", false, `Google token exchange failed: ${resp.status} ${errText}`, userId), {
+        return new Response(renderOAuthHtml("Google", false, `Google token exchange failed: ${resp.status} ${errText}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
@@ -2366,7 +2467,7 @@ async function handleOAuthBrowserCallback(
         });
         if (userInfoResp.ok) {
           const uInfo = await userInfoResp.json() as any;
-          accountId = uInfo.email || userId;
+          accountId = uInfo.email || "";
         }
       } catch { /* ignore */ }
 
@@ -2384,14 +2485,14 @@ async function handleOAuthBrowserCallback(
 
       if (!resp.ok) {
         const errText = await resp.text();
-        return new Response(renderOAuthHtml("GitHub", false, `GitHub token exchange failed: ${resp.status} ${errText}`, userId), {
+        return new Response(renderOAuthHtml("GitHub", false, `GitHub token exchange failed: ${resp.status} ${errText}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
 
       const tokens = await resp.json() as any;
       if (!tokens.access_token) {
-        return new Response(renderOAuthHtml("GitHub", false, `GitHub exchange error: ${tokens.error_description || tokens.error || "No access token"}`, userId), {
+        return new Response(renderOAuthHtml("GitHub", false, `GitHub exchange error: ${tokens.error_description || tokens.error || "No access token"}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
@@ -2407,11 +2508,11 @@ async function handleOAuthBrowserCallback(
         });
         if (ghResp.ok) {
           const ghUser = await ghResp.json() as any;
-          accountId = ghUser.login || userId;
+          accountId = ghUser.login || "";
         }
       } catch { /* ignore */ }
     } else if (provider === "swiggy") {
-      if (!env.SWIGGY_CLIENT_ID) return new Response(renderOAuthHtml("Swiggy", false, "Swiggy OAuth not configured", userId), {
+      if (!env.SWIGGY_CLIENT_ID) return new Response(renderOAuthHtml("Swiggy", false, "Swiggy OAuth not configured"), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
       const resp = await fetch(SWIGGY_TOKEN_URL, {
@@ -2429,14 +2530,14 @@ async function handleOAuthBrowserCallback(
 
       if (!resp.ok) {
         const errText = await resp.text();
-        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy token exchange failed: ${resp.status} ${errText}`, userId), {
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy token exchange failed: ${resp.status} ${errText}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
 
       const tokens = await resp.json() as any;
       if (!tokens.access_token) {
-        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy exchange error: ${tokens.error_description || tokens.error || "No access token"}`, userId), {
+        return new Response(renderOAuthHtml("Swiggy", false, `Swiggy exchange error: ${tokens.error_description || tokens.error || "No access token"}`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
       }
@@ -2446,9 +2547,9 @@ async function handleOAuthBrowserCallback(
       expiresIn = tokens.expires_in || 3600;
 
       // Swiggy doesn't have a standard userinfo endpoint we can use
-      accountId = userId;
+      accountId = "";
     } else {
-      return new Response(renderOAuthHtml(provider || "Unknown", false, `Unsupported provider: ${provider}`, userId), {
+      return new Response(renderOAuthHtml(provider || "Unknown", false, `Unsupported provider: ${provider}`), {
         headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     }
@@ -2466,11 +2567,11 @@ async function handleOAuthBrowserCallback(
     ).run();
 
     const displayProvider = provider === "google" ? "Google" : provider === "github" ? "GitHub" : "Swiggy";
-    return new Response(renderOAuthHtml(displayProvider, true, "", userId, accountId), {
+    return new Response(renderOAuthHtml(displayProvider, true, "", accountId), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   } catch (err) {
-    return new Response(renderOAuthHtml(provider || "Service", false, `OAuth Error: ${(err as Error).message}`, userId), {
+    return new Response(renderOAuthHtml(provider || "Service", false, `OAuth Error: ${(err as Error).message}`), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
@@ -2482,7 +2583,7 @@ async function handleOAuthExchange(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
-  authUserId: string,
+  userId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
@@ -2493,34 +2594,15 @@ async function handleOAuthExchange(
   const workerOrigin = new URL(request.url).origin;
   const redirectUri = body.redirect_uri || `${workerOrigin}/oauth/callback`;
 
-  // Security (2026-10-02): the account comes from the authenticated device,
-  // never from `body.user_id`. Previously a caller could exchange a code for any
-  // user_id they named.
-  const userId = authUserId;
-
+  // SECURITY (Linux port J1): `body.user_id` is IGNORED (transition period).
+  // The owner is the authenticated device — never a client-supplied id.
   if (!provider || !code) return json({ error: "missing required fields" }, 400);
-
-  // This is the deep-link leg of the OAuth flow (provider -> nexus:// callback ->
-  // renderer -> here). The browser-redirect leg validates `state` in
-  // handleOAuthBrowserCallback instead. Both must redeem it, or neither does.
-  const state = body.state || "";
-  const redeemed = state
-    ? await consumeOAuthState(env, state, Date.now() / 1000)
-    : null;
-  if (!redeemed) {
-    return json(
-      { error: "invalid or expired OAuth state — restart the connection from NEXUS" },
-      400,
-    );
-  }
-  // The state was minted for one provider; refuse to redeem it for another.
-  if (redeemed.provider.toLowerCase() !== provider) {
-    return json({ error: "OAuth state/provider mismatch" }, 400);
-  }
 
   try {
     let tokens: any;
-    let accountId = userId;
+    // The provider's account label (Google email / GitHub login) — never the
+    // owner's id.
+    let accountId = "";
 
     if (provider === "google") {
       const resp = await fetch(GOOGLE_TOKEN_URL, {
@@ -2544,7 +2626,7 @@ async function handleOAuthExchange(
         });
         if (userInfoResp.ok) {
           const uInfo = await userInfoResp.json() as any;
-          accountId = uInfo.email || userId;
+          accountId = uInfo.email || "";
         }
       } catch { /* ignore */ }
     } else if (provider === "github") {
@@ -2569,7 +2651,7 @@ async function handleOAuthExchange(
         });
         if (ghResp.ok) {
           const ghUser = await ghResp.json() as any;
-          accountId = ghUser.login || userId;
+          accountId = ghUser.login || "";
         }
       } catch { /* ignore */ }
     } else if (provider === "swiggy") {
@@ -2591,7 +2673,7 @@ async function handleOAuthExchange(
       tokens = await resp.json();
       if (!tokens.access_token) return json({ error: tokens.error_description || tokens.error || "exchange failed" }, 400);
       // Swiggy has no userinfo endpoint for account display
-      accountId = userId;
+      accountId = "";
     } else {
       return json({ error: `unsupported provider: ${provider}` }, 400);
     }
@@ -2622,7 +2704,6 @@ async function handleOAuthStatus(
   env: Env,
   json: (d: unknown, s?: number) => Response,
 ): Promise<Response> {
-
   const connected: Record<string, any> = {};
   const now = Date.now() / 1000;
   // We need refresh_token to determine if an expired token can be refreshed
@@ -2654,12 +2735,12 @@ async function handleOAuthDisconnect(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
-  authUserId: string,
+  userId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-  // Security (2026-10-02): a device can only disconnect its own account.
-  const userId = authUserId;
+  // SECURITY (Linux port J1): `body.user_id` is IGNORED — the owner is the
+  // authenticated device. A device can only disconnect its own connections.
   const provider = body.provider || "";
   if (!provider) return json({ error: "provider required" }, 400);
 
@@ -2676,22 +2757,24 @@ async function handleAddApiKey(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
-  authUserId: string,
+  userId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-  // Security (2026-10-02): account comes from the authenticated device.
-  const userId = authUserId;
+  // SECURITY (Linux port J1): `body.user_id` is IGNORED — the owner is the
+  // authenticated device.
   const provider = body.provider || "";
   const apiKey = body.api_key || "";
   if (!provider || !apiKey) return json({ error: "missing required fields" }, 400);
 
-  // Simple obfuscation (not real encryption in Worker — D1 is already encrypted at rest)
-  const encrypted = btoa(apiKey);
+  // Base64 obfuscation only (NOT encryption — Worker has no Fernet; D1 is
+  // already encrypted at rest, which is the actual protection). The
+  // NEXUS_ENCRYPTION_KEY secret was removed: it was declared but never read.
+  const obfuscated = btoa(apiKey);
   const now = Date.now() / 1000;
   await env.DB.prepare(
     "INSERT OR REPLACE INTO api_keys (user_id, provider, key_encrypted, created_at) VALUES (?, ?, ?, ?)"
-  ).bind(userId, provider, encrypted, now).run();
+  ).bind(userId, provider, obfuscated, now).run();
 
   return json({ ok: true, provider, stored: true });
 }
@@ -2700,24 +2783,23 @@ async function handleRemoveApiKey(
   request: Request,
   env: Env,
   json: (d: unknown, s?: number) => Response,
-  authUserId: string,
+  userId: string,
 ): Promise<Response> {
   let body: any;
   try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
-  // Security (2026-10-02): a device cannot delete another account's keys.
+  // SECURITY (Linux port J1): `body.user_id` is IGNORED — the owner is the
+  // authenticated device.
   await env.DB.prepare(
     "DELETE FROM api_keys WHERE user_id = ? AND provider = ?"
-  ).bind(authUserId, body.provider || "").run();
+  ).bind(userId, body.provider || "").run();
   return json({ ok: true, removed: body.provider });
 }
 
 async function handleListApiKeys(
   env: Env,
   json: (d: unknown, s?: number) => Response,
-  authUserId: string,
+  userId: string,
 ): Promise<Response> {
-  // Security (2026-10-02): no user_id query parameter.
-  const userId = authUserId;
   const result = await env.DB.prepare(
     "SELECT provider FROM api_keys WHERE user_id = ?"
   ).bind(userId).all();
@@ -2741,6 +2823,27 @@ async function handleTranscript(
   const userId = req.requester?.id || "";
   if (!userId) return json({ error: "missing requester.id" }, 400);
 
+  // ─── Feature 88: AI entitlement gate (MUST run before any AI path) ──
+  // Deny exits here: zero env.AI.run calls, zero external-LLM calls,
+  // zero usage increments. Fail-closed on lookup errors.
+  const gate = await gateTranscript(d1Store(env), {
+    profileId: (req.requester as any)?.profile_id,
+    deviceId: (req.requester as any)?.device_id && req.requester.device_id,
+    authHeader: request.headers.get("Authorization"),
+    legacyUserId: userId,
+    mode: migrationMode(env),
+  }, Date.now());
+  if (!gate.ok) {
+    await recordDenial(d1Store(env), gate.code === "unknown_profile" ? (userId || "unknown") : userId, req.requester?.device_id || null, gate.code, Date.now());
+    return json({
+      error: DENIAL_ERROR,
+      code: gate.code,
+      status: gate.status,
+      request_id: req.request_id,
+    }, denialStatus(gate.code));
+  }
+  const credentialKey = gate.legacy ? userId : gate.profileId;
+
   // ─── Dialog context follow-up ──────────────────────────────────────
   // If the client sent a dialog_context (from a previous follow-up question),
   // combine the original request with the new input so the intent classifier
@@ -2753,7 +2856,7 @@ async function handleTranscript(
   }
 
   // 1. Classify intent — but allow explicit intent override from the task
-  // (e.g. architect sidebar sends intent="impact_narration" directly)
+  // (e.g. architect sidebar sends intent="phase1_enrich" directly)
   const explicitIntent = (req.task as any)?.intent;
   let intent = explicitIntent || await classifyIntent(req.task.request, env);
 
@@ -2768,14 +2871,14 @@ async function handleTranscript(
   // 1c. Quota check — reject if user has exceeded daily limits
   const isDeep = intent === "github_analyse" || intent === "deep_analyse";
   const isSearch = intent === "search";
-  const quota = await checkQuota(env, userId, isDeep, isSearch);
+  const quota = await checkQuota(env, credentialKey, isDeep, isSearch);
   if (!quota.allowed) {
-    return json({
+    return json(withProtocolVersion({
       request_id: req.request_id,
       reply_text: quota.reason || "Daily limit reached.",
       intent,
       quota_exceeded: true,
-    });
+    }));
   }
 
   // 2. Get credentials from D1 based on intent
@@ -2787,7 +2890,7 @@ async function handleTranscript(
     if (intent === "analyze_repo") {
       replyText = await handleAnalyzeRepo(req, env);
     } else if (intent === "fast_analyse") {
-      const token = await getValidGithubToken(env, userId);
+      const token = await getValidGithubToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your GitHub account yet. Please connect it in the NEXUS setup to analyse repositories.";
       } else {
@@ -2815,10 +2918,8 @@ async function handleTranscript(
       replyText = "Opening the architecture mapper for a deep scan, sir. This will clone the repository and build a full dependency graph. It may take 30 to 60 seconds.";
     } else if (intent === "phase1_enrich") {
       replyText = await handlePhase1Enrich(req, env);
-    } else if (intent === "impact_narration") {
-      replyText = await handleImpactNarration(req, env);
     } else if (intent === "github_analyse") {
-      const token = await getValidGithubToken(env, userId);
+      const token = await getValidGithubToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your GitHub account yet. Please connect it in the NEXUS setup to analyse PRs.";
       } else {
@@ -2838,28 +2939,28 @@ async function handleTranscript(
         }
       }
     } else if (intent === "github") {
-      const token = await getValidGithubToken(env, userId);
+      const token = await getValidGithubToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your GitHub account yet. Please connect it in the NEXUS setup.";
       } else {
         replyText = await handleGitHub(req, env, token);
       }
     } else if (intent === "github_write") {
-      const token = await getValidGithubToken(env, userId);
+      const token = await getValidGithubToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your GitHub account yet. Please connect it in the NEXUS setup.";
       } else {
         replyText = await handleGitHubWrite(req, env, token);
       }
     } else if (intent === "gmail") {
-      const token = await getValidGoogleToken(env, userId);
+      const token = await getValidGoogleToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your Google account yet. Please connect it in the NEXUS setup.";
       } else {
         replyText = await handleGmail(req, env, token);
       }
     } else if (intent === "calendar") {
-      const token = await getValidGoogleToken(env, userId);
+      const token = await getValidGoogleToken(env, credentialKey);
       if (!token) {
         replyText = "You haven't connected your Google account yet. Please connect it in the NEXUS setup.";
       } else {
@@ -2867,6 +2968,8 @@ async function handleTranscript(
       }
     } else if (intent === "search") {
       replyText = await handleSearch(req, env);
+    } else if (intent === "counsel") {
+      replyText = await handleCounsel(req, env);
     } else {
       replyText = await handleGeneral(req, env);
     }
@@ -2877,7 +2980,7 @@ async function handleTranscript(
   // Track usage (non-blocking — don't fail the request if tracking fails)
   try {
     const neurons = isDeep ? 500 : isSearch ? 100 : 50;
-    await incrementUsage(env, userId, {
+    await incrementUsage(env, credentialKey, {
       requests: 1,
       ai_neurons: neurons,
       deep_calls: isDeep ? 1 : 0,
@@ -2886,11 +2989,11 @@ async function handleTranscript(
   } catch { /* quota tracking is best-effort */ }
 
   if (analysisData) {
-    const resp: any = { request_id: req.request_id, reply_text: replyText, intent, analysis: analysisData };
+    const resp: any = withProtocolVersion({ request_id: req.request_id, reply_text: replyText, intent, analysis: analysisData });
     if (dialogState) resp.dialog_state = dialogState;
     return json(resp);
   }
-  const resp: any = { request_id: req.request_id, reply_text: replyText, intent };
+  const resp: any = withProtocolVersion({ request_id: req.request_id, reply_text: replyText, intent });
   if (dialogState) resp.dialog_state = dialogState;
   return json(resp);
 }
@@ -3459,51 +3562,7 @@ Return STRICT JSON only, no markdown fences:
     return JSON.stringify({ summary: "", layers: [] });
   }
 }
-
-// ---- Architecture Mapper: LLM Impact Narration ----
-// Called by the architect sidebar to get an LLM explanation of a reverse BFS
-// impact result. The graph algorithm discovers affected files + paths; the
-// LLM narrates WHY each path matters in plain English.
-
-async function handleImpactNarration(req: NexusRequest, env: Env): Promise<string> {
-  const payload = req.task as any;
-  const target_file: string = payload.target_file || "unknown";
-  const affected_files: string[] = Array.isArray(payload.affected_files) ? payload.affected_files : [];
-  const dependency_paths: string[][] = Array.isArray(payload.dependency_paths)
-    ? payload.dependency_paths.map((p: any) => Array.isArray(p) ? p.map(String) : [String(p)])
-    : [];
-  const direct_count: number = payload.direct_count || 0;
-  const transitive_count: number = payload.transitive_count || 0;
-  const test_files: string[] = Array.isArray(payload.test_files) ? payload.test_files : [];
-  const repo: string = payload.repo || "unknown";
-
-  const pathsStr = dependency_paths.slice(0, 5).map((p) => p.join(" → ")).join("\n  ");
-  const affectedStr = affected_files.slice(0, 10).join(", ");
-
-  const prompt = `You are a senior software architect analyzing the impact of changing a file in the ${repo} repository.
-
-The static dependency graph analysis found:
-- Target file: ${target_file}
-- Direct dependents (depth 1): ${direct_count}
-- Transitive dependents (depth 2+): ${transitive_count}
-- Test files affected: ${test_files.length}
-- Critical dependency paths (target → root):
-  ${pathsStr}
-- Affected files: ${affectedStr}
-
-Explain in plain English (under 150 words) what the developer should be careful about.
-Focus on PRODUCTION RISK, not file count. Be specific about the most dangerous path.
-If there are test files, note whether they provide adequate coverage.
-Do NOT list every file — focus on the highest-risk path and why it matters.`;
-
-  // Try free external providers first (Gemini → Groq → Cloudflare cascade)
-  const synth = await synthesizeWithCascade(prompt, env,
-    "You are a senior software architect. Explain production risk concisely.", 300);
-  if (synth) {
-    console.log(`[architect] Impact narration via ${synth.provider} (${synth.model})`);
-    return synth.text;
-  }
-  // Last resort: Cloudflare summarize()
-  return await summarize(prompt, env);
-}
+// NOTE: handleImpactNarration was deleted (audit M1) — it narrated the
+// reverse-BFS impact engine whose Rust half (query_impact) was dead IPC
+// and has also been removed. The file ends here.
 

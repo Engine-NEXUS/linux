@@ -62,6 +62,7 @@ pub enum Provider {
     /// card-gated 30-day trial (demoted to last resort, key-only).
     Cerebras,
     /// Worker fallback — uses Workers AI neurons (~500ms, ~100 neurons).
+    #[allow(dead_code)]
     Worker,
 }
 
@@ -270,6 +271,7 @@ async fn call_openai_compatible(
         "temperature": 0.3,
     });
 
+    crate::usage_counter::bump("llm");
     let resp = client
         .post(url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -332,6 +334,7 @@ async fn call_gemini(
         },
     });
 
+    crate::usage_counter::bump("llm");
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json")
@@ -376,8 +379,26 @@ async fn call_gemini(
 /// Build the prompt for the AI provider. If dialog context exists,
 /// prepend prior turns so the model has conversational continuity.
 fn build_prompt(transcript: &str, dialog_context: Option<&serde_json::Value>) -> String {
+    // Redact PII before anything leaves the device — live transcript,
+    // memory block, and history turns alike.
+    let transcript = crate::pii_filter::sanitize(transcript);
+    let mut parts: Vec<String> = vec![];
+
+    // Persistent memory block (injected by orchestrator from memory/).
+    if let Some(ctx) = dialog_context {
+        if let Some(mem) = ctx.get("memory").and_then(|m| m.as_str()) {
+            if !mem.is_empty() {
+                parts.push(format!("Context:\n{}", crate::pii_filter::sanitize(mem)));
+            }
+        }
+    }
+
     let Some(ctx) = dialog_context else {
-        return transcript.to_string();
+        if parts.is_empty() {
+            return transcript;
+        }
+        parts.push(format!("User: {}", transcript));
+        return parts.join("\n");
     };
 
     // Extract prior user/assistant turns from the dialog context.
@@ -389,21 +410,26 @@ fn build_prompt(transcript: &str, dialog_context: Option<&serde_json::Value>) ->
         .unwrap_or_default();
 
     if history.is_empty() {
-        return transcript.to_string();
+        if parts.is_empty() {
+            return transcript;
+        }
+        parts.push(format!("User: {}", transcript));
+        return parts.join("\n");
     }
 
     // Build a simple conversation transcript for the model.
     // We keep this short — most providers have token limits and TTS
     // needs concise responses. Take the LAST 6 turns (most recent context).
-    let mut parts = Vec::new();
+    // NOTE: appends to `parts` (memory context above is preserved).
     let start = if history.len() > 6 { history.len() - 6 } else { 0 };
     for turn in history.iter().skip(start) {
         let role = turn.get("role").and_then(|r| r.as_str()).unwrap_or("");
         let content = turn.get("content").and_then(|c| c.as_str()).unwrap_or("");
         if !content.is_empty() {
+            let clean = crate::pii_filter::sanitize(content);
             match role {
-                "user" => parts.push(format!("User: {}", content)),
-                "assistant" | "model" => parts.push(format!("NEXUS: {}", content)),
+                "user" => parts.push(format!("User: {}", clean)),
+                "assistant" | "model" => parts.push(format!("NEXUS: {}", clean)),
                 _ => {}
             }
         }
@@ -533,9 +559,11 @@ pub fn read_provider_keys<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Provi
         return ProviderKeys::default();
     };
 
-    // Read each key with camelCase → snake_case fallback (same pattern as
-    // read_groq_api_key in commands.rs).
-    let read_key = |camel: &str, snake: &str| -> String {
+    // Read each key: keychain first (secure), then settings.json (legacy).
+    let read_key = |service: &str, camel: &str, snake: &str| -> String {
+        if let Some(key) = crate::auth_vault::get_api_key(service) {
+            return key;
+        }
         json.get(camel)
             .or_else(|| json.get(snake))
             .and_then(|v| v.as_str())
@@ -544,9 +572,9 @@ pub fn read_provider_keys<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Provi
     };
 
     ProviderKeys {
-        groq: read_key("groqApiKey", "groq_api_key"),
-        gemini: read_key("geminiApiKey", "gemini_api_key"),
-        cerebras: read_key("cerebrasApiKey", "cerebras_api_key"),
+        groq: read_key("groq", "groqApiKey", "groq_api_key"),
+        gemini: read_key("gemini", "geminiApiKey", "gemini_api_key"),
+        cerebras: read_key("cerebras", "cerebrasApiKey", "cerebras_api_key"),
     }
 }
 
@@ -618,6 +646,35 @@ mod tests {
     fn test_build_prompt_no_context() {
         let prompt = build_prompt("what is rust", None);
         assert_eq!(prompt, "what is rust");
+    }
+
+    #[test]
+    fn test_build_prompt_sanitizes_history_and_memory() {
+        let ctx = serde_json::json!({
+            "history": [
+                { "role": "user", "content": "my email is a@b.com" },
+            ],
+            "memory": "dog: Bruno, phone: 9876543210",
+        });
+        let prompt = build_prompt("what is my email", Some(&ctx));
+        assert!(!prompt.contains("a@b.com"), "history PII leaked: {}", prompt);
+        assert!(!prompt.contains("9876543210"), "memory PII leaked: {}", prompt);
+        assert!(prompt.contains("[REDACTED:EMAIL]"));
+        assert!(prompt.contains("Bruno"), "non-PII memory dropped: {}", prompt);
+    }
+
+    #[test]
+    fn test_build_prompt_memory_survives_history() {
+        // Regression: shadowed `parts` once dropped the memory block
+        // whenever history was non-empty.
+        let ctx = serde_json::json!({
+            "history": [{ "role": "user", "content": "hi" }],
+            "memory": "dog: Bruno",
+        });
+        let prompt = build_prompt("who", Some(&ctx));
+        assert!(prompt.contains("Bruno"), "memory block lost: {}", prompt);
+        assert!(prompt.contains("User: hi"));
+        assert!(prompt.contains("User: who"));
     }
 
     #[test]

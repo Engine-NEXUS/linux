@@ -42,7 +42,9 @@ class EvaluationSplitTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(errors, [])
         self.assertEqual(actual_lock, expected_lock)
-        self.assertTrue(all(actual_lock["splits"][name]["intents"] == 52 for name in splits.SPLIT_NAMES))
+        # Every split covers every intent of the frozen final test.
+        test_intents = actual_lock["splits"]["test"]["intents"]
+        self.assertTrue(all(actual_lock["splits"][name]["intents"] == test_intents for name in splits.SPLIT_NAMES))
 
     def test_training_does_not_split_or_select_on_final_test(self):
         source = (ROOT / "server" / "nlu" / "train.py").read_text(encoding="utf-8")

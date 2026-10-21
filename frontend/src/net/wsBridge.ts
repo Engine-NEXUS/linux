@@ -19,18 +19,6 @@ async function emitSidebarShow(query: string, text: string): Promise<void> {
   }
 }
 
-/** Emit sidebar:hide from the frontend. Currently the hotkey (Rust) emits
- * this directly, but this is exported for programmatic dismissal if needed. */
-export async function emitSidebarHide(): Promise<void> {
-  if (!isTauri()) return;
-  try {
-    const { emit } = await import("@tauri-apps/api/event");
-    await emit("sidebar:hide", {});
-  } catch (e) {
-    console.warn("[NEXUS] sidebar:hide emit failed:", e);
-  }
-}
-
 /**
  * Decide whether a server response warrants the sidebar.
  *
@@ -138,6 +126,24 @@ if (isTauri()) {
 
 /** Tracks whether a backend session is actually open. */
 let sessionOpen = false;
+
+/**
+ * Ensure a backend session is open, opening one if needed.
+ * Fire-and-forget safe: logs and returns false when the Worker is
+ * unreachable (local-only mode) instead of throwing.
+ * Used at startup and as a one-shot retry when a queued send finds
+ * the session lapsed (barge-in closes it).
+ */
+export async function ensureSessionOpen(): Promise<boolean> {
+  if (sessionOpen) return true;
+  try {
+    await openSession();
+    return true;
+  } catch (e) {
+    console.warn("[NEXUS] backend session unavailable (local-only mode):", e);
+    return false;
+  }
+}
 
 /**
  * Long-running query tracking — dedup + queue.
@@ -339,27 +345,18 @@ export async function openSession(
   throw new Error(`backend session failed after ${maxRetries} retries: ${lastErr}`);
 }
 
-/** Returns true if a backend session is currently open. */
-export function hasSession(): boolean {
-  return sessionOpen;
-}
-
 /** Pending dialog context from a previous follow-up question.
  * When non-null, the next sendTranscript call will include this context
- * so the Worker can combine it with the new input. */
+ * so the Worker can combine it with the new input. Module-private: the
+ * only consumer is sendTranscript() below (an older comment claiming
+ * recorder.ts calls consumeDialogContext was false). */
 let pendingDialogContext: { pending_intent: string; original_request: string; missing: string[] } | null = null;
 
-/** Returns the pending dialog context (if any) and clears it.
- * Called by recorder.ts before sending a follow-up transcript. */
-export function consumeDialogContext(): { pending_intent: string; original_request: string; missing: string[] } | null {
+/** Returns the pending dialog context (if any) and clears it. */
+function consumeDialogContext(): { pending_intent: string; original_request: string; missing: string[] } | null {
   const ctx = pendingDialogContext;
   pendingDialogContext = null;
   return ctx;
-}
-
-/** Returns true if there is a pending dialog context (follow-up expected). */
-export function hasDialogContext(): boolean {
-  return pendingDialogContext !== null;
 }
 
 /** Clears the pending dialog context (e.g. on timeout or cancel). */
@@ -491,9 +488,8 @@ async function handle(ev: ServerEvent): Promise<void> {
             // Check the Worker's intent field directly (most reliable)
             (ev as any).intent === "analyze_repo" ||
             (ev as any).intent === "deep_analyse" ||
-            // Fallback: check the query text for architect keywords
-            (/\b(analy[sz]e|map|understand|explore|create|build|show|generate|architecture|what breaks|blast radius)\b/i.test(query)
-              && /\b(repo|repository|codebase|project|architecture|code)\b/i.test(query));
+            // Fallback: check the query text for explicit architect keywords
+            /\b(open\s+architecture\s+mapper|architecture\s+mapper|codebase\s+diagram|open\s+codebase\s+mapper)\b/i.test(query);
 
           if (isArchitectQuery && isTauri()) {
             // Detect the active GitHub repo from the foreground window and
@@ -552,14 +548,15 @@ async function handle(ev: ServerEvent): Promise<void> {
             analysisAnnounced = true;
             void speak("Here is the analysis, sir", () => {
               sessionOpen = false;
-              store.reset();
+              // Ghost-aware turn end (no-op outside ghost mode).
+              void import("./ghostHotMic").then((m) => m.endGhostTurn());
               // Auto-close the orb after the short confirmation
               store.setVisible(false);
             });
           } else {
             console.log("[NEXUS] 'Here is the analysis' already announced — skipping duplicate");
             sessionOpen = false;
-            store.reset();
+            void import("./ghostHotMic").then((m) => m.endGhostTurn());
             store.setVisible(false);
           }
         } else {
@@ -573,18 +570,18 @@ async function handle(ev: ServerEvent): Promise<void> {
             if (expectsFollowup && !bargedIn) {
               // Follow-up expected: auto-reopen the mic for the user's response
               console.log("[NEXUS] follow-up: auto-reopening mic after TTS");
-              // Import and call triggerFollowupListen from main.tsx
-              import("../main").then(({ triggerFollowupListen }) => {
+              // Import and call triggerFollowupListen from stage/orbRuntime
+              import("../stage/orbRuntime").then(({ triggerFollowupListen }) => {
                 triggerFollowupListen();
               }).catch((e) => {
                 console.warn("[NEXUS] failed to trigger follow-up listen:", e);
                 sessionOpen = false;
-                store.reset();
+                void import("./ghostHotMic").then((m) => m.endGhostTurn());
                 store.setVisible(false);
               });
             } else {
               sessionOpen = false;
-              store.reset();
+              void import("./ghostHotMic").then((m) => m.endGhostTurn());
               store.setVisible(false);
             }
           });
@@ -600,7 +597,7 @@ async function handle(ev: ServerEvent): Promise<void> {
       clearLongRunningInFlight();
       useAssistant.getState().setLoadingVisible(false);
       sessionOpen = false;
-      store.reset();
+      void import("./ghostHotMic").then((m) => m.endGhostTurn());
       break;
     case "error":
       clearLongRunningInFlight();
@@ -609,7 +606,7 @@ async function handle(ev: ServerEvent): Promise<void> {
       console.error("server error:", ev.message);
       if (ev.message) store.addAssistantMessage(`Error: ${ev.message}`);
       stopTts();
-      store.reset();
+      void import("./ghostHotMic").then((m) => m.endGhostTurn());
       // Do NOT auto-hide on error — the user may want to read the error.
       break;
   }

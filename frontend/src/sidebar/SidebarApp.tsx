@@ -2,12 +2,14 @@ import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
-import { useSidebar } from "./sidebarStore";
+import { useSidebar, resolveEscDismiss } from "./sidebarStore";
 import { renderMarkdownToHtml } from "./markdownRenderer";
-import { speak, stopTts } from "../audio/ttsPlayer";
+import { stopTts } from "../audio/ttsPlayer";
 import { AnalysisDashboard } from "./AnalysisDashboard";
 import { GitHubConflictPanel } from "./GitHubConflictPanel";
 import { ConfirmationPanel } from "./ConfirmationPanel";
+import { SubtitleBar } from "./SubtitleBar";
+import { topicTitle } from "./spatialShared";
 
 /**
  * NEXUS Response Sidebar
@@ -23,12 +25,15 @@ import { ConfirmationPanel } from "./ConfirmationPanel";
  * - Interactive action confirmation cards (WhatsApp, Swiggy, GitHub)
  * - Smooth acrylic blur with readable high-contrast typography
  */
-export function SidebarApp() {
+interface SidebarAppProps {
+  onDock: (d: string) => void;
+}
+
+export function SidebarApp({ onDock }: SidebarAppProps) {
   const visible = useSidebar((s) => s.visible);
   const response = useSidebar((s) => s.response);
   const query = useSidebar((s) => s.query);
   const fontSize = useSidebar((s) => s.fontSize);
-  const speaking = useSidebar((s) => s.speaking);
   const activeImage = useSidebar((s) => s.activeImage);
   const analysisData = useSidebar((s) => s.analysisData);
   const conflictData = useSidebar((s) => s.conflictData);
@@ -36,7 +41,6 @@ export function SidebarApp() {
 
   const show = useSidebar((s) => s.show);
   const hide = useSidebar((s) => s.hide);
-  const setSpeaking = useSidebar((s) => s.setSpeaking);
   const setActiveImage = useSidebar((s) => s.setActiveImage);
 
   const responseScrollRef = useRef<HTMLDivElement>(null);
@@ -46,49 +50,29 @@ export function SidebarApp() {
   // stopTts() and killing "Here is the analysis, sir" before it plays.
   const wasVisibleRef = useRef(false);
 
-  // Format the query as a heading:
-  //   PR analysis  → "PR Analysis"
-  //   Repo analysis → "Repository Analysis"
-  const heading = useMemo(() => {
-    if (!query) return "";
-    const q = query.trim().toLowerCase();
-    // PR analysis: "analyse PR #5 in repo", "review PR 12", "analyse pull request"
-    if (/\bpr\b|\bpull\s*request\b/.test(q)) {
-      return "PR Analysis";
-    }
-    // Repo analysis: "analyse repo", "analyse owner/repo", structured analysis data
-    if (analysisData?.repo || /\banaly[sz]e\s+(?!pr\b|pull\b)/.test(q)) {
-      return "Repository Analysis";
-    }
-    // Fallback: format the raw query
-    const raw = query.trim();
-    if (/analy[sz]e/i.test(raw)) {
-      const match = raw.match(/analy[sz]e\s+(.+)/i);
-      if (match) return `Analysis: ${match[1]}`;
-    }
-    return raw.charAt(0).toUpperCase() + raw.slice(1);
-  }, [query, analysisData]);
+  // Reference responses (PR/analyse/explain/find/research/search) show the
+  // request topic above the result. Copy affordances are gated to exactly
+  // this response class and hidden everywhere else.
+  const showCopy = useMemo(
+    () =>
+      /\b(pr|pull\s*request|analy[sz]e|analysis|explain|find|research|google|search)\b/i.test(
+        query || ""
+      ),
+    [query]
+  );
+  const topicTitleText = useMemo(() => topicTitle(query || ""), [query]);
+
+  useEffect(() => {
+    document.documentElement.dataset.copyEnabled = showCopy ? "true" : "false";
+    return () => {
+      delete document.documentElement.dataset.copyEnabled;
+    };
+  }, [showCopy]);
 
   // Render markdown to sanitized HTML with custom enhancements
   const renderedHtml = useMemo(() => {
     return renderMarkdownToHtml(response);
   }, [response]);
-
-  // Expose global hooks for direct IPC evaluation
-  useEffect(() => {
-    (window as any).__NEXUS_SET_SIDEBAR_CONTENT__ = (q: string, t: string) => {
-      show(q, t);
-    };
-    (window as any).__NEXUS_HIDE_SIDEBAR__ = () => {
-      stopTts();
-      hide();
-    };
-
-    return () => {
-      delete (window as any).__NEXUS_SET_SIDEBAR_CONTENT__;
-      delete (window as any).__NEXUS_HIDE_SIDEBAR__;
-    };
-  }, [show, hide]);
 
   // Listen for Tauri events + fetch pending content on mount.
   //
@@ -158,10 +142,8 @@ export function SidebarApp() {
       }
     }).then((u) => unlisteners.push(u));
 
-    listen("sidebar:hide", () => {
-      stopTts();
-      hide();
-    }).then((u) => unlisteners.push(u));
+    // (View routing lives in the UnifiedSidebar shell — it listens for
+    // sidebar:set_view and switches the mounted view. No listener here.)
 
     // "Fake blur" backdrop (Windows only — see sidebar_backdrop.rs).
     // Rust captures + blurs the screen region behind the window right
@@ -175,22 +157,51 @@ export function SidebarApp() {
       );
     }).then((u) => unlisteners.push(u));
 
+    // Sample background luminance under sidebar to automatically adapt light/dark mode
+    // (reads the window's ACTUAL rect — layout-agnostic across views/docks)
+    const syncLuminanceAndHitbox = () => {
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.round(window.innerWidth * dpr);
+      const h = Math.round(window.innerHeight * dpr);
+      const x = Math.round((window.screenX || 0) * dpr);
+      const y = Math.max(0, Math.round((window.screenY || 0) * dpr));
+
+      invoke("get_screen_luminance", { x, y, w, h })
+        .then((res: any) => {
+          if (res?.mode) {
+            document.documentElement.setAttribute("data-glass-luminance", res.mode);
+          }
+        })
+        .catch(() => {});
+    };
+
+    syncLuminanceAndHitbox();
+    const probeInterval = setInterval(syncLuminanceAndHitbox, 1500);
+
     return () => {
       unlisteners.forEach((u) => u());
+      clearInterval(probeInterval);
     };
   }, [show, hide]);
 
-  // Keyboard shortcut: Escape only closes the image lightbox (not the sidebar).
-  // The sidebar itself is closed via Ctrl+Space (the global hotkey).
+  // Keyboard: Escape closes the image lightbox first, then the sidebar
+  // itself via the store's hide() — so the standard dismiss path runs
+  // (visible→false stops TTS and destroys the window after 400ms).
+  // Window-level only: no global hotkey is registered for this.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && activeImage) {
-        setActiveImage(null);
+      if (e.key === "Escape") {
+        // Hierarchy locked by resolveEscDismiss (unit-tested in sidebarStore).
+        if (resolveEscDismiss(activeImage !== null) === "close-overlay") {
+          setActiveImage(null); // Lightbox closes first
+          return;
+        }
+        hide(); // Sidebar dismiss (TTS-stop + hide_sidebar handled downstream)
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeImage, setActiveImage]);
+  }, [activeImage, setActiveImage, hide]);
 
   // Scroll to top when new response arrives
   useEffect(() => {
@@ -290,19 +301,6 @@ export function SidebarApp() {
     [setActiveImage]
   );
 
-  // Toggle Read Aloud (TTS)
-  const handleToggleTts = () => {
-    if (speaking) {
-      stopTts();
-      setSpeaking(false);
-    } else {
-      if (!response) return;
-      setSpeaking(true);
-      void speak(response, () => {
-        setSpeaking(false);
-      });
-    }
-  };
 
   // Scroll to top
   const scrollToTop = () => {
@@ -311,100 +309,78 @@ export function SidebarApp() {
 
   return (
     <div id="sidebar-app" className={visible ? "sidebar--visible" : "sidebar--hidden"}>
-      <div className={`sidebar-card ${confirmationData ? "mode--confirmation" : ""} font-size--${fontSize}`}>
-        {/* ── Top Header Toolbar (hidden in confirmation mode for minimal UI) ── */}
-        {!confirmationData && (
-          <header className="sidebar-header">
-            <div className="sidebar-header-actions">
-              {/* Read Aloud (TTS) */}
-              <button
-                type="button"
-                className={`sidebar-action-btn ${speaking ? "sidebar-action-btn--active" : ""}`}
-                onClick={handleToggleTts}
-                title={speaking ? "Stop reading aloud" : "Read aloud (TTS)"}
-              >
-                {speaking ? (
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
-                    <rect x="6" y="6" width="12" height="12" rx="2" />
-                  </svg>
-                ) : (
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                  </svg>
-                )}
+        <div className={`sidebar-card ${confirmationData ? "mode--confirmation" : ""} font-size--${fontSize}`}>
+          {/* ── Header row: drag region + dock controls (Left/Right) ────── */}
+          <header className="sidebar-header-row" data-tauri-drag-region>
+            <div className="sidebar-header-spacer" data-tauri-drag-region />
+            <div className="sidebar-dock-controls">
+              <button type="button" className="sidebar-dock-btn" onClick={() => onDock("left")} title="Dock Left">
+                ◧
+              </button>
+              <button type="button" className="sidebar-dock-btn" onClick={() => onDock("right")} title="Dock Right">
+                ◨
               </button>
             </div>
-            {/* Heading — shows the command/repo name */}
-            {heading && (
-              <div className="sidebar-header-heading">{heading}</div>
+          </header>
+
+          {/* ── Last heard: editable copy of your most recent command ───── */}
+          {/* Lives here (not in the stage) because the stage is a
+              keyboard-less click-through overlay; this window is focused
+              deliberately by the user to type a correction. */}
+          <SubtitleBar />
+
+          {/* ── Topic title — ONLY for research / analyse responses ────── */}
+          {/* The search/research topic heads the information block here;
+              this is also the only response class that shows Copy Code. */}
+          {showCopy && response && topicTitleText ? (
+            <div className="sidebar-topic-title">{topicTitleText}</div>
+          ) : null}
+
+          {/* ── Response Body ─────────────────────────────────────────── */}
+          {/* Priority: conflict panel > confirmation panel > analysis dashboard > markdown */}
+          <div className="sidebar-response" ref={responseScrollRef} onScroll={handleScroll}>
+            {conflictData ? (
+              <GitHubConflictPanel
+                prNumber={conflictData.prNumber}
+                repo={conflictData.repo}
+                conflictFiles={conflictData.conflictFiles}
+                message={conflictData.message}
+              />
+            ) : confirmationData ? (
+              <ConfirmationPanel
+                data={confirmationData}
+                onClose={() => {
+                  hide();
+                }}
+              />
+            ) : analysisData ? (
+              <AnalysisDashboard data={analysisData} />
+            ) : (
+              <div
+                className="nexus-markdown-body"
+                dangerouslySetInnerHTML={{ __html: renderedHtml }}
+                onClick={handleContainerClick}
+              />
             )}
-            <div className="sidebar-header-spacer" />
-            {/* Settings (gear) button — opens the settings sidebar */}
-            <button
-              type="button"
-              className="sidebar-action-btn"
-              onClick={() => {
-                import("@tauri-apps/api/core").then(({ invoke }) => {
-                  invoke("show_settings_sidebar").catch(() => {});
-                });
-              }}
-              title="Settings"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </div>
+
+          {/* ── Floating Scroll to Top button ──────────────────────────── */}
+          {showScrollTop && !confirmationData && (
+            <button type="button" className="sidebar-scroll-top-btn" onClick={scrollToTop} title="Scroll to top">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="18 15 12 9 6 15" />
               </svg>
             </button>
-          </header>
-        )}
-
-        {/* ── Response Body ─────────────────────────────────────────── */}
-        {/* Priority: conflict panel > confirmation panel > analysis dashboard > markdown */}
-        <div className="sidebar-response" ref={responseScrollRef} onScroll={handleScroll}>
-          {conflictData ? (
-            <GitHubConflictPanel
-              prNumber={conflictData.prNumber}
-              repo={conflictData.repo}
-              conflictFiles={conflictData.conflictFiles}
-              message={conflictData.message}
-            />
-          ) : confirmationData ? (
-            <ConfirmationPanel
-              data={confirmationData}
-              onClose={() => {
-                hide();
-              }}
-            />
-          ) : analysisData ? (
-            <AnalysisDashboard data={analysisData} />
-          ) : (
-            <div
-              className="nexus-markdown-body"
-              dangerouslySetInnerHTML={{ __html: renderedHtml }}
-              onClick={handleContainerClick}
-            />
           )}
-        </div>
 
-        {/* ── Floating Scroll to Top button ──────────────────────────── */}
-        {showScrollTop && !confirmationData && (
-          <button type="button" className="sidebar-scroll-top-btn" onClick={scrollToTop} title="Scroll to top">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="18 15 12 9 6 15" />
-            </svg>
-          </button>
-        )}
-
-        {/* ── Footer Status Bar (hidden in confirmation mode) ──────────────── */}
-        {!confirmationData && (
-          <footer className="sidebar-footer">
-            <div className="sidebar-footer-hint">
-              <kbd className="sidebar-kbd">Ctrl+Space</kbd> to close
-            </div>
-          </footer>
-        )}
+          {/* ── Footer Status Bar (hidden in confirmation mode) ──────────────── */}
+          {!confirmationData && (
+            <footer className="sidebar-footer">
+              <div className="sidebar-footer-hint">
+                <kbd className="sidebar-kbd">Esc</kbd> to close
+              </div>
+            </footer>
+          )}
       </div>
 
       {/* ── Image Lightbox Modal ─────────────────────────────────────── */}
@@ -420,7 +396,7 @@ export function SidebarApp() {
                   onClick={() => openExternal(activeImage.src).catch(() => window.open(activeImage.src, "_blank"))}
                   title="Open in external browser"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
                     <polyline points="15 3 21 3 21 9" />
                     <line x1="10" y1="14" x2="21" y2="3" />
@@ -432,7 +408,7 @@ export function SidebarApp() {
                   onClick={() => setActiveImage(null)}
                   title="Close (Esc)"
                 >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <line x1="18" y1="6" x2="6" y2="18" />
                     <line x1="6" y1="6" x2="18" y2="18" />
                   </svg>
@@ -448,3 +424,4 @@ export function SidebarApp() {
     </div>
   );
 }
+

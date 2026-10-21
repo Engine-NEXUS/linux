@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-import { CURATED_VOICES, previewVoice, stopTts } from "../audio/ttsPlayer";
+import { stopTts, type VoicePersona, ICONIC_PERSONAS } from "../audio/ttsPlayer";
+import { initThemeSync, applyThemeMode, resolveThemeMode } from "../sidebar/theme";
+import { globalHotkeyHint, globalHotkeyLabel } from "../platform";
+import { McpServersPanel } from "../settings-sidebar/McpServersPanel";
 
 /**
  * NEXUS Settings Window
@@ -14,7 +17,7 @@ import { CURATED_VOICES, previewVoice, stopTts } from "../audio/ttsPlayer";
  *   - Backend: server URL, connection status, credentials
  */
 
-type Tab = "general" | "audio" | "wake" | "privacy" | "backend";
+type Tab = "general" | "accounts" | "audio" | "wake" | "privacy" | "backend";
 
 interface Settings {
   autostart: boolean;
@@ -39,11 +42,16 @@ interface Settings {
   googleCloudApiKey?: string;
   groqApiKey?: string;
   edgeTtsVoice?: string;
+  selectedVoice?: string;
+  offlineVoiceModel?: string;
+  orbPosition?: "top" | "bottom";
+  themeMode?: "light" | "dark" | "system";
+  defaultMusicPlayer?: "spotify" | "apple_music";
 }
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: true,
-  hotkey: "Ctrl+Super+Space",
+  hotkey: globalHotkeyLabel(),
   autoHideDelay: 8,
   wakeWordEnabled: true,
   wakePhrase: "NEXUS",
@@ -55,16 +63,22 @@ const DEFAULT_SETTINGS: Settings = {
   serverUrl: "",
   userId: "local-user",
   deviceId: "local-device",
-  ttsVoice: "en_US-amy-medium",
+  ttsVoice: "en-GB-RyanNeural",
   speechRate: 1.15,
   ttsVolume: 75,
-  ttsProvider: "kokoro",
+  ttsProvider: "edge",
   groqApiKey: "",
-  edgeTtsVoice: "en-US-AvaNeural",
+  edgeTtsVoice: "en-GB-RyanNeural",
+  selectedVoice: "jarvis",
+  offlineVoiceModel: "bm_george",
+  orbPosition: "top",
+  themeMode: "dark",
+  defaultMusicPlayer: "spotify",
 };
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "general", label: "General", icon: "M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" },
+  { id: "accounts", label: "Accounts & Integrations", icon: "M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" },
   { id: "audio", label: "Audio & Voice", icon: "M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" },
   { id: "wake", label: "Wake Word", icon: "M15 10.5a3 3 0 11-6 0 3 3 0 016 0z M19 10.5a7 7 0 11-14 0 7 7 0 0114 0z" },
   { id: "privacy", label: "Privacy", icon: "M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" },
@@ -77,10 +91,31 @@ export function SettingsApp() {
   const [saved, setSaved] = useState(false);
   const [serverConnected, setServerConnected] = useState(false);
 
+  // Initialize theme synchronization
+  useEffect(() => {
+    initThemeSync();
+  }, []);
+
+  // Escape key discards/closes the settings window
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        invoke("close_settings_window").catch(() => {});
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
   // Load settings from Rust on mount
   useEffect(() => {
     invoke<Partial<Settings>>("get_settings").then((s) => {
-      if (s) setSettings({ ...DEFAULT_SETTINGS, ...s });
+      if (s) {
+        setSettings({ ...DEFAULT_SETTINGS, ...s });
+        if (s.themeMode) {
+          applyThemeMode(resolveThemeMode(s.themeMode), false);
+        }
+      }
     }).catch(() => {
       // Settings command not available yet — use defaults
     });
@@ -102,6 +137,9 @@ export function SettingsApp() {
 
   const handleSave = async () => {
     try {
+      if (settings.themeMode) {
+        applyThemeMode(settings.themeMode);
+      }
       await invoke("save_settings", { settings });
       // Sync autostart setting with the OS
       try {
@@ -123,6 +161,28 @@ export function SettingsApp() {
 
   return (
     <div className="nx-settings">
+      {/* Window Drag Titlebar */}
+      <div data-tauri-drag-region className="nx-window-titlebar">
+        <span style={{ fontSize: "11px", fontWeight: 600, opacity: 0.65, letterSpacing: "0.5px" }}>NEXUS SETTINGS</span>
+        <button
+          type="button"
+          onClick={() => invoke("close_settings_window").catch(() => {})}
+          style={{
+            background: "none",
+            border: "none",
+            color: "var(--nx-text-secondary)",
+            cursor: "pointer",
+            padding: "4px 8px",
+            fontSize: "14px",
+            lineHeight: 1,
+            borderRadius: "6px",
+          }}
+          title="Close (Esc)"
+        >
+          ✕
+        </button>
+      </div>
+
       {/* Sidebar */}
       <aside className="nx-sidebar">
         <div className="nx-sidebar-header">
@@ -155,6 +215,9 @@ export function SettingsApp() {
         <div style={{ display: "flex", flexDirection: "column", gap: "var(--nx-space-5)" }}>
           {tab === "general" && (
             <GeneralTab settings={settings} update={update} />
+          )}
+          {tab === "accounts" && (
+            <AccountsTab />
           )}
           {tab === "audio" && (
             <AudioTab settings={settings} update={update} />
@@ -213,7 +276,7 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Global hotkey</span>
-            <span className="nx-row-hint">Ctrl+Super+Space — DE keybind to nexus --wake (fixed)</span>
+            <span className="nx-row-hint">{globalHotkeyHint("Press this key combo to wake NEXUS")}</span>
           </div>
           <input className="nx-input" value={settings.hotkey} onChange={(e) => update("hotkey", e.target.value)} />
         </div>
@@ -233,33 +296,179 @@ function GeneralTab({ settings, update }: { settings: Settings; update: <K exten
           />
         </div>
       </section>
+
+      <section className="nx-section">
+        <div className="nx-section-title">Orb Screen Position</div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Screen Placement</span>
+            <span className="nx-row-hint">Position the black slider capsule at the top or bottom of the screen</span>
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              type="button"
+              className={`nx-btn ${settings.orbPosition !== "bottom" ? "nx-btn--primary" : ""}`}
+              onClick={() => update("orbPosition", "top")}
+            >
+              Top (Default)
+            </button>
+            <button
+              type="button"
+              className={`nx-btn ${settings.orbPosition === "bottom" ? "nx-btn--primary" : ""}`}
+              onClick={() => update("orbPosition", "bottom")}
+            >
+              Bottom
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="nx-section">
+        <div className="nx-section-title">Theme & Appearance</div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Window Style</span>
+            <span className="nx-row-hint">Liquid frosted glass across all windows, architecture mapper, and information analyses</span>
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              type="button"
+              className={`nx-btn ${settings.themeMode === "dark" ? "nx-btn--primary" : ""}`}
+              onClick={() => {
+                update("themeMode", "dark");
+                applyThemeMode("dark");
+              }}
+            >
+              🌙 Dark (Liquid Glass)
+            </button>
+            <button
+              type="button"
+              className={`nx-btn ${settings.themeMode === "light" ? "nx-btn--primary" : ""}`}
+              onClick={() => {
+                update("themeMode", "light");
+                applyThemeMode("light");
+              }}
+            >
+              ☀️ Light (Frosted White)
+            </button>
+            <button
+              type="button"
+              className={`nx-btn ${settings.themeMode === "system" ? "nx-btn--primary" : ""}`}
+              onClick={() => {
+                update("themeMode", "system");
+                applyThemeMode("system");
+              }}
+            >
+              🖥 Follow System
+            </button>
+          </div>
+        </div>
+      </section>
     </>
   );
 }
 
 function AudioTab({ settings, update }: { settings: Settings; update: <K extends keyof Settings>(k: K, v: Settings[K]) => void }) {
-  const [playingVoice, setPlayingVoice] = useState<string | null>(null);
+  const [personas, setPersonas] = useState<VoicePersona[]>(ICONIC_PERSONAS);
+  const [previewing, setPreviewing] = useState<string | null>(null);
+  const [equipping, setEquipping] = useState<string | null>(null);
+  const [sync, setSync] = useState<Record<string, { state: "ready" | "cloud_only" | "downloading"; progress?: number; phase?: string }>>({});
 
-  const handlePreview = async (voiceId: string) => {
-    if (playingVoice === voiceId) {
+  useEffect(() => {
+    invoke<VoicePersona[]>("list_voice_personas")
+      .then((list) => {
+        if (Array.isArray(list) && list.length > 0) {
+          setPersonas(list);
+          for (const p of list) {
+            invoke<string>("get_voice_sync_state", { voiceKey: p.key })
+              .then((state) => {
+                const mapped = state === "ready" ? "ready" : "cloud_only";
+                setSync((m) => ({ ...m, [p.key]: { state: mapped } }));
+              })
+              .catch(() => {});
+          }
+        }
+      })
+      .catch(() => {});
+
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<any>("voice:status", (event) => {
+          const payload = event.payload;
+          if (!payload || !payload.voice_key) return;
+          setSync((m) => ({
+            ...m,
+            [payload.voice_key]: {
+              state: payload.status,
+              progress: payload.progress ?? undefined,
+              phase: payload.phase,
+            },
+          }));
+        });
+      } catch {}
+    })();
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  const handlePreviewPersona = async (p: VoicePersona, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (previewing === p.key) {
       stopTts();
-      setPlayingVoice(null);
+      setPreviewing(null);
       return;
     }
-    const voice = CURATED_VOICES.find((v) => v.id === voiceId) || {
-      id: voiceId,
-      name: voiceId,
-      provider: "system" as const,
-      accent: "Default",
-      description: "Default voice",
-      locale: "en-US",
-      gender: "male" as const,
-      sampleText: "Hello sir, NEXUS is ready to assist you.",
-    };
-    setPlayingVoice(voiceId);
-    await previewVoice(voice, undefined, () => {
-      setPlayingVoice(null);
-    }, settings.speechRate);
+    setPreviewing(p.key);
+    try {
+      await invoke("preview_voice", { voiceId: p.cloudId, text: p.previewPhrase });
+    } catch {}
+    setTimeout(() => setPreviewing(null), 3000);
+  };
+
+  const handleEquipPersona = async (p: VoicePersona) => {
+    if (equipping) return;
+    setEquipping(p.key);
+    update("selectedVoice", p.key);
+    update("edgeTtsVoice", p.cloudId);
+    update("ttsVoice", p.cloudId);
+    update("offlineVoiceModel", p.kokoroVoice);
+
+    try {
+      const res = await invoke<{ voiceKey: string; cloudId: string; syncState: string }>("set_voice_preference", {
+        voiceKey: p.key,
+      });
+      if (res) {
+        const st = res.syncState === "ready" ? "ready" : "cloud_only";
+        setSync((m) => ({ ...m, [res.voiceKey]: { state: st } }));
+      }
+    } catch (e) {
+      console.warn("set_voice_preference failed:", e);
+    } finally {
+      setEquipping(null);
+    }
+  };
+
+  const activePersonaKey =
+    settings.selectedVoice ||
+    personas.find((p) => p.cloudId === (settings.edgeTtsVoice || "en-GB-RyanNeural"))?.key ||
+    "jarvis";
+
+  const renderSyncPill = (key: string) => {
+    const s = sync[key];
+    if (!s) return null;
+    if (s.state === "ready") {
+      return <span className="nx-persona-sync nx-persona-sync--ready">✓ Cloud + Offline Ready</span>;
+    }
+    if (s.state === "downloading") {
+      const pct = typeof s.progress === "number" ? ` ${s.progress}%` : "…";
+      const label = s.phase === "base" ? "Downloading base engine" : "Syncing twin";
+      return <span className="nx-persona-sync nx-persona-sync--busy">⬇ {label}{pct}</span>;
+    }
+    return <span className="nx-persona-sync nx-persona-sync--pending">⚡ Cloud Only (Twin Pending)</span>;
   };
 
   return (
@@ -276,44 +485,49 @@ function AudioTab({ settings, update }: { settings: Settings; update: <K extends
       </section>
 
       <section className="nx-section">
-        <div className="nx-section-title">Persona & Voice Engine</div>
-        <div className="nx-row">
-          <div className="nx-row-label">
-            <span className="nx-row-name">Assistant Voice</span>
-            <span className="nx-row-hint">Cloud TTS (Edge TTS) — free, 0 MB RAM. Falls back to Piper (local) when network is down.</span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <select
-              className="nx-select"
-              value={settings.edgeTtsVoice || "en-US-AvaNeural"}
-              onChange={(e) => {
-                update("edgeTtsVoice", e.target.value);
-                update("ttsVoice", e.target.value);
-              }}
-            >
-              {CURATED_VOICES.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name} ({v.accent})
-                </option>
-              ))}
-              <option value="en-US-EmmaMultilingualNeural">Emma (Female, professional)</option>
-              <option value="en-US-DavisNeural">Davis (Male, calm)</option>
-              <option value="en-US-JennyNeural">Jenny (Female, friendly)</option>
-              <option value="en-US-AriaNeural">Aria (Female, expressive)</option>
-              <option value="en-US-AndrewNeural">Andrew (Male, warm)</option>
-              <option value="en-US-BrandonNeural">Brandon (Male, casual)</option>
-            </select>
-            <button
-              type="button"
-              className="nx-btn"
-              style={{ padding: "6px 12px", fontSize: "var(--nx-text-xs)" }}
-              onClick={() => handlePreview(settings.edgeTtsVoice || "en-US-AvaNeural")}
-            >
-              {playingVoice === (settings.edgeTtsVoice || "en-US-AvaNeural") ? "⏹ Stop" : "▶ Play Sample"}
-            </button>
-          </div>
+        <div className="nx-section-title">Voice & Persona Matrix (Top 10 Iconic Personalities)</div>
+        <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)", marginBottom: "8px" }}>
+          Click any persona card to equip it. Cloud voice switches instantly ($0, 0 MB RAM); matching offline twin downloads automatically.
         </div>
 
+        <div className="nx-persona-grid">
+          {personas.map((p) => {
+            const isActive = activePersonaKey === p.key;
+            const isPlaying = previewing === p.key;
+            return (
+              <div
+                key={p.key}
+                className={`nx-persona-card ${isActive ? "nx-persona-card--active" : ""}`}
+                onClick={() => handleEquipPersona(p)}
+              >
+                <div className="nx-persona-card-top">
+                  <span className="nx-persona-avatar">{p.avatar}</span>
+                  {isActive && <span className="nx-persona-check">✓ Active</span>}
+                </div>
+                <div className="nx-persona-name">{p.name}</div>
+                <div className="nx-persona-accent">{p.accentTag}</div>
+                <div className="nx-persona-desc">{p.persona}</div>
+                <div className="nx-persona-meta">
+                  <span>Cloud: {p.cloudId.replace("Neural", "")}</span>
+                  <span>Twin: {p.kokoroVoice}</span>
+                </div>
+                {renderSyncPill(p.key)}
+                <button
+                  type="button"
+                  className="nx-persona-play-btn"
+                  disabled={equipping !== null}
+                  onClick={(e) => handlePreviewPersona(p, e)}
+                >
+                  {isPlaying ? "⏹ Stop Sample" : "▶ Play Sample"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="nx-section">
+        <div className="nx-section-title">Speech Prosody & Volume</div>
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Speech Rate</span>
@@ -346,6 +560,38 @@ function AudioTab({ settings, update }: { settings: Settings; update: <K extends
             value={settings.ttsVolume ?? 75}
             onChange={(e) => update("ttsVolume", parseInt(e.target.value))}
           />
+        </div>
+      </section>
+
+      <section className="nx-section">
+        <div className="nx-section-title">Media & Music Control</div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Default Music Player</span>
+            <span className="nx-row-hint">
+              Selected player for "play songs", "play music", or voice media commands
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              type="button"
+              className={`nx-btn ${(!settings.defaultMusicPlayer || settings.defaultMusicPlayer === "spotify") ? "nx-btn--primary" : ""}`}
+              onClick={() => update("defaultMusicPlayer", "spotify")}
+              style={{ display: "flex", alignItems: "center", gap: "6px" }}
+            >
+              <span>🟢</span>
+              <span>Spotify</span>
+            </button>
+            <button
+              type="button"
+              className={`nx-btn ${settings.defaultMusicPlayer === "apple_music" ? "nx-btn--primary" : ""}`}
+              onClick={() => update("defaultMusicPlayer", "apple_music")}
+              style={{ display: "flex", alignItems: "center", gap: "6px" }}
+            >
+              <span>🟣</span>
+              <span>Apple Music</span>
+            </button>
+          </div>
         </div>
       </section>
     </>
@@ -558,7 +804,7 @@ function BackendTab({ settings, update, connected }: { settings: Settings; updat
         <div className="nx-row">
           <div className="nx-row-label">
             <span className="nx-row-name">Fallback Engine</span>
-            <span className="nx-row-hint">Piper (local ONNX, ~80 MB RAM) — used when network is down, unloaded after 10 min recovery</span>
+            <span className="nx-row-hint">Kokoro (local ONNX, ~260-370 MB RAM while loaded) — used only when the network is down, unloaded after 10 min of recovery</span>
           </div>
           <span className="nx-status-indicator">
             <span className="nx-status-dot nx-status-dot--ok" />
@@ -579,3 +825,380 @@ function BackendTab({ settings, update, connected }: { settings: Settings; updat
     </>
   );
 }
+
+// ── Accounts & Integrations Tab ──────────────────────────────────────
+
+interface GoogleAccountProfile {
+  email: string;
+  name: string;
+  picture?: string | null;
+  is_primary: boolean;
+  added_at_ms?: number;
+}
+
+function AccountsTab() {
+  const [googleAccounts, setGoogleAccounts] = useState<GoogleAccountProfile[]>([]);
+  const [googleNeedsSignin, setGoogleNeedsSignin] = useState(false);
+  const [credStatus, setCredStatus] = useState<{ configured: boolean; has_client_id: boolean; has_secret: boolean; message?: string | null } | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [showCustomCreds, setShowCustomCreds] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const loadData = useCallback(async () => {
+    try {
+      const accs = await invoke<GoogleAccountProfile[]>("google_get_accounts");
+      setGoogleAccounts(accs);
+    } catch (e) {
+      console.warn("Failed to load google accounts", e);
+    }
+    try {
+      const ms = await invoke<any>("memcore_status");
+      if (ms && typeof ms.google_needs_signin === "boolean") {
+        setGoogleNeedsSignin(ms.google_needs_signin);
+      }
+    } catch {
+      /* advisory */
+    }
+    try {
+      const cs = await invoke<any>("google_credentials_status");
+      setCredStatus(cs);
+      if (!cs.configured) {
+        setShowCustomCreds(true);
+      }
+    } catch {
+      /* advisory */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
+
+  const handleConnectGoogle = async () => {
+    setError(null);
+    setSuccess(null);
+    setConnecting(true);
+    try {
+      await invoke("google_connect_account");
+      await loadData();
+      setSuccess("Google account authenticated and synced successfully!");
+      setTimeout(() => setSuccess(null), 4000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleSetPrimary = async (email: string) => {
+    setError(null);
+    try {
+      await invoke("google_set_primary_account", { email });
+      await loadData();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleDisconnect = async (email: string) => {
+    setError(null);
+    try {
+      await invoke("google_disconnect_account", { email });
+      setConfirmDelete(null);
+      await loadData();
+      setSuccess(`Disconnected ${email}`);
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleSaveCustomCreds = async () => {
+    setError(null);
+    try {
+      await invoke("google_save_custom_credentials", {
+        clientId,
+        clientSecret: clientSecret || null,
+      });
+      setClientSecret("");
+      await loadData();
+      setSuccess("Developer credentials saved successfully!");
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <>
+      {error && (
+        <div style={{ padding: "12px 16px", borderRadius: "8px", background: "var(--nx-error-bg)", border: "1px solid rgba(239,68,68,0.3)", color: "var(--nx-error)", fontSize: "var(--nx-text-sm)" }}>
+          {error}
+        </div>
+      )}
+
+      {success && (
+        <div style={{ padding: "12px 16px", borderRadius: "8px", background: "var(--nx-success-bg)", border: "1px solid rgba(34,197,94,0.3)", color: "var(--nx-success)", fontSize: "var(--nx-text-sm)" }}>
+          {success}
+        </div>
+      )}
+
+      {/* Google Accounts Section */}
+      <section className="nx-section">
+        <div className="nx-section-title">Google Accounts (Gmail & Calendar)</div>
+        <p style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-tertiary)", marginTop: "-8px" }}>
+          Connect your Google account for proactive email alerts, morning briefing, and leave-by timetable checks.
+        </p>
+
+        {googleAccounts.length === 0 ? (
+          <div style={{ padding: "20px", textAlign: "center", border: "1px dashed var(--nx-border)", borderRadius: "8px", background: "var(--nx-bg)" }}>
+            <p style={{ fontSize: "var(--nx-text-sm)", color: "var(--nx-text-secondary)", marginBottom: "14px" }}>
+              No Google account connected. Connect your Google account to get started.
+            </p>
+            <button
+              type="button"
+              className="nx-btn nx-btn--primary"
+              disabled={connecting}
+              onClick={handleConnectGoogle}
+            >
+              {connecting ? "Opening browser for sign-in..." : "+ Connect Google Account"}
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            {googleAccounts.map((acc) => {
+              const isExpired = googleNeedsSignin;
+              return (
+                <div
+                  key={acc.email}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "10px",
+                    padding: "16px",
+                    border: isExpired ? "1px solid rgba(245,158,11,0.5)" : "1px solid var(--nx-border)",
+                    borderRadius: "8px",
+                    background: isExpired ? "rgba(245,158,11,0.04)" : "var(--nx-bg)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                      {acc.picture ? (
+                        <img
+                          src={acc.picture}
+                          alt=""
+                          style={{ width: 42, height: 42, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nx-border)" }}
+                        />
+                      ) : (
+                        <div
+                          style={{
+                            width: 42,
+                            height: 42,
+                            borderRadius: "50%",
+                            background: "var(--nx-accent-blue)",
+                            color: "white",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            fontSize: "16px",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {acc.name?.charAt(0) || acc.email.charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <span style={{ fontWeight: 600, fontSize: "var(--nx-text-base)" }}>{acc.name || acc.email}</span>
+                          {acc.is_primary && <span className="nx-badge nx-badge--ok">Primary</span>}
+                          {isExpired ? (
+                            <span className="nx-badge nx-badge--warn">Sign-In Expired</span>
+                          ) : (
+                            <span className="nx-badge nx-badge--ok">Active</span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-tertiary)", marginTop: "2px" }}>
+                          {acc.email}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      {/* Re-authenticate Button */}
+                      <button
+                        type="button"
+                        className={`nx-btn ${isExpired ? "nx-btn--primary" : ""}`}
+                        disabled={connecting}
+                        onClick={handleConnectGoogle}
+                        title="Re-authenticates token via Google OAuth loopback (127.0.0.1:49152)"
+                      >
+                        {connecting ? "Signing in..." : isExpired ? "Re-authenticate Now →" : "Re-authenticate"}
+                      </button>
+
+                      {/* Primary toggle */}
+                      {!acc.is_primary && (
+                        <button
+                          type="button"
+                          className="nx-btn nx-btn--small"
+                          onClick={() => handleSetPrimary(acc.email)}
+                        >
+                          Make Primary
+                        </button>
+                      )}
+
+                      {/* Disconnect button */}
+                      {confirmDelete === acc.email ? (
+                        <div style={{ display: "flex", gap: "6px" }}>
+                          <button
+                            type="button"
+                            className="nx-btn nx-btn--small"
+                            onClick={() => setConfirmDelete(null)}
+                          >
+                            Keep
+                          </button>
+                          <button
+                            type="button"
+                            className="nx-btn nx-btn--small nx-btn--danger"
+                            onClick={() => handleDisconnect(acc.email)}
+                          >
+                            Confirm Disconnect
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="nx-btn nx-btn--small nx-btn--danger"
+                          onClick={() => setConfirmDelete(acc.email)}
+                        >
+                          Disconnect
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {isExpired && (
+                    <div style={{ padding: "8px 12px", borderRadius: "6px", background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.3)", fontSize: "var(--nx-text-xs)", color: "#b45309" }}>
+                      ⚠️ <strong>Token Expired:</strong> Google Cloud OAuth apps in Testing mode expire refresh tokens after 7 days. Click <strong>Re-authenticate Now</strong> to refresh the connection in one click.
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            <div style={{ marginTop: "8px" }}>
+              <button
+                type="button"
+                className="nx-btn"
+                disabled={connecting}
+                onClick={handleConnectGoogle}
+              >
+                + Connect Another Google Account
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Developer OAuth Credentials Section */}
+      <section className="nx-section">
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div className="nx-section-title">Developer OAuth Credentials</div>
+            <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-tertiary)", marginTop: "2px" }}>
+              Custom Google Cloud Console Client ID & Secret for desktop OAuth
+            </div>
+          </div>
+          <button
+            type="button"
+            className="nx-btn nx-btn--small"
+            onClick={() => setShowCustomCreds(!showCustomCreds)}
+          >
+            {showCustomCreds ? "Hide Setup" : "Configure Credentials"}
+          </button>
+        </div>
+
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">Client Configuration Status</span>
+            <span className="nx-row-hint">{credStatus?.message || (credStatus?.configured ? "Client ID and Client Secret configured." : "Not configured.")}</span>
+          </div>
+          <span className="nx-status-indicator">
+            <span className={`nx-status-dot ${credStatus?.configured ? "nx-status-dot--ok" : "nx-status-dot--error"}`} />
+            {credStatus?.configured ? "Ready" : "Setup Required"}
+          </span>
+        </div>
+
+        {showCustomCreds && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "12px", padding: "16px", borderRadius: "8px", background: "var(--nx-bg)", border: "1px solid var(--nx-border)" }}>
+            <div style={{ fontSize: "var(--nx-text-xs)", color: "var(--nx-text-secondary)", lineHeight: 1.5 }}>
+              Create an OAuth client of type <strong>Desktop App</strong> in Google Cloud Console with the <strong>Gmail API</strong> and <strong>Google Calendar API</strong> enabled, then paste the Client ID and Secret below:
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <label style={{ fontSize: "var(--nx-text-xs)", fontWeight: 600 }}>Client ID</label>
+              <input
+                className="nx-input"
+                placeholder="123456789012-abcdef....apps.googleusercontent.com"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+              />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <label style={{ fontSize: "var(--nx-text-xs)", fontWeight: 600 }}>Client Secret</label>
+              <input
+                type="password"
+                className="nx-input"
+                placeholder="GOCSPX-..."
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+              />
+            </div>
+            <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+              <button
+                type="button"
+                className="nx-btn nx-btn--primary"
+                onClick={handleSaveCustomCreds}
+              >
+                Save Credentials
+              </button>
+              <button
+                type="button"
+                className="nx-btn"
+                onClick={() => window.open("https://console.cloud.google.com/apis/credentials", "_blank")}
+              >
+                Open Google Cloud Console →
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Cloud Integrations Section */}
+      <section className="nx-section">
+        <div className="nx-section-title">Cloud Integrations</div>
+        <div className="nx-row">
+          <div className="nx-row-label">
+            <span className="nx-row-name">GitHub Integration</span>
+            <span className="nx-row-hint">PR list, issue reviewer, and code search capabilities</span>
+          </div>
+          <button
+            type="button"
+            className="nx-btn"
+            onClick={() => invoke("open_setup_window").catch(() => {})}
+          >
+            Manage via Setup →
+          </button>
+        </div>
+      </section>
+
+      {/* MCP Servers Connections & Control */}
+      <section className="nx-section" style={{ minHeight: "560px" }}>
+        <McpServersPanel style={{ height: "580px" }} />
+      </section>
+    </>
+  );
+}
+

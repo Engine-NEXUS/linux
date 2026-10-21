@@ -21,7 +21,10 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 
 /// Vault services with token credentials.
-pub const VAULT_SERVICES: &[&str] = &["google", "swiggy", "spotify", "vercel", "render", "telegram"];
+pub const VAULT_SERVICES: &[&str] = &[
+    "google", "swiggy", "spotify", "vercel", "render", "telegram",
+    "figma", "supabase", "stripe", "slack", "netlify", "github",
+];
 
 /// Refresh 5 minutes before expiry (mirrors github_cmd.rs).
 const REFRESH_SKEW_SECS: f64 = 300.0;
@@ -44,6 +47,29 @@ static MEMORY: Lazy<RwLock<HashMap<String, CachedToken>>> =
 
 fn keyring_key(service: &str) -> String {
     format!("nexus-mcp-{service}")
+}
+
+/// The ONE place the vault opens an OS credential entry.
+///
+/// Unit tests must never touch the user's real Windows Credential Manager:
+/// since the `windows-native` backend became real (change 107), the vault
+/// tests were writing fake accounts (`user1@gmail.com`, …) and overwriting
+/// the Google account registry in the real store — a `cargo test` after the
+/// user connected Gmail would have wiped their real account list. Under
+/// `cfg(test)` every entry is an in-memory mock instead. Set
+/// `NEXUS_REAL_KEYRING=1` to run an ignored live probe against the real store.
+fn kr(user: &str) -> keyring::Result<keyring::Entry> {
+    #[cfg(test)]
+    {
+        use std::sync::Once;
+        static MOCK: Once = Once::new();
+        MOCK.call_once(|| {
+            if std::env::var("NEXUS_REAL_KEYRING").is_err() {
+                keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+            }
+        });
+    }
+    keyring::Entry::new("com.nexus.assistant", user)
 }
 
 /// Stored keyring payload: "<token>|<expires_at_unix>".
@@ -71,7 +97,7 @@ pub fn set_token(service: &str, token: &str, expires_in_secs: f64) {
     MEMORY
         .write()
         .insert(service.to_string(), cached.clone());
-    match keyring::Entry::new("com.nexus.assistant", &keyring_key(service)) {
+    match kr(&keyring_key(service)) {
         Ok(entry) => {
             if let Err(e) = entry.set_password(&encode(token, cached.expires_at)) {
                 tracing::warn!("vault: keychain write failed for {service}: {e}");
@@ -101,7 +127,7 @@ pub fn get_token(service: &str) -> Option<String> {
     // below if it holds a fresher copy; otherwise the entry is gone).
     MEMORY.write().remove(service);
     // Fall back to the OS keychain (warm after restart).
-    let entry = keyring::Entry::new("com.nexus.assistant", &keyring_key(service)).ok()?;
+    let entry = kr(&keyring_key(service)).ok()?;
     let payload = entry.get_password().ok()?;
     let (token, expires_at) = decode(&payload)?;
     let cached = CachedToken { token, expires_at };
@@ -121,9 +147,93 @@ pub fn get_token(service: &str) -> Option<String> {
 /// Forget a service (logout / disconnect).
 pub fn clear_token(service: &str) {
     MEMORY.write().remove(service);
-    if let Ok(entry) = keyring::Entry::new("com.nexus.assistant", &keyring_key(service)) {
+    if let Ok(entry) = kr(&keyring_key(service)) {
         if let Err(e) = entry.delete_credential() {
             tracing::debug!("vault: keychain delete for {service}: {e}");
+        }
+    }
+}
+
+// ─── API key storage (no expiry — plain credentials) ────────────────
+
+static APIKEY_MEMORY: Lazy<RwLock<HashMap<String, String>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+fn apikey_key(service: &str) -> String {
+    format!("nexus-apikey-{service}")
+}
+
+/// Store an API key in memory + OS keychain (best-effort).
+pub fn set_api_key(service: &str, key: &str) {
+    if key.is_empty() {
+        clear_api_key(service);
+        return;
+    }
+    APIKEY_MEMORY.write().insert(service.to_string(), key.to_string());
+    match kr(&apikey_key(service)) {
+        Ok(entry) => {
+            if let Err(e) = entry.set_password(key) {
+                tracing::warn!("vault: keychain write failed for apikey {service}: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("vault: keychain entry failed for apikey {service}: {e}"),
+    }
+}
+
+/// Retrieve an API key from memory or OS keychain, or None.
+pub fn get_api_key(service: &str) -> Option<String> {
+    if let Some(key) = APIKEY_MEMORY.read().get(service) {
+        if !key.is_empty() {
+            return Some(key.clone());
+        }
+    }
+    let entry = kr(&apikey_key(service)).ok()?;
+    let key = entry.get_password().ok()?;
+    if key.is_empty() {
+        None
+    } else {
+        APIKEY_MEMORY.write().insert(service.to_string(), key.clone());
+        Some(key)
+    }
+}
+
+/// Delete an API key from memory and OS keychain.
+pub fn clear_api_key(service: &str) {
+    APIKEY_MEMORY.write().remove(service);
+    if let Ok(entry) = kr(&apikey_key(service)) {
+        if let Err(e) = entry.delete_credential() {
+            tracing::debug!("vault: keychain delete for apikey {service}: {e}");
+        }
+    }
+}
+
+/// One-time migration: move API keys from settings.json to OS keychain.
+/// Runs on startup. Idempotent — skips services already in keychain.
+#[allow(dead_code)]
+pub fn migrate_api_keys_to_keychain(app_data_dir: &std::path::Path) {
+    let path = app_data_dir.join("settings.json");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return;
+    };
+    for service in ["groq", "gemini", "cerebras"] {
+        // Skip if already in keychain
+        if get_api_key(service).is_some() {
+            continue;
+        }
+        let camel = format!("{service}ApiKey");
+        let snake = format!("{service}_api_key");
+        if let Some(key) = json
+            .get(&camel)
+            .or_else(|| json.get(&snake))
+            .and_then(|v| v.as_str())
+        {
+            if !key.is_empty() {
+                set_api_key(service, key);
+                tracing::info!("vault: migrated {service} API key to keychain");
+            }
         }
     }
 }
@@ -136,7 +246,7 @@ pub fn token_status(service: &str) -> &'static str {
         }
         return "expired";
     }
-    match keyring::Entry::new("com.nexus.assistant", &keyring_key(service)) {
+    match kr(&keyring_key(service)) {
         Ok(entry) => match entry.get_password().ok().and_then(|p| decode(&p)) {
             Some((_, exp)) => {
                 let now = chrono::Utc::now().timestamp() as f64;
@@ -157,17 +267,22 @@ pub fn token_status(service: &str) -> &'static str {
 /// the Worker refreshes on its end; we re-fetch when our copy is stale.
 async fn fetch_google_token_from_worker(
     worker_url: &str,
-    _user_id: &str,
+    user_id: &str,
 ) -> Result<String, String> {
-    // Security (2026-10-02): no `user_id` query parameter. The Worker derives
-    // the account from the authenticated device credential, so a device can
-    // only ever mint a token for the account it registered as.
-    let url = format!("{}/oauth/google-token", worker_url.trim_end_matches('/'));
+    // The device bearer is mandatory for the gated Worker.  Keep the legacy
+    // user_id during the staged rollout; worker_proxy owns the one removal
+    // flag and places the trusted native value first.
+    let url = crate::worker_proxy::build_worker_url(
+        worker_url,
+        "/oauth/google-token",
+        None,
+        Some(user_id),
+    )?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = crate::device_auth::apply_to(client.get(&url))
+    let resp = crate::worker_proxy::apply_to(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("google token fetch: {e}"))?;
@@ -175,10 +290,7 @@ async fn fetch_google_token_from_worker(
         return Err("Google not connected. Connect Google in setup.".into());
     }
     if resp.status() == 401 || resp.status() == 403 {
-        return Err(
-            "Device not authorized with the Worker. Reconnect NEXUS or check settings."
-                .into(),
-        );
+        return Err(crate::worker_proxy::DEVICE_NOT_AUTHORIZED_MESSAGE.into());
     }
     if !resp.status().is_success() {
         return Err(format!("google token error {}", resp.status()));
@@ -190,33 +302,25 @@ async fn fetch_google_token_from_worker(
         .ok_or_else(|| "token field missing in worker response".to_string())
 }
 
-/// Get a valid Google token: vault first, Worker on miss/expiry.
-pub async fn get_valid_google_token(
-    worker_url: &str,
-    user_id: &str,
-) -> Result<String, String> {
-    if let Some(token) = get_token("google") {
-        return Ok(token);
-    }
-    let token = fetch_google_token_from_worker(worker_url, user_id).await?;
-    set_token("google", &token, 3600.0);
-    Ok(token)
-}
-
 /// Fetch a fresh Swiggy access token from the Worker (OAuth + refresh
 /// server-side, same shape as Google) and cache it in the vault.
 async fn fetch_swiggy_token_from_worker(
     worker_url: &str,
-    _user_id: &str,
+    user_id: &str,
 ) -> Result<String, String> {
-    // Security (2026-10-02): see get_valid_google_token — user identity comes
-    // from the device credential, not the query string.
-    let url = format!("{}/oauth/swiggy-token", worker_url.trim_end_matches('/'));
+    // See the Google fetch above: this remains transition-compatible with the
+    // deployed Worker while also authenticating a request to the gated one.
+    let url = crate::worker_proxy::build_worker_url(
+        worker_url,
+        "/oauth/swiggy-token",
+        None,
+        Some(user_id),
+    )?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = crate::device_auth::apply_to(client.get(&url))
+    let resp = crate::worker_proxy::apply_to(client.get(&url))
         .send()
         .await
         .map_err(|e| format!("swiggy token fetch: {e}"))?;
@@ -224,10 +328,7 @@ async fn fetch_swiggy_token_from_worker(
         return Err("Swiggy not connected. Connect Swiggy in Settings, Connections tab.".into());
     }
     if resp.status() == 401 || resp.status() == 403 {
-        return Err(
-            "Device not authorized with the Worker. Reconnect NEXUS or check settings."
-                .into(),
-        );
+        return Err(crate::worker_proxy::DEVICE_NOT_AUTHORIZED_MESSAGE.into());
     }
     if !resp.status().is_success() {
         return Err(format!("swiggy token error {}", resp.status()));
@@ -441,6 +542,195 @@ pub async fn vault_clear_token(service: String) -> Result<(), String> {
     Ok(())
 }
 
+// ─── Multi-Email Google Account Registry Vault ────────────────────────────────
+
+use crate::google::types::GoogleAccountProfile;
+
+static GOOGLE_ACCOUNTS_CACHE: Lazy<RwLock<Option<Vec<GoogleAccountProfile>>>> =
+    Lazy::new(|| RwLock::new(None));
+
+fn google_accounts_keyring_key() -> &'static str {
+    "nexus-google-accounts"
+}
+
+fn google_refresh_token_keyring_key(email: &str) -> String {
+    format!("nexus-google-rt-{}", email.to_lowercase().trim())
+}
+
+fn google_access_token_keyring_key(email: &str) -> String {
+    format!("nexus-google-at-{}", email.to_lowercase().trim())
+}
+
+/// Retrieve all registered Google account profiles from vault.
+pub fn get_google_accounts() -> Vec<GoogleAccountProfile> {
+    if let Some(cached) = GOOGLE_ACCOUNTS_CACHE.read().as_ref() {
+        return cached.clone();
+    }
+    let accounts: Vec<GoogleAccountProfile> = (|| {
+        let entry = kr(google_accounts_keyring_key()).ok()?;
+        let json_str = entry.get_password().ok()?;
+        serde_json::from_str(&json_str).ok()
+    })()
+    .unwrap_or_default();
+
+    *GOOGLE_ACCOUNTS_CACHE.write() = Some(accounts.clone());
+    accounts
+}
+
+/// Save or update a Google account profile (and optional refresh token).
+pub fn save_google_account(profile: GoogleAccountProfile, refresh_token: Option<&str>) {
+    let mut accounts = get_google_accounts();
+    let email_lower = profile.email.to_lowercase().trim().to_string();
+
+    let mut profile = profile;
+    if accounts.is_empty() {
+        profile.is_primary = true;
+    } else if profile.is_primary {
+        for a in accounts.iter_mut() {
+            a.is_primary = false;
+        }
+    }
+
+    if let Some(pos) = accounts.iter().position(|a| a.email.to_lowercase().trim() == email_lower) {
+        accounts[pos] = profile;
+    } else {
+        accounts.push(profile);
+    }
+
+    *GOOGLE_ACCOUNTS_CACHE.write() = Some(accounts.clone());
+
+    if let Ok(json_str) = serde_json::to_string(&accounts) {
+        if let Ok(entry) = kr(google_accounts_keyring_key()) {
+            let _ = entry.set_password(&json_str);
+        }
+    }
+
+    if let Some(rt) = refresh_token {
+        if !rt.trim().is_empty() {
+            // One copy only. (A second plain copy under `nexus-google-rt-…`
+            // used to be written here; nothing ever read it.)
+            set_token(&format!("google_rt_{email_lower}"), rt, 365.0 * 86400.0 * 10.0);
+        }
+    }
+}
+
+/// Set the primary Google account by email.
+pub fn set_primary_google_account(email: &str) -> Result<(), String> {
+    let mut accounts = get_google_accounts();
+    let email_lower = email.to_lowercase().trim().to_string();
+    let mut found = false;
+    for a in accounts.iter_mut() {
+        if a.email.to_lowercase().trim() == email_lower {
+            a.is_primary = true;
+            found = true;
+        } else {
+            a.is_primary = false;
+        }
+    }
+    if !found {
+        return Err(format!("Account '{email}' not found in registry"));
+    }
+    *GOOGLE_ACCOUNTS_CACHE.write() = Some(accounts.clone());
+    if let Ok(json_str) = serde_json::to_string(&accounts) {
+        if let Ok(entry) = kr(google_accounts_keyring_key()) {
+            let _ = entry.set_password(&json_str);
+        }
+    }
+    Ok(())
+}
+
+/// Disconnect and remove a Google account and its tokens.
+pub fn remove_google_account(email: &str) -> Result<(), String> {
+    let mut accounts = get_google_accounts();
+    let email_lower = email.to_lowercase().trim().to_string();
+    let was_primary = accounts.iter().any(|a| a.email.to_lowercase().trim() == email_lower && a.is_primary);
+
+    accounts.retain(|a| a.email.to_lowercase().trim() != email_lower);
+
+    if was_primary && !accounts.is_empty() {
+        accounts[0].is_primary = true;
+    }
+    *GOOGLE_ACCOUNTS_CACHE.write() = Some(accounts.clone());
+
+    if let Ok(json_str) = serde_json::to_string(&accounts) {
+        if let Ok(entry) = kr(google_accounts_keyring_key()) {
+            let _ = entry.set_password(&json_str);
+        }
+    }
+
+    // The refresh/access tokens that `get_google_refresh_token` /
+    // `get_google_access_token` actually read live in the token vault under
+    // `google_rt_<email>` / `google_at_<email>` (keychain `nexus-mcp-…`).
+    // Removing an account used to clear only two OTHER key names, so a
+    // "removed" account's refresh token stayed in Credential Manager and in
+    // memory. `clear_token` wipes both.
+    clear_token(&format!("google_rt_{email_lower}"));
+    clear_token(&format!("google_at_{email_lower}"));
+    // Legacy duplicate keys older builds wrote.
+    if let Ok(entry) = kr(&google_refresh_token_keyring_key(&email_lower)) {
+        let _ = entry.delete_credential();
+    }
+    if let Ok(entry) = kr(&google_access_token_keyring_key(&email_lower)) {
+        let _ = entry.delete_credential();
+    }
+
+    Ok(())
+}
+
+/// Retrieve the stored refresh token for a given email.
+pub fn get_google_refresh_token(email: &str) -> Option<String> {
+    let key = format!("google_rt_{}", email.to_lowercase().trim());
+    get_token(&key)
+}
+
+/// Store a fresh Google access token for a given account.
+pub fn set_google_access_token(email: &str, access_token: &str, expires_in_secs: f64) {
+    let key = format!("google_at_{}", email.to_lowercase().trim());
+    set_token(&key, access_token, expires_in_secs);
+}
+
+/// Retrieve a non-expired cached access token for a given account email.
+pub fn get_google_access_token(email: &str) -> Option<String> {
+    let key = format!("google_at_{}", email.to_lowercase().trim());
+    get_token(&key)
+}
+
+/// Resolve access token for a specific Google account (or primary account if None).
+/// Falls back to default "google" vault token if multi-email registry is unpopulated.
+pub fn get_token_for_google_account(account_email: Option<&str>) -> Option<String> {
+    let accounts = get_google_accounts();
+    let target_email = match account_email {
+        Some(e) if !e.trim().is_empty() => e.to_lowercase().trim().to_string(),
+        _ => {
+            if let Some(primary) = accounts.iter().find(|a| a.is_primary).or_else(|| accounts.first()) {
+                primary.email.to_lowercase()
+            } else {
+                return get_token("google");
+            }
+        }
+    };
+
+    if let Some(cached) = get_google_access_token(&target_email) {
+        return Some(cached);
+    }
+
+    // Single-account backward-compatibility fallback
+    get_token("google")
+}
+
+/// Test-only: serialise every test that touches the process-global Google
+/// account registry (the in-memory cache plus the mock keyring entry).
+/// Without it two tests race — one saves an account while the other asserts
+/// on the list length — and the same registry leaks a phone number into the
+/// memory-profile test, which reads it through `refresh_user_profile`.
+#[cfg(test)]
+pub(crate) fn google_registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panicking test must not poison the lock for the next one.
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +774,112 @@ mod tests {
         let got = get_valid_token("test-norefresh", None, None).await;
         assert!(got.is_none());
         clear_token("test-norefresh");
+    }
+
+    #[test]
+    fn google_account_registry_roundtrip_and_primary_switch() {
+        // The registry is process-global (memory cache + mock keyring): hold
+        // the shared guard so a parallel test cannot add or remove accounts
+        // while this one asserts on the list.
+        let _g = google_registry_test_guard();
+        let prof1 = GoogleAccountProfile {
+            email: "user1@gmail.com".into(),
+            name: "User One".into(),
+            picture: Some("http://pic1.png".into()),
+            is_primary: false,
+            added_at_ms: 1000,
+            scopes: vec!["email".into()],
+            phone: Some("+9111".into()),
+            address: None,
+        };
+        let prof2 = GoogleAccountProfile {
+            email: "user2@gmail.com".into(),
+            name: "User Two".into(),
+            picture: None,
+            is_primary: false,
+            added_at_ms: 2000,
+            scopes: vec!["email".into()],
+            phone: None,
+            address: None,
+        };
+
+        save_google_account(prof1.clone(), Some("rt_user1"));
+        save_google_account(prof2.clone(), Some("rt_user2"));
+
+        let accounts = get_google_accounts();
+        assert_eq!(accounts.len(), 2);
+        // First account added should automatically be primary
+        assert!(accounts.iter().any(|a| a.email == "user1@gmail.com" && a.is_primary));
+
+        set_primary_google_account("user2@gmail.com").unwrap();
+        let updated = get_google_accounts();
+        assert!(updated.iter().any(|a| a.email == "user2@gmail.com" && a.is_primary));
+        assert!(updated.iter().any(|a| a.email == "user1@gmail.com" && !a.is_primary));
+
+        set_google_access_token("user2@gmail.com", "at_user2_valid", 3600.0);
+        assert_eq!(get_google_access_token("user2@gmail.com").as_deref(), Some("at_user2_valid"));
+
+        assert_eq!(get_google_refresh_token("user2@gmail.com").as_deref(), Some("rt_user2"));
+
+        remove_google_account("user1@gmail.com").unwrap();
+        remove_google_account("user2@gmail.com").unwrap();
+        assert!(get_google_accounts().is_empty());
+        // Regression: a removed account must not keep a usable refresh or
+        // access token (previously both survived in memory and the keychain).
+        for email in ["user1@gmail.com", "user2@gmail.com"] {
+            assert!(get_google_refresh_token(email).is_none(), "refresh token for {email} survived removal");
+            assert!(get_google_access_token(email).is_none(), "access token for {email} survived removal");
+        }
+    }
+
+    #[test]
+    fn vault_tests_never_touch_the_real_credential_store() {
+        // The default credential builder must be the in-memory mock under
+        // cfg(test): an entry written through the vault is not readable via
+        // a second, independent handle (a real store would return it).
+        let a = kr("nexus-test-isolation-probe").unwrap();
+        a.set_password("probe").unwrap();
+        let b = kr("nexus-test-isolation-probe").unwrap();
+        assert!(b.get_password().is_err(), "vault tests are talking to the REAL credential store");
+    }
+
+    #[test]
+    fn google_profile_phone_address_roundtrip_and_legacy_compat() {
+        // Same registry as the test above — serialise, do not race.
+        let _g = google_registry_test_guard();
+        // New fields survive the keychain round-trip.
+        let prof = GoogleAccountProfile {
+            email: "user3@gmail.com".into(),
+            name: "User Three".into(),
+            picture: None,
+            is_primary: false,
+            added_at_ms: 3000,
+            scopes: vec!["email".into()],
+            phone: Some("+9133".into()),
+            address: Some("Hyderabad, IN".into()),
+        };
+        save_google_account(prof.clone(), None);
+        let loaded: Vec<GoogleAccountProfile> = get_google_accounts()
+            .into_iter()
+            .filter(|a| a.email == "user3@gmail.com")
+            .collect();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].phone.as_deref(), Some("+9133"));
+        assert_eq!(loaded[0].address.as_deref(), Some("Hyderabad, IN"));
+        let _ = remove_google_account("user3@gmail.com");
+
+        // Pre-field JSON (no phone/address keys) must still parse —
+        // otherwise every existing account vanishes after upgrade.
+        let legacy = serde_json::json!({
+            "email": "old@gmail.com",
+            "name": "Old",
+            "picture": null,
+            "is_primary": false,
+            "added_at_ms": 1,
+            "scopes": []
+        });
+        let parsed: GoogleAccountProfile = serde_json::from_value(legacy).expect("legacy profile parses");
+        assert_eq!(parsed.phone, None);
+        assert_eq!(parsed.address, None);
     }
 }

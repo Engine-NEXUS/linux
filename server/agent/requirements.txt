@@ -1,0 +1,4 @@
+# NEXUS agent subsystem (Phase 2 extraction, doc 79).
+# Minimal: pydantic only. fastmcp/httpx arrive with the GitHub MCP server
+# (Phase 3). Every import in server/agent/* must resolve here or stdlib.
+pydantic>=2.0

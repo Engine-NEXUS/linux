@@ -3,7 +3,7 @@
 //! Grounding order (see docs/mcp/09-screen-vision-control.md):
 //!   1. Browser tabs → hotkeys first (Ctrl+1..8, 100% reliable, instant).
 //!   2. Everything else → Windows UIA tree (exact names + boxes, free).
-//!   3. Canvas/custom UI → vision model / OCR (`vision.rs`, Phase 1+).
+//!   3. Canvas/custom UI → future (vision model / OCR), not this module.
 //!
 //! Ordinal rule: visible + enabled actionables in the foreground window,
 //! sorted top-to-bottom then left-to-right. "3rd option" = 3rd actionable.
@@ -41,9 +41,22 @@ pub fn pick_ordinal(sorted: &[UiElement], n: u32) -> Option<&UiElement> {
     sorted.get((n - 1) as usize)
 }
 
-/// Parse "3rd", "2nd", "1st", "4th", "12th" (and bare "3") into a number.
+/// Parse "3rd", "2nd", "1st", "4th", "12th", bare "3", and word ordinals ("first", "second", "one", "two") into a number.
 pub fn parse_ordinal(text: &str) -> Option<u32> {
     let t = text.trim().to_lowercase();
+    match t.as_str() {
+        "first" | "one" | "won" => return Some(1),
+        "second" | "two" | "to" | "too" => return Some(2),
+        "third" | "three" => return Some(3),
+        "fourth" | "four" | "for" => return Some(4),
+        "fifth" | "five" => return Some(5),
+        "sixth" | "six" => return Some(6),
+        "seventh" | "seven" => return Some(7),
+        "eighth" | "eight" | "ate" => return Some(8),
+        "ninth" | "nine" => return Some(9),
+        "tenth" | "ten" => return Some(10),
+        _ => {}
+    }
     let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() {
         return None;
@@ -58,45 +71,25 @@ pub fn parse_ordinal(text: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Pure: fuzzy match score 0.0-1.0 of a locate query against a UI name.
-/// Exact > substring > all-words > any-word. Locate hits need >= 0.5.
-pub fn score_match(query: &str, name: &str) -> f32 {
-    let norm = |s: &str| {
-        s.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| !w.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-    let q = norm(query);
-    let n = norm(name);
-    if q.is_empty() || n.is_empty() {
-        return 0.0;
+/// Shared acceptance rule for a candidate control (pure, unit-tested). Same as the legacy filter
+/// (enabled, named, not a password field, has bounds) plus **on-screen**: an off-screen control
+/// cannot be clicked, so offering it as "the 3rd option" sends the cursor into the void.
+pub fn accept_actionable(enabled: bool, offscreen: bool, name: &str, w: i32, h: i32) -> bool {
+    if !enabled || offscreen || w <= 0 || h <= 0 {
+        return false;
     }
-    if q == n {
-        return 1.0;
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
     }
-    if n.contains(&q) || q.contains(&n) {
-        return 0.8;
-    }
-    // Space-insensitive containment: OCR routinely drops inter-word
-    // spaces ("Closewindow", "Signin"). Scores just below substring.
-    let nospace = |s: &str| s.split_whitespace().collect::<String>();
-    let (nq, nn) = (nospace(&q), nospace(&n));
-    if nn.contains(&nq) || nq.contains(&nn) {
-        return 0.75;
-    }
-    let qw: Vec<&str> = q.split(' ').collect();
-    let nw: Vec<&str> = n.split(' ').collect();
-    let hits = qw.iter().filter(|w| nw.contains(w)).count();
-    if hits == qw.len() {
-        return 0.7;
-    }
-    if hits > 0 {
-        return 0.4;
-    }
-    0.0
+    // Skip password/secure fields by name.
+    !name.to_lowercase().contains("password")
 }
+
+/// Wall-clock budget for the fast lookup. UIA calls block on the target app, so a hung or
+/// enormous tree must not stall the voice pipeline: on expiry the caller gets an empty list
+/// (and falls through to its next tier) instead of waiting seconds.
+pub const FAST_LOOKUP_BUDGET_MS: u64 = 2500;
 
 #[cfg(target_os = "windows")]
 mod win {
@@ -113,11 +106,139 @@ mod win {
         ControlType::CheckBox,
         ControlType::RadioButton,
         ControlType::SplitButton,
+        ControlType::Edit,
+        ControlType::ComboBox,
     ];
 
+    /// Outcome of the fast lookup (the dispatcher decides what each case means).
+    enum Fast {
+        Done(Vec<UiElement>),
+        /// Budget exhausted - the app is slow/hung or the tree is huge. Do NOT retry with the
+        /// legacy path (it is slower still); the caller falls through to its next tier.
+        TimedOut,
+        /// UIA could not be used at all (no foreground window, COM failure...) - legacy may still work.
+        Unavailable(String),
+    }
+
     /// List actionable elements in the foreground window via UIA.
-    /// Best-effort: any failing element is skipped, never fatal.
+    ///
+    /// ONE cached query rooted at the **foreground window** (not the focused element): the old
+    /// path searched under the focused element, so a leaf focus (text box, document) returned
+    /// nothing after ten 500 ms timeouts - measured 5.1 s and 0 controls in Notepad/Calculator,
+    /// versus 18-79 ms and full recall with this query (docs/research/ghost-mode/11-...).
+    /// Set `NEXUS_UIA_LEGACY=1` to force the old behaviour (kill switch).
     pub fn list_actionables() -> Vec<UiElement> {
+        if std::env::var("NEXUS_UIA_LEGACY").map(|v| v == "1").unwrap_or(false) {
+            return list_actionables_legacy();
+        }
+        let t0 = std::time::Instant::now();
+        match fast_with_budget(super::FAST_LOOKUP_BUDGET_MS) {
+            Fast::Done(v) => {
+                tracing::info!(
+                    "[UIA] list_actionables: {} controls in {}ms (window-rooted, cached)",
+                    v.len(),
+                    t0.elapsed().as_millis()
+                );
+                v
+            }
+            Fast::TimedOut => {
+                tracing::warn!(
+                    "[UIA] list_actionables: exceeded {}ms budget - returning empty (caller falls through)",
+                    super::FAST_LOOKUP_BUDGET_MS
+                );
+                Vec::new()
+            }
+            Fast::Unavailable(why) => {
+                tracing::warn!("[UIA] fast lookup unavailable ({why}) - using legacy focused-element query");
+                list_actionables_legacy()
+            }
+        }
+    }
+
+    /// Run the cached query on a worker thread so a blocked UIA call cannot hold the caller past
+    /// the budget (the thread finishes on its own; one stuck call leaks one thread at worst).
+    fn fast_with_budget(budget_ms: u64) -> Fast {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<UiElement>, String>>();
+        let spawned = std::thread::Builder::new()
+            .name("uia-fast-lookup".into())
+            .spawn(move || {
+                let _ = tx.send(fast_query());
+            });
+        if let Err(e) = spawned {
+            return Fast::Unavailable(format!("thread spawn failed: {e}"));
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(budget_ms)) {
+            Ok(Ok(v)) => Fast::Done(v),
+            Ok(Err(why)) => Fast::Unavailable(why),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Fast::TimedOut,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Fast::Unavailable("lookup thread ended without a result".into())
+            }
+        }
+    }
+
+    fn fast_query() -> Result<Vec<UiElement>, String> {
+        use uiautomation::types::{Handle, TreeScope, UIProperty};
+        use uiautomation::variants::Variant;
+        let err = |e: uiautomation::errors::Error| e.to_string();
+
+        let automation = UIAutomation::new().map_err(err)?;
+        let hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        if hwnd.0 == 0 {
+            return Err("no foreground window".into());
+        }
+        let window = automation.element_from_handle(Handle::from(hwnd.0)).map_err(err)?;
+
+        // Server-side filter: only the clickable control types cross the process boundary
+        // (a Chromium page has thousands of Text/Group nodes we never use).
+        let mut cond = None;
+        for ct in CLICKABLE {
+            let c = automation
+                .create_property_condition(UIProperty::ControlType, Variant::from(*ct as i32), None)
+                .map_err(err)?;
+            cond = Some(match cond {
+                None => c,
+                Some(acc) => automation.create_or_condition(acc, c).map_err(err)?,
+            });
+        }
+        let cond = cond.ok_or_else(|| "no clickable control types configured".to_string())?;
+
+        let cache = automation.create_cache_request().map_err(err)?;
+        for p in [
+            UIProperty::Name,
+            UIProperty::ControlType,
+            UIProperty::BoundingRectangle,
+            UIProperty::IsEnabled,
+            UIProperty::IsOffscreen,
+        ] {
+            cache.add_property(p).map_err(err)?;
+        }
+
+        let found = window
+            .find_all_build_cache(TreeScope::Descendants, &cond, &cache)
+            .map_err(err)?;
+
+        let mut out = Vec::with_capacity(found.len());
+        for el in &found {
+            // Cached reads only - no further cross-process calls. Any failing element is skipped.
+            let Ok(ct) = el.get_cached_control_type() else { continue };
+            let name = el.get_cached_name().unwrap_or_default();
+            let enabled = el.is_cached_enabled().unwrap_or(false);
+            let offscreen = el.is_cached_offscreen().unwrap_or(true);
+            let Ok(r) = el.get_cached_bounding_rectangle() else { continue };
+            let (x, y, w, h) = (r.get_left(), r.get_top(), r.get_width(), r.get_height());
+            if !super::accept_actionable(enabled, offscreen, &name, w, h) {
+                continue;
+            }
+            out.push(UiElement { name, kind: format!("{ct:?}"), x, y, w, h });
+        }
+        Ok(super::sort_reading_order(out))
+    }
+
+    /// The original focused-element-rooted lookup (10 sequential queries). Kept as the explicit
+    /// fallback when the fast path cannot run, and as the kill-switch target. Slow (2.5-5 s) and
+    /// blind when focus is on a leaf element - do not call it directly from new code.
+    pub fn list_actionables_legacy() -> Vec<UiElement> {
         let automation = match UIAutomation::new() {
             Ok(a) => a,
             Err(_) => return Vec::new(),
@@ -188,135 +309,66 @@ mod win {
             .map_err(|e| format!("mouse click: {e}"))?;
         Ok(())
     }
+}
 
-    /// Find the best element matching a locate query ("save button") by
-    /// name across the focused window. Returns the highest scorer >= 0.5,
-    /// or None. Powers Phase-3a locate-first: exact boxes, ~5ms, no VLM.
-    /// Password/secure fields never match (same rule as ordinals).
-    pub fn find_by_name(query: &str) -> Option<UiElement> {
-        let automation = UIAutomation::new().ok()?;
-        let focused = automation.get_focused_element().ok()?;
-        let mut best: Option<(f32, UiElement)> = None;
-        for ct in CLICKABLE {
-            let found = automation
-                .create_matcher()
-                .from(focused.clone())
-                .timeout(500)
-                .control_type(*ct)
-                .find_all();
-            let elements = match found {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            for el in elements.iter() {
-                if !el.is_enabled().unwrap_or(false) {
-                    continue;
-                }
-                let name = el.get_name().unwrap_or_default();
-                if name.trim().is_empty() {
-                    continue;
-                }
-                let lower = name.to_lowercase();
-                if lower.contains("password") {
-                    continue;
-                }
-                let (x, y, w, h) = match el.get_bounding_rectangle() {
-                    Ok(r) => (r.get_left(), r.get_top(), r.get_width(), r.get_height()),
-                    Err(_) => continue,
-                };
-                if w <= 0 || h <= 0 {
-                    continue;
-                }
-                let score = super::score_match(query, &name);
-                if score >= 0.5 && best.as_ref().map_or(true, |(s, _)| score > *s) {
-                    best = Some((
-                        score,
-                        UiElement {
-                            name,
-                            kind: format!("{:?}", ct),
-                            x,
-                            y,
-                            w,
-                            h,
-                        },
-                    ));
-                }
+#[cfg(target_os = "windows")]
+pub use win::{click_element, list_actionables, list_actionables_legacy};
+
+#[cfg(target_os = "windows")]
+mod win_extra {
+    /// Primary monitor size in physical px (matches GetWindowRect space,
+    /// so fullscreen detection compares apples to apples).
+    pub fn primary_monitor_size() -> Option<(i32, i32)> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+        };
+        unsafe {
+            let w = GetSystemMetrics(SM_CXSCREEN);
+            let h = GetSystemMetrics(SM_CYSCREEN);
+            if w > 0 && h > 0 {
+                Some((w, h))
+            } else {
+                None
             }
         }
-        best.map(|(_, el)| el)
     }
 }
 
 #[cfg(target_os = "windows")]
-pub use win::{click_element, find_by_name, list_actionables};
+pub use win_extra::primary_monitor_size;
 
-/// Linux locate via the AT-SPI semantic tier.
-///
-/// This used to be a stub returning `None`, so on Linux every "where is X?"
-/// request fell through to screenshot + OCR + a cloud VLM — 1312ms of OCR plus a
-/// network round trip, with a hallucinated coordinate as the output. The
-/// accessibility tree answers the same question exactly, for ~100ms, locally.
-///
-/// Returns `None` on any failure so the caller falls through to the pixel tier.
-/// That fallback is not a formality: Chromium/Electron expose only a skeleton over
-/// AT-SPI unless launched with `--force-renderer-accessibility`, so VS Code and
-/// Chrome legitimately miss here and are the CDP tier's job.
-#[cfg(all(target_os = "linux", not(feature = "mock-wake")))]
-pub fn find_by_name(query: &str) -> Option<UiElement> {
-    if query.trim().is_empty() {
-        return None;
-    }
-    // Cascade: AT-SPI first (exact, and the only tier that gives geometry for
-    // GTK/Qt), then CDP for Chromium/Electron, which AT-SPI sees as a 1-node
-    // skeleton against VS Code's real 1026. Only a genuine semantic miss falls
-    // through to the pixel tier — see `Resolution::should_try_pixels`.
-    match crate::semantic::resolve(query, None) {
-        crate::semantic::Resolution::Found(hit) => {
-            let Some(b) = hit.bounds else {
-                // A CDP hit carries no geometry: the AX tree is semantic, not
-                // spatial. There is nothing to point at, so report a miss rather
-                // than a fabricated coordinate — the caller will fall through to
-                // OCR/VLM, which can at least give a position.
-                tracing::debug!(
-                    "semantic: {query:?} found via {} but it has no geometry",
-                    hit.tier.as_str()
-                );
-                return None;
-            };
-            if !b.is_real() {
-                tracing::debug!("semantic: {query:?} found but has unlaid-out bounds");
-                return None;
-            }
-            Some(UiElement {
-                name: hit.name,
-                // The role is the Linux equivalent of the Windows UIA control
-                // type, so downstream filtering on `kind` keeps working.
-                kind: hit.role,
-                x: b.x,
-                y: b.y,
-                w: b.w,
-                h: b.h,
-            })
-        }
-        crate::semantic::Resolution::NotFound => None,
-        crate::semantic::Resolution::NoTierAvailable { detail } => {
-            tracing::debug!("semantic: no tier available ({detail})");
-            None
-        }
-    }
-}
+#[cfg(target_os = "linux")]
+#[path = "screen_linux.rs"]
+mod screen_linux;
 
-/// macOS has no wired tree yet; the stub keeps the caller shape and falls through.
-#[cfg(not(any(target_os = "windows", all(target_os = "linux", not(feature = "mock-wake")))))]
-pub fn find_by_name(_query: &str) -> Option<UiElement> {
-    None
-}
+// On Linux the element lookup goes through the semantic tiers (AT-SPI, then
+// CDP) instead of UI Automation — the accessibility tree is the same
+// instrument, and on a native Wayland session it is the only one that works.
+// The capture helpers are the xdg-desktop-portal route, and they carry the
+// pre-capture privacy gate.
+#[cfg(target_os = "linux")]
+pub use screen_linux::{
+    capture_jpeg_base64, capture_png_blocking, find_by_name, is_actionable_hit,
+    list_actionables, list_actionables_with_reason, primary_monitor_size, to_actionable_list,
+    ui_element,
+};
 
 /// Switch browser tab by index (1-based): Ctrl+1..8, Ctrl+9 = last.
 /// Hotkeys beat grounding for tabs — 100% reliable, instant.
 pub fn switch_browser_tab(index: u32) -> Result<String, String> {
     if index == 0 || index > 9 {
         return Err("tab number must be 1-9".to_string());
+    }
+    // Shortcut brain (E1): layout-independent virtual-key chord for the app in front, foreground re-checked
+    // right before sending. Unknown apps keep the legacy Ctrl+digit below.
+    #[cfg(target_os = "windows")]
+    if crate::shortcuts::enabled() {
+        use crate::shortcuts::{Action, Spoken};
+        match crate::shortcuts::do_action_spoken(Action::GotoTab, Some(index), true) {
+            Spoken::Ok(line) => return Ok(line),
+            Spoken::Refused(reason) => return Err(reason),
+            Spoken::Fallback => {} // unknown app -> legacy path below
+        }
     }
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
     let mut enigo =
@@ -343,275 +395,9 @@ pub fn switch_browser_tab(index: u32) -> Result<String, String> {
     Ok(format!("Switched to tab {index}, sir."))
 }
 
-// ─── Screen capture (Phase 1: feed screenshots to the vision model) ──
-// Cross-platform, zero new crates: Windows GDI (mirrors
-// `sidebar_backdrop.rs`), Linux via the xdg-desktop-portal Screenshot
-// API over the existing `zbus` dependency, macOS via `screencapture`.
-
-use image::DynamicImage;
-
-/// Max width (px) sent to the vision model — clicky parity (1280px JPEG).
-pub const VISION_MAX_WIDTH: u32 = 1280;
-/// Hard cap on the JPEG payload (~900KB keeps base64 small for free tiers).
-const VISION_MAX_BYTES: usize = 900_000;
-
-/// A captured screen: original dimensions + downscaled image.
-/// Original dims are kept so Phase-2 pointer coordinates (0-1000
-/// normalized) can map back to physical pixels.
-pub struct ScreenShot {
-    pub image: DynamicImage,
-    pub orig_w: u32,
-    pub orig_h: u32,
-    pub scaled_w: u32,
-    pub scaled_h: u32,
-}
-
-impl ScreenShot {
-    pub fn from_dynamic(img: DynamicImage) -> Self {
-        let (orig_w, orig_h) = (img.width().max(1), img.height().max(1));
-        let (tw, th) = target_dims(orig_w, orig_h, VISION_MAX_WIDTH);
-        let scaled = if tw == orig_w && th == orig_h {
-            img
-        } else {
-            img.resize(tw, th, image::imageops::FilterType::Triangle)
-        };
-        Self {
-            image: scaled,
-            orig_w,
-            orig_h,
-            scaled_w: tw,
-            scaled_h: th,
-        }
-    }
-
-    /// JPEG-encode the (already downscaled) image. Retries once smaller
-    /// when the payload would exceed the free-tier-friendly byte cap.
-    pub fn jpeg(&self) -> Vec<u8> {
-        for (scale, quality) in [(1.0, 80u8), (0.75, 70u8)] {
-            let img = if scale == 1.0 {
-                self.image.clone()
-            } else {
-                let tw = ((self.scaled_w as f32 * scale) as u32).max(1);
-                let th = ((self.scaled_h as f32 * scale) as u32).max(1);
-                self.image
-                    .resize(tw, th, image::imageops::FilterType::Triangle)
-            };
-            let mut buf = Vec::new();
-            let mut enc =
-                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
-            if enc.encode_image(&img).is_ok() && buf.len() <= VISION_MAX_BYTES {
-                return buf;
-            }
-            if scale < 1.0 {
-                return buf;
-            }
-        }
-        Vec::new()
-    }
-}
-
-/// Pure: (w, h) scaled to fit `max_w`, preserving aspect. Never upscales.
-pub fn target_dims(w: u32, h: u32, max_w: u32) -> (u32, u32) {
-    if w == 0 || h == 0 {
-        return (1, 1);
-    }
-    if w <= max_w {
-        return (w, h);
-    }
-    let s = max_w as f64 / w as f64;
-    (max_w, ((h as f64 * s).round() as u32).max(1))
-}
-
-#[cfg(target_os = "windows")]
-pub async fn capture_primary() -> Result<ScreenShot, String> {
-    use image::{ImageBuffer, Rgba};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
-    };
-    let w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    if w <= 0 || h <= 0 {
-        return Err("could not query screen size".into());
-    }
-    let bgra = crate::sidebar_backdrop::capture_region_bgra_public(0, 0, w, h)
-        .ok_or_else(|| "screen capture failed (BitBlt)".to_string())?;
-    // BGRA (GDI) -> RGBA (image crate); BitBlt leaves alpha empty.
-    let mut rgba = Vec::with_capacity(bgra.len());
-    for px in bgra.chunks_exact(4) {
-        rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
-    }
-    let buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
-        ImageBuffer::from_raw(w as u32, h as u32, rgba).ok_or("bad capture buffer")?;
-    Ok(ScreenShot::from_dynamic(DynamicImage::ImageRgba8(buf)))
-}
-
-#[cfg(target_os = "linux")]
-pub async fn capture_primary() -> Result<ScreenShot, String> {
-    let png = portal_screenshot_png().await?;
-    let img =
-        image::load_from_memory(&png).map_err(|e| format!("decode screenshot: {e}"))?;
-    Ok(ScreenShot::from_dynamic(img))
-}
-
-/// Screenshot via org.freedesktop.portal.Desktop (works on X11 and
-/// Wayland wherever xdg-desktop-portal runs — GNOME, KDE, COSMIC).
-/// Returns raw PNG bytes; the portal-owned file is removed afterwards.
-#[cfg(target_os = "linux")]
-async fn portal_screenshot_png() -> Result<Vec<u8>, String> {
-    use std::collections::HashMap;
-    use std::time::Duration;
-    use futures_util::StreamExt;
-    use zbus::fdo::DBusProxy;
-    use zbus::message::Type as MessageType;
-    use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
-    use zbus::{Connection, MatchRule, MessageStream};
-
-    let conn = Connection::session()
-        .await
-        .map_err(|e| format!("D-Bus session: {e}"))?;
-    // Fast-fail when no portal exists (plain X11 without xdg-desktop-portal)
-    // instead of burning the 25s Response timeout below.
-    {
-        use zbus::fdo::DBusProxy;
-        let dbus = DBusProxy::new(&conn)
-            .await
-            .map_err(|e| format!("D-Bus proxy: {e}"))?;
-        let names = dbus
-            .list_names()
-            .await
-            .map_err(|e| format!("D-Bus list: {e}"))?;
-        if !names.iter().any(|n| n.as_str() == "org.freedesktop.portal.Desktop") {
-            return Err("no screenshot portal found — install xdg-desktop-portal (and a backend for your desktop) to enable screen vision".into());
-        }
-    }
-    let token = format!("nexus{}", std::process::id());
-    let mut opts: HashMap<&str, Value> = HashMap::new();
-    opts.insert("handle_token", Value::from(token.as_str()));
-    let reply = conn
-        .call_method(
-            Some("org.freedesktop.portal.Desktop"),
-            "/org/freedesktop/portal/desktop",
-            Some("org.freedesktop.portal.Screenshot"),
-            "Screenshot",
-            &("", opts),
-        )
-        .await
-        .map_err(|e| format!("portal Screenshot call: {e}"))?;
-    let req_path: OwnedObjectPath = reply
-        .body()
-        .deserialize()
-        .map_err(|e| format!("portal reply: {e}"))?;
-    let rule = MatchRule::builder()
-        .msg_type(MessageType::Signal)
-        .interface("org.freedesktop.portal.Request")
-        .map_err(|e| format!("match rule: {e}"))?
-        .path(req_path.into_inner())
-        .map_err(|e| format!("match rule: {e}"))?
-        .member("Response")
-        .map_err(|e| format!("match rule: {e}"))?
-        .build();
-    // Server-side match registration is internal-only in zbus 5, so
-    // register via the standard org.freedesktop.DBus AddMatch call
-    // (same DBusProxy pattern as mpris.rs). Without this the portal's
-    // Response signal is never delivered to our connection.
-    let dbus = DBusProxy::new(&conn)
-        .await
-        .map_err(|e| format!("D-Bus proxy: {e}"))?;
-    dbus.add_match_rule(rule)
-        .await
-        .map_err(|e| format!("match register: {e}"))?;
-    let mut stream = MessageStream::from(&conn);
-    let msg = tokio::time::timeout(Duration::from_secs(25), stream.next())
-        .await
-        .map_err(|_| "screenshot timed out (portal gave no response)".to_string())?
-        .ok_or("portal signal stream ended")?
-        .map_err(|e| format!("portal signal: {e}"))?;
-    let (code, results): (u32, HashMap<String, OwnedValue>) = msg
-        .body()
-        .deserialize()
-        .map_err(|e| format!("portal response: {e}"))?;
-    if code != 0 {
-        return Err(format!("screenshot cancelled/failed (response {code})"));
-    }
-    let uri_v = results.get("uri").ok_or("portal gave no file uri")?;
-    let uri =
-        String::try_from(uri_v.clone()).map_err(|e| format!("bad uri: {e}"))?;
-    let raw = uri
-        .strip_prefix("file://")
-        .ok_or("portal uri is not a file")?;
-    let path = percent_decode(raw);
-    let bytes =
-        std::fs::read(&path).map_err(|e| format!("read screenshot file: {e}"))?;
-    let _ = std::fs::remove_file(&path); // best-effort cleanup
-    if bytes.is_empty() {
-        return Err("screenshot file was empty".into());
-    }
-    Ok(bytes)
-}
-
-/// Minimal %XX decoder for file:// URIs (avoids a new crate).
-#[cfg(target_os = "linux")]
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(h * 16 + l);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-#[cfg(target_os = "linux")]
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub async fn capture_primary() -> Result<ScreenShot, String> {
-    let tmp = std::env::temp_dir().join(format!("nexus_screen_{}.jpg", std::process::id()));
-    let out = std::process::Command::new("/usr/sbin/screencapture")
-        .args(["-x", "-tjpg"])
-        .arg(&tmp)
-        .output()
-        .map_err(|e| format!("screencapture: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        // TCC denial surfaces on stderr — point at the exact Settings pane.
-        if stderr.contains("not authorized") || stderr.contains("denied") {
-            return Err("screen recording is blocked: allow NEXUS in System Settings → Privacy & Security → Screen Recording, then ask again".into());
-        }
-        let detail: String = stderr.chars().take(150).collect();
-        return Err(format!("screencapture failed ({detail})"));
-    }
-    let bytes = std::fs::read(&tmp).map_err(|e| format!("read screenshot: {e}"))?;
-    let _ = std::fs::remove_file(&tmp);
-    let img =
-        image::load_from_memory(&bytes).map_err(|e| format!("decode: {e}"))?;
-    Ok(ScreenShot::from_dynamic(img))
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-pub async fn capture_primary() -> Result<ScreenShot, String> {
-    Err("screen capture is not supported on this OS".into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgba};
 
     fn el(name: &str, x: i32, y: i32) -> UiElement {
         UiElement {
@@ -633,6 +419,30 @@ mod tests {
     }
 
     #[test]
+    fn accept_actionable_rules() {
+        // Happy path.
+        assert!(accept_actionable(true, false, "Submit", 80, 30));
+        assert!(accept_actionable(true, false, "  Save  ", 1, 1));
+        // Each rejection reason on its own.
+        assert!(!accept_actionable(false, false, "Submit", 80, 30), "disabled");
+        assert!(!accept_actionable(true, true, "Submit", 80, 30), "off-screen can't be clicked");
+        assert!(!accept_actionable(true, false, "", 80, 30), "unnamed");
+        assert!(!accept_actionable(true, false, "   ", 80, 30), "blank name");
+        assert!(!accept_actionable(true, false, "Submit", 0, 30), "no width");
+        assert!(!accept_actionable(true, false, "Submit", 80, -1), "no height");
+        // Password fields never resolve, any casing.
+        assert!(!accept_actionable(true, false, "Enter Password", 80, 30));
+        assert!(!accept_actionable(true, false, "PASSWORD", 80, 30));
+    }
+
+    #[test]
+    fn fast_lookup_budget_stays_well_under_the_legacy_cost() {
+        // Legacy burned 10 x 500 ms; the fast path's hard cap must stay below that.
+        assert!(FAST_LOOKUP_BUDGET_MS < 5000);
+        assert!(FAST_LOOKUP_BUDGET_MS >= 1000, "too tight for a cold Chromium tree");
+    }
+
+    #[test]
     fn ordinal_pick_one_based() {
         let v = vec![el("a", 0, 0), el("b", 0, 50)];
         assert_eq!(pick_ordinal(&v, 1).unwrap().name, "a");
@@ -648,90 +458,10 @@ mod tests {
         assert_eq!(parse_ordinal("2nd"), Some(2));
         assert_eq!(parse_ordinal("12th"), Some(12));
         assert_eq!(parse_ordinal("4"), Some(4));
+        assert_eq!(parse_ordinal("first"), Some(1));
+        assert_eq!(parse_ordinal("second"), Some(2));
+        assert_eq!(parse_ordinal("two"), Some(2));
         assert_eq!(parse_ordinal("option"), None);
         assert_eq!(parse_ordinal("3x"), None);
-    }
-
-    #[test]
-    fn target_dims_downscales_wide_screens() {
-        assert_eq!(target_dims(1920, 1080, 1280), (1280, 720));
-        assert_eq!(target_dims(3840, 2160, 1280), (1280, 720));
-    }
-
-    #[test]
-    fn target_dims_never_upscales() {
-        assert_eq!(target_dims(800, 600, 1280), (800, 600));
-        assert_eq!(target_dims(1280, 800, 1280), (1280, 800));
-        assert_eq!(target_dims(0, 0, 1280), (1, 1));
-    }
-
-    #[test]
-    fn screenshot_from_dynamic_encodes_valid_jpeg() {
-        let buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
-            ImageBuffer::from_fn(2000, 1000, |x, y| Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255]));
-        let shot = ScreenShot::from_dynamic(DynamicImage::ImageRgba8(buf));
-        assert_eq!((shot.orig_w, shot.orig_h), (2000, 1000));
-        assert_eq!((shot.scaled_w, shot.scaled_h), (1280, 640));
-        let jpeg = shot.jpeg();
-        assert!(jpeg.len() > 100, "jpeg should not be empty");
-        assert_eq!(&jpeg[0..2], &[0xFF, 0xD8], "must start with JPEG magic");
-        let decoded = image::load_from_memory(&jpeg).expect("jpeg must decode");
-        assert_eq!((decoded.width(), decoded.height()), (1280, 640));
-    }
-
-    /// Manual smoke test: real OS capture end-to-end. Ignored by default
-    /// (needs a live desktop session + portal/permission); run on demand:
-    /// `cargo test manual_capture_smoke -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn manual_capture_smoke() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        let shot = rt
-            .block_on(capture_primary())
-            .expect("OS capture failed");
-        let jpeg = shot.jpeg();
-        assert!(!jpeg.is_empty(), "jpeg must not be empty");
-        println!(
-            "captured {}x{} -> {}x{} ({} byte jpeg)",
-            shot.orig_w,
-            shot.orig_h,
-            shot.scaled_w,
-            shot.scaled_h,
-            jpeg.len()
-        );
-    }
-
-    #[test]
-    fn score_match_exact_beats_substring() {
-        assert_eq!(score_match("save", "Save"), 1.0);
-        assert_eq!(score_match("save button", "Save Button"), 1.0);
-    }
-
-    #[test]
-    fn score_match_substring_hits() {
-        assert!(((score_match("save", "Save As")) - 0.8).abs() < 1e-6);
-        // Not contiguous ("address and search bar") → all-words score 0.7.
-        assert!(((score_match("address bar", "Address and search bar")) - 0.7).abs() < 1e-6);
-        assert!(((score_match("search bar", "Address and search bar")) - 0.8).abs() < 1e-6);
-    }
-
-    #[test]
-    fn score_match_ignores_dropped_ocr_spaces() {
-        // RapidOCR emits "Closewindow" for "Close window" — must still hit.
-        assert!(((score_match("close window", "Closewindow")) - 0.75).abs() < 1e-6);
-        assert!(((score_match("sign in", "Signin")) - 0.75).abs() < 1e-6);
-    }
-
-    #[test]
-    fn score_match_word_overlap_ranks() {
-        // All query words present, different order → 0.7 (above threshold).
-        assert!(((score_match("button save", "Save Button")) - 0.7).abs() < 1e-6);
-        // One word only → 0.4 (below threshold, correctly rejected).
-        assert!(((score_match("save file", "Save Button")) - 0.4).abs() < 1e-6);
-        assert_eq!(score_match("eiffel tower", "Save Button"), 0.0);
-        assert_eq!(score_match("", "Save"), 0.0);
     }
 }

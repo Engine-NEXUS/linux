@@ -1,0 +1,1448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NEXUS Pebble Wakeup Design Showcase — Fluid Bezel Scoop & Thread Stretch</title>
+  <style>
+    :root {
+      --bg: #07080c;
+      --panel-bg: rgba(13, 16, 24, 0.94);
+      --border: rgba(255, 255, 255, 0.12);
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.4);
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+      user-select: none;
+    }
+
+    /* ── Top Header ── */
+    header {
+      background: rgba(10, 12, 18, 0.96);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 28px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+    }
+
+    .brand-title {
+      font-size: 17px;
+      font-weight: 800;
+      letter-spacing: -0.4px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .badge {
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      color: #000;
+      font-size: 10.5px;
+      font-weight: 800;
+      padding: 3px 8px;
+      border-radius: 6px;
+      letter-spacing: 0.5px;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .btn-wake {
+      background: linear-gradient(135deg, #38bdf8, #2563eb);
+      color: #ffffff;
+      border: none;
+      padding: 8px 20px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 0 24px rgba(56, 189, 248, 0.4);
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .btn-wake:hover {
+      transform: translateY(-1px) scale(1.02);
+      box-shadow: 0 0 32px rgba(56, 189, 248, 0.65);
+    }
+
+    .btn-wake:active {
+      transform: translateY(1px) scale(0.98);
+    }
+
+    /* ── Main Layout: 2 Columns ── */
+    .showcase-layout {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 440px 1fr;
+      min-height: calc(100vh - 61px);
+    }
+
+    /* Left Control Sidebar */
+    .controls-panel {
+      background: var(--panel-bg);
+      border-right: 1px solid var(--border);
+      padding: 20px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      overflow-y: auto;
+      max-height: calc(100vh - 61px);
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .section-tag {
+      font-size: 9.5px;
+      color: var(--accent);
+      text-transform: none;
+      letter-spacing: 0;
+      background: rgba(56, 189, 248, 0.12);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    /* Wakeup Modes Grid */
+    .mode-options {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .mode-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      padding: 10px 13px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .mode-card:hover {
+      background: rgba(255, 255, 255, 0.06);
+      border-color: rgba(255, 255, 255, 0.22);
+    }
+
+    .mode-card.active {
+      background: rgba(56, 189, 248, 0.09);
+      border-color: var(--accent);
+      box-shadow: 0 0 20px rgba(56, 189, 248, 0.2);
+    }
+
+    .mode-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .mode-name {
+      font-size: 13px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .mode-badge {
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text-muted);
+    }
+
+    .mode-card.active .mode-badge {
+      background: rgba(56, 189, 248, 0.25);
+      color: var(--accent);
+    }
+
+    .mode-desc {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      line-height: 1.35;
+    }
+
+    /* Sliders */
+    .slider-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .slider-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .slider-val {
+      color: var(--text);
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 4px;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.14);
+      outline: none;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      box-shadow: 0 0 10px var(--accent);
+      transition: transform 0.1s ease;
+    }
+
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.25);
+    }
+
+    /* Toggle buttons */
+    .btn-toggle-group {
+      display: flex;
+      gap: 6px;
+      background: rgba(0, 0, 0, 0.4);
+      padding: 3px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+    }
+
+    .btn-toggle {
+      flex: 1;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 6px 8px;
+      font-size: 11.5px;
+      font-weight: 600;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-align: center;
+    }
+
+    .btn-toggle.active {
+      background: rgba(255, 255, 255, 0.13);
+      color: #fff;
+      font-weight: 700;
+    }
+
+    /* Scrubber container */
+    .scrubber-box {
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .scrubber-controls {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .btn-play-pause {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #fff;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .btn-play-pause:hover {
+      background: rgba(255, 255, 255, 0.18);
+    }
+
+    /* Right Preview Stage */
+    .preview-stage {
+      position: relative;
+      background: radial-gradient(circle at 50% 25%, #0f1422 0%, #06070a 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      padding: 32px;
+    }
+
+    /* Simulated Screen Frame */
+    .sim-screen {
+      width: 100%;
+      max-width: 980px;
+      height: 640px;
+      background: #000000;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 16px;
+      position: relative;
+      box-shadow: 0 32px 90px rgba(0, 0, 0, 0.98);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .sim-top-bezel {
+      height: 32px;
+      background: #050608;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      justify-content: space-between;
+      font-size: 11px;
+      color: #64748b;
+      position: relative;
+      z-index: 50;
+    }
+
+    .bezel-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--accent);
+      font-weight: 600;
+      font-size: 10.5px;
+    }
+
+    .bezel-indicator-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+    }
+
+    .sim-bottom-bezel {
+      height: 40px;
+      background: #050608;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      margin-top: auto;
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      font-size: 12px;
+      color: #64748b;
+      position: relative;
+      z-index: 50;
+    }
+
+    .sim-content-area {
+      flex: 1;
+      position: relative;
+      background: #090b10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #334155;
+      font-size: 14px;
+      letter-spacing: -0.2px;
+      overflow: hidden;
+    }
+
+    /* ── The Pebble & Thread Container ── */
+    .pebble-anchor {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: auto;
+    }
+
+    .pebble-anchor--top {
+      top: 0;
+    }
+
+    .pebble-anchor--bottom {
+      bottom: 0;
+    }
+
+    /* Fluid Scoop SVG Stage */
+    .pebble-scoop-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      filter: drop-shadow(0 20px 50px rgba(0, 0, 0, 0.98));
+    }
+
+    .pebble-scoop-svg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: visible;
+    }
+
+    /* The Orb Circle inside the thread */
+    .orb-cradle-wrapper {
+      position: absolute;
+      width: 100px;
+      height: 100px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      will-change: transform, opacity;
+    }
+
+    #webgl-canvas {
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+    }
+
+    /* Response caption mock */
+    .mock-caption {
+      position: absolute;
+      bottom: 22px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #000000 !important;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 10px;
+      padding: 10px 22px;
+      color: #ffffff;
+      font-size: 14.5px;
+      font-weight: 550;
+      white-space: nowrap;
+      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.95);
+      pointer-events: none;
+      z-index: 40;
+    }
+
+    /* Classic Capsule (Comparison Mode) */
+    .capsule-classic {
+      background: #000000 !important;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      box-shadow: 0 16px 44px rgba(0, 0, 0, 0.95);
+      border-top: none;
+      border-radius: 0 0 10px 10px;
+      width: 340px;
+      height: 118px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Status HUD in stage */
+    .stage-hud {
+      position: absolute;
+      top: 14px;
+      right: 18px;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 11.5px;
+      color: #94a3b8;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      z-index: 60;
+    }
+
+    .stage-hud-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+    }
+
+    .stage-hud-val {
+      color: #fff;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Header -->
+  <header>
+    <div class="brand-title">
+      <span>NEXUS</span>
+      <span class="badge">FEATURE 106</span>
+      <span>Fluid Bezel Scoop &amp; Elastic Thread Wakeup</span>
+    </div>
+    <div class="header-actions">
+      <button class="btn-wake" id="btn-trigger-wake">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+        </svg>
+        <span>✦ Trigger Wakeup Jump</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="showcase-layout">
+
+    <!-- Left Controls Panel -->
+    <aside class="controls-panel">
+
+      <!-- Section: Wakeup Animation Modes -->
+      <div>
+        <div class="section-title">
+          <span>Wakeup Thread Animations</span>
+          <span class="section-tag">5 Physical Variations</span>
+        </div>
+        <div class="mode-options" id="wakeup-modes-list">
+
+          <div class="mode-card active" data-mode="1">
+            <div class="mode-header">
+              <span class="mode-name">1. 🧵 Elastic Thread Stretch &amp; Snap</span>
+              <span class="mode-badge">Direct Directive</span>
+            </div>
+            <div class="mode-desc">A taut horizontal thread at the screen border pulls down elastically, forming a catenary scoop with the orb nestled inside, snapping with harmonic damping.</div>
+          </div>
+
+          <div class="mode-card" data-mode="2">
+            <div class="mode-header">
+              <span class="mode-name">2. 🏹 Bowstring Pluck &amp; Rebound</span>
+              <span class="mode-badge">High Tension</span>
+            </div>
+            <div class="mode-desc">Sharp initial plunge (160ms) like a plucked string, overshoots past equilibrium, rebounds, and rapidly rings down into a resting scoop.</div>
+          </div>
+
+          <div class="mode-card" data-mode="3">
+            <div class="mode-header">
+              <span class="mode-name">3. 💧 Liquid Meniscus Extrusion</span>
+              <span class="mode-badge">Surface Tension</span>
+            </div>
+            <div class="mode-desc">Fluid mercury extrusion dripping down smoothly from the bezel without overshoot, critically damped like molten glass forming a pouch.</div>
+          </div>
+
+          <div class="mode-card" data-mode="4">
+            <div class="mode-header">
+              <span class="mode-name">4. 🌅 Horizon Split &amp; Wing Flare</span>
+              <span class="mode-badge">Magnetic Unroll</span>
+            </div>
+            <div class="mode-desc">Originates at the center point and unrolls horizontally toward screen borders while stretching downward; wings flare with bright specular light on docking.</div>
+          </div>
+
+          <div class="mode-card" data-mode="5">
+            <div class="mode-header">
+              <span class="mode-name">5. 〰️ Acoustic Harmonic Ripple</span>
+              <span class="mode-badge">Vocal Resonance</span>
+            </div>
+            <div class="mode-desc">The stretching thread ripples with high-frequency standing waves vibrating in sync with speech wakeword acoustics before tension solidifies.</div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Section: Orb Interior Formation Mode -->
+      <div>
+        <div class="section-title">
+          <span>Orb Interior Entrance</span>
+          <span class="section-tag">Inside the Thread</span>
+        </div>
+        <div class="btn-toggle-group" id="orb-genesis-group">
+          <button class="btn-toggle active" data-genesis="0">Core Bloom</button>
+          <button class="btn-toggle" data-genesis="1">Droplet Roll</button>
+          <button class="btn-toggle" data-genesis="2">Spark Burst</button>
+          <button class="btn-toggle" data-genesis="3">Helix Weave</button>
+        </div>
+      </div>
+
+      <!-- Section: Rim Highlight & Wing Specular Tuning -->
+      <div>
+        <div class="section-title">
+          <span>Screen Border Rim &amp; Wing Highlight</span>
+          <span class="section-tag">Specular Controls</span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+
+          <div class="slider-group">
+            <div class="slider-row">
+              <span>Wing Contact Highlight Opacity</span>
+              <span class="slider-val" id="val-wing-rim">85%</span>
+            </div>
+            <input type="range" id="rng-wing-rim" min="0" max="100" value="85" />
+          </div>
+
+          <div class="slider-group">
+            <div class="slider-row">
+              <span>Perimeter Rim Base Opacity</span>
+              <span class="slider-val" id="val-base-rim">22%</span>
+            </div>
+            <input type="range" id="rng-base-rim" min="0" max="60" value="22" />
+          </div>
+
+          <div class="slider-group">
+            <div class="slider-row">
+              <span>Wing Contact Glow Width</span>
+              <span class="slider-val" id="val-wing-glow">58px</span>
+            </div>
+            <input type="range" id="rng-wing-glow" min="20" max="120" value="58" />
+          </div>
+
+          <div class="slider-group">
+            <div class="slider-row">
+              <span>Dynamic Wing Flash on Wakeup</span>
+              <span class="slider-val" id="val-flash-status">ON (+40%)</span>
+            </div>
+            <div class="btn-toggle-group" id="flash-toggle-group">
+              <button class="btn-toggle active" data-flash="1">Gleam Flash ON</button>
+              <button class="btn-toggle" data-flash="0">Steady Only</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Section: Timeline Scrubber & Speed Controls -->
+      <div>
+        <div class="section-title">
+          <span>Animation Scrubber &amp; Physics</span>
+          <span class="section-tag">Freeze Frame</span>
+        </div>
+        <div class="scrubber-box">
+          <div class="scrubber-controls">
+            <button class="btn-play-pause" id="btn-replay">↺ Replay</button>
+            <span style="font-size: 11px; color: var(--text-muted);" id="scrubber-time-label">Progress: 100%</span>
+            <div style="display: flex; gap: 4px;">
+              <button class="btn-toggle active" id="spd-1x" style="padding: 2px 6px; font-size: 10px;">1.0×</button>
+              <button class="btn-toggle" id="spd-05x" style="padding: 2px 6px; font-size: 10px;">0.5×</button>
+              <button class="btn-toggle" id="spd-025x" style="padding: 2px 6px; font-size: 10px;">0.25×</button>
+            </div>
+          </div>
+          <input type="range" id="rng-scrubber" min="0" max="1000" value="1000" />
+        </div>
+
+        <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 10px;">
+          <div class="slider-group">
+            <div class="slider-row">
+              <span>Elastic Spring Stiffness / Bounce</span>
+              <span class="slider-val" id="val-stiffness">1.15</span>
+            </div>
+            <input type="range" id="rng-stiffness" min="50" max="200" value="115" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Section: Geometry & Position -->
+      <div>
+        <div class="section-title">
+          <span>Pebble Geometry</span>
+          <span class="section-tag">Solid Black #000000</span>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+
+          <div class="slider-group">
+            <div class="slider-row">
+              <span>Scoop Width</span>
+              <span class="slider-val" id="val-width">340px</span>
+            </div>
+            <input type="range" id="rng-width" min="260" max="460" value="340" />
+          </div>
+
+          <div class="slider-group">
+            <div class="slider-row">
+              <span>Scoop Depth (Height)</span>
+              <span class="slider-val" id="val-height">118px</span>
+            </div>
+            <input type="range" id="rng-height" min="80" max="150" value="118" />
+          </div>
+
+          <div class="slider-group">
+            <div class="slider-row">
+              <span>Screen Dock Position</span>
+            </div>
+            <div class="btn-toggle-group" id="pos-group">
+              <button class="btn-toggle active" data-pos="top">Top Screen Edge</button>
+              <button class="btn-toggle" data-pos="bottom">Bottom Taskbar</button>
+            </div>
+          </div>
+
+          <div class="slider-group">
+            <div class="slider-row">
+              <span>Comparison View</span>
+            </div>
+            <div class="btn-toggle-group" id="compare-group">
+              <button class="btn-toggle active" data-view="scoop">Fluid Scoop (New)</button>
+              <button class="btn-toggle" data-view="classic">Classic Capsule</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- Right Live Preview Stage -->
+    <main class="preview-stage">
+
+      <div class="sim-screen">
+
+        <!-- Top Screen Bezel -->
+        <div class="sim-top-bezel">
+          <div class="bezel-indicator">
+            <div class="bezel-indicator-dot"></div>
+            <span>SCREEN EDGE BORDER (ATTACHMENT HORIZON)</span>
+          </div>
+          <span>NEXUS DESKTOP OVERLAY</span>
+        </div>
+
+        <!-- Desktop Content Workspace -->
+        <div class="sim-content-area" id="stage-area">
+
+          <!-- Stage HUD -->
+          <div class="stage-hud">
+            <div class="stage-hud-row">
+              <span>Wakeup Mode:</span>
+              <span class="stage-hud-val" id="hud-mode-name">Elastic Thread</span>
+            </div>
+            <div class="stage-hud-row">
+              <span>Tension State:</span>
+              <span class="stage-hud-val" id="hud-tension">Settled (Equilibrium)</span>
+            </div>
+            <div class="stage-hud-row">
+              <span>Wing Highlight:</span>
+              <span class="stage-hud-val" id="hud-wing-val">85% Opacity</span>
+            </div>
+          </div>
+
+          <!-- Dynamic Pebble & Thread Anchor -->
+          <div class="pebble-anchor pebble-anchor--top" id="pebble-anchor">
+
+            <!-- Container for Fluid Scoop -->
+            <div id="scoop-container" class="pebble-scoop-wrapper" style="width: 340px; height: 118px;">
+
+              <!-- Dynamic Morphing SVG Canvas -->
+              <svg id="scoop-svg" class="pebble-scoop-svg" viewBox="0 0 340 118">
+                <defs>
+                  <!-- Base rim linear gradient with bright wing edges -->
+                  <linearGradient id="rimGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0%" id="grad-wing-left" stop-color="rgba(255,255,255,0.85)" />
+                    <stop offset="12%" id="grad-trans-left" stop-color="rgba(255,255,255,0.22)" />
+                    <stop offset="50%" id="grad-apex" stop-color="rgba(255,255,255,0.30)" />
+                    <stop offset="88%" id="grad-trans-right" stop-color="rgba(255,255,255,0.22)" />
+                    <stop offset="100%" id="grad-wing-right" stop-color="rgba(255,255,255,0.85)" />
+                  </linearGradient>
+
+                  <!-- Filter for wing specular glow where thread touches bezel -->
+                  <filter id="wingGlowFilter" x="-20%" y="-20%" width="140%" height="140%">
+                    <feGaussianBlur in="SourceGraphic" stdDeviation="2.5" result="blur" />
+                    <feMerge>
+                      <feMergeNode in="blur" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
+                </defs>
+
+                <!-- Pure solid black backdrop pouch -->
+                <path id="svg-fill-path" d="" fill="#000000" />
+
+                <!-- The Stretching Thread boundary with Specular Rim -->
+                <path id="svg-rim-path" d="" fill="none" stroke="url(#rimGradient)" stroke-width="1.3" />
+
+                <!-- Dedicated Wing Specular Overlays (Parts Touching Screen Border) -->
+                <path id="svg-wing-left-path" d="" fill="none" stroke="#ffffff" stroke-width="2.0" filter="url(#wingGlowFilter)" opacity="0.85" />
+                <path id="svg-wing-right-path" d="" fill="none" stroke="#ffffff" stroke-width="2.0" filter="url(#wingGlowFilter)" opacity="0.85" />
+              </svg>
+
+              <!-- The Voice Orb nestled INSIDE the stretched thread pouch -->
+              <div class="orb-cradle-wrapper" id="orb-cradle">
+                <canvas id="webgl-canvas" width="200" height="200"></canvas>
+              </div>
+
+            </div>
+
+            <!-- Classic Capsule (Hidden by default, used when comparing) -->
+            <div id="classic-container" class="capsule-classic" style="display: none;">
+              <div style="font-size: 11px; color: #64748b; letter-spacing: 0.5px;">CLASSIC 10PX CAPSULE (BASELINE)</div>
+            </div>
+
+          </div>
+
+          <!-- Bottom caption mock -->
+          <div class="mock-caption">
+            Good morning, Lakshya. What are we exploring today?
+          </div>
+
+        </div>
+
+        <!-- Bottom Taskbar Bezel -->
+        <div class="sim-bottom-bezel">
+          <span>TASKBAR &amp; SCREEN BORDER BASE</span>
+        </div>
+
+      </div>
+
+    </main>
+
+  </div>
+
+  <!-- WebGL Shader Script for Voice Orb with Genesis Animation -->
+  <script>
+    // ─── WebGL Voice Orb Shader System ───
+    const canvas = document.getElementById("webgl-canvas");
+    const gl = canvas.getContext("webgl", { alpha: true, antialias: true, premultipliedAlpha: false });
+
+    const VS = `
+      attribute float a_idx;
+      uniform float u_time;
+      uniform int u_state;        // 0=idle, 1=thinking, 2=listening, 3=speaking
+      uniform float u_audio;
+      uniform float u_genesis;    // 0.0 (unborn/thread edge) to 1.0 (fully formed)
+      uniform int u_genesis_mode; // 0=bloom, 1=droplet_roll, 2=spark_burst, 3=helix_weave
+      varying vec3 v_color;
+      varying float v_alpha;
+
+      #define PI 3.14159265359
+
+      vec3 rotateY(vec3 p, float a) {
+        float c = cos(a), s = sin(a);
+        return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z);
+      }
+      vec3 rotateX(vec3 p, float a) {
+        float c = cos(a), s = sin(a);
+        return vec3(p.x, c*p.y - s*p.z, s*p.y + c*p.z);
+      }
+      vec3 rotateZ(vec3 p, float a) {
+        float c = cos(a), s = sin(a);
+        return vec3(c*p.x - s*p.y, s*p.x + c*p.y, p.z);
+      }
+
+      void main() {
+        float total = 3200.0;
+        float id = a_idx;
+        float t = u_time;
+
+        // Spherical Fibonacci distribution
+        float phi = acos(1.0 - 2.0 * (id + 0.5) / total);
+        float theta = id * 2.399963229728653;
+
+        vec3 p = vec3(sin(phi)*cos(theta), cos(phi), sin(phi)*sin(theta));
+        vec3 col = vec3(0.96, 0.98, 1.0);
+        float sz = 2.4;
+
+        // Base Idle state: Stardust breathing sphere
+        float breath = sin(t * 1.8 + id * 0.05) * 0.06;
+        p = p * (0.85 + breath);
+
+        if (u_state == 2) {
+          // Listening: Inward vortex
+          float r = length(p.xz);
+          p.y += sin(r * 8.0 - t * 4.0) * 0.12 * (1.0 + u_audio * 0.8);
+          p = rotateY(p, t * 1.2);
+          col = vec3(0.75, 0.92, 1.0);
+        } else if (u_state == 1) {
+          // Thinking: Celtic Trefoil Knot
+          float strand = floor(fract(id / 3.0) * 3.0);
+          float ang = (id / total) * 2.0 * PI * 18.0;
+          float phase = strand * (2.0 * PI / 3.0);
+          float R = 0.85 + 0.12 * cos(3.0 * ang + t * 1.4);
+          p = vec3(R * cos(ang + t * 0.8), R * sin(ang + t * 0.8), 0.32 * sin(2.0 * ang + phase));
+          if (strand == 1.0) p = rotateX(p, 1.05);
+          if (strand == 2.0) p = rotateZ(p, 1.05);
+          col = vec3(0.90, 0.85, 1.0);
+          sz = 2.8;
+        } else if (u_state == 3) {
+          // Speaking: Fibonacci Blossom
+          float bloom = sin(length(p.xy) * 6.0 - t * 3.5) * 0.22 * (1.0 + u_audio * 1.2);
+          p = p * (0.92 + bloom);
+          p = rotateY(p, t * 0.6);
+          col = vec3(1.0, 0.98, 0.95);
+          sz = 3.0;
+        }
+
+        // ─── Genesis Morphing (Orb Formation Inside Stretched Thread) ───
+        float gen = clamp(u_genesis, 0.0, 1.0);
+        float baseAlpha = 0.85 + 0.15 * p.z;
+
+        if (u_genesis_mode == 0) {
+          // Mode 0: Core Bloom — expands outwards from the central seed
+          p = p * (0.15 + 0.85 * gen);
+          baseAlpha *= smoothstep(0.0, 0.4, gen);
+        } else if (u_genesis_mode == 1) {
+          // Mode 1: Droplet Roll — slides down from bezel edge
+          float dropOffset = (1.0 - gen) * 1.6;
+          p.y += dropOffset;
+          p.x *= (0.4 + 0.6 * gen);
+          baseAlpha *= smoothstep(0.1, 0.5, gen);
+        } else if (u_genesis_mode == 2) {
+          // Mode 2: Spark Burst — explodes outward then converges to sphere
+          float burst = (1.0 - gen) * 2.5;
+          p = p * (1.0 + burst);
+          col = mix(vec3(1.0, 1.0, 1.0), col, gen);
+          sz *= (1.0 + (1.0 - gen) * 1.5);
+          baseAlpha *= smoothstep(0.0, 0.3, gen);
+        } else if (u_genesis_mode == 3) {
+          // Mode 3: Helix Weave — braided strands spiral into form
+          float rotSpin = (1.0 - gen) * 5.0;
+          p = rotateY(p, rotSpin);
+          p = p * (0.2 + 0.8 * gen);
+          baseAlpha *= smoothstep(0.05, 0.45, gen);
+        }
+
+        gl_Position = vec4(p.x, p.y, p.z * 0.5, 1.0);
+        gl_PointSize = sz * (1.2 / (1.0 + p.z * 0.4));
+        v_color = col;
+        v_alpha = baseAlpha;
+      }
+    `;
+
+    const FS = `
+      precision mediump float;
+      varying vec3 v_color;
+      varying float v_alpha;
+
+      void main() {
+        vec2 coord = gl_PointCoord - vec2(0.5);
+        float d = length(coord);
+        if (d > 0.5) discard;
+        float alpha = smoothstep(0.5, 0.12, d) * v_alpha;
+        gl_FragColor = vec4(v_color, alpha);
+      }
+    `;
+
+    function createShader(gl, type, src) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      return s;
+    }
+
+    const prog = gl.createProgram();
+    gl.attachShader(prog, createShader(gl, gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, createShader(gl, gl.FRAGMENT_SHADER, FS));
+    gl.linkProgram(prog);
+    gl.useProgram(prog);
+
+    const COUNT = 3200;
+    const indices = new Float32Array(COUNT);
+    for (let i = 0; i < COUNT; i++) indices[i] = i;
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+
+    const aIdx = gl.getAttribLocation(prog, "a_idx");
+    gl.enableVertexAttribArray(aIdx);
+    gl.vertexAttribPointer(aIdx, 1, gl.FLOAT, false, 0, 0);
+
+    const uTime = gl.getUniformLocation(prog, "u_time");
+    const uState = gl.getUniformLocation(prog, "u_state");
+    const uAudio = gl.getUniformLocation(prog, "u_audio");
+    const uGenesis = gl.getUniformLocation(prog, "u_genesis");
+    const uGenesisMode = gl.getUniformLocation(prog, "u_genesis_mode");
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+
+    let currentState = 0;
+    let audioLevel = 0.5;
+    let genesisValue = 1.0;
+    let genesisMode = 0;
+
+    function renderLoop(time) {
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      gl.uniform1f(uTime, time * 0.001);
+      gl.uniform1i(uState, currentState);
+      gl.uniform1f(uAudio, audioLevel + Math.sin(time * 0.005) * 0.25);
+      gl.uniform1f(uGenesis, genesisValue);
+      gl.uniform1i(uGenesisMode, genesisMode);
+
+      gl.drawArrays(gl.POINTS, 0, COUNT);
+      requestAnimationFrame(renderLoop);
+    }
+    requestAnimationFrame(renderLoop);
+
+    // ─── Mathematical Thread-Stretch Physics & SVG Morphing Engine ───
+    let currentWakeMode = 1; // 1..5
+    let currentPos = "top";  // "top" or "bottom"
+    let currentView = "scoop"; // "scoop" or "classic"
+    let speedMultiplier = 1.0;
+    let stiffnessFactor = 1.15;
+    let flashEnabled = true;
+
+    // DOM Elements
+    const anchorEl = document.getElementById("pebble-anchor");
+    const scoopContainer = document.getElementById("scoop-container");
+    const classicContainer = document.getElementById("classic-container");
+    const scoopSvg = document.getElementById("scoop-svg");
+    const svgFillPath = document.getElementById("svg-fill-path");
+    const svgRimPath = document.getElementById("svg-rim-path");
+    const svgWingLeft = document.getElementById("svg-wing-left-path");
+    const svgWingRight = document.getElementById("svg-wing-right-path");
+    const orbCradle = document.getElementById("orb-cradle");
+
+    const gradWingLeft = document.getElementById("grad-wing-left");
+    const gradWingRight = document.getElementById("grad-wing-right");
+    const gradTransLeft = document.getElementById("grad-trans-left");
+    const gradTransRight = document.getElementById("grad-trans-right");
+    const gradApex = document.getElementById("grad-apex");
+
+    const rngWidth = document.getElementById("rng-width");
+    const rngHeight = document.getElementById("rng-height");
+    const rngWingRim = document.getElementById("rng-wing-rim");
+    const rngBaseRim = document.getElementById("rng-base-rim");
+    const rngWingGlow = document.getElementById("rng-wing-glow");
+    const rngScrubber = document.getElementById("rng-scrubber");
+    const rngStiffness = document.getElementById("rng-stiffness");
+
+    const valWidth = document.getElementById("val-width");
+    const valHeight = document.getElementById("val-height");
+    const valWingRim = document.getElementById("val-wing-rim");
+    const valBaseRim = document.getElementById("val-base-rim");
+    const valWingGlow = document.getElementById("val-wing-glow");
+    const valStiffness = document.getElementById("val-stiffness");
+    const valFlashStatus = document.getElementById("val-flash-status");
+    const scrubberTimeLabel = document.getElementById("scrubber-time-label");
+
+    const hudModeName = document.getElementById("hud-mode-name");
+    const hudTension = document.getElementById("hud-tension");
+    const hudWingVal = document.getElementById("hud-wing-val");
+
+    const MODE_NAMES = {
+      1: "1. Elastic Thread Stretch & Snap",
+      2: "2. Bowstring Pluck & Rebound",
+      3: "3. Liquid Meniscus Extrusion",
+      4: "4. Horizon Split & Wing Flare",
+      5: "5. Acoustic Harmonic Ripple",
+    };
+
+    /**
+     * Compute normalized stretch factor s(tau) where tau in [0, 1]
+     */
+    function computeStretchFactor(tau, mode, k) {
+      tau = Math.max(0, Math.min(1, tau));
+
+      if (mode === 1) {
+        // Mode 1: Elastic Thread Stretch & Snap
+        // Pulls down, overshoots to ~1.15, bounces once, settles.
+        if (tau <= 0) return 0;
+        if (tau >= 1) return 1;
+        const decay = Math.exp(-4.6 * tau * k);
+        const osc = Math.cos(7.2 * tau * Math.sqrt(k));
+        const envelope = 1 - Math.pow(tau, 3.0);
+        return 1.0 - decay * osc * envelope;
+      }
+      else if (mode === 2) {
+        // Mode 2: Bowstring Pluck & Rebound
+        // Rapid plunge, crisp release overshoot, rapid high-freq ring-down
+        const plungeEnd = 0.26 / k;
+        if (tau < plungeEnd) {
+          return Math.pow(tau / plungeEnd, 1.7) * 1.25;
+        } else {
+          const tRel = (tau - plungeEnd) / (1 - plungeEnd);
+          return 1.0 + 0.25 * Math.exp(-6.8 * tRel * k) * Math.cos(15.0 * tRel * Math.sqrt(k));
+        }
+      }
+      else if (mode === 3) {
+        // Mode 3: Liquid Meniscus Extrusion
+        // Smooth critical fluid damping (no overshoot)
+        const alpha = 3.6 * k;
+        return 1.0 - (1.0 + alpha * tau) * Math.exp(-alpha * tau);
+      }
+      else if (mode === 4) {
+        // Mode 4: Horizon Split & Wing Flare
+        // Center drops while wings unroll
+        return 1.0 - Math.exp(-5.2 * tau * k) * Math.cos(5.8 * tau * Math.sqrt(k));
+      }
+      else if (mode === 5) {
+        // Mode 5: Acoustic Harmonic Ripple
+        // String vibrations superimposed on catenary descent
+        const base = 1.0 - Math.exp(-4.2 * tau * k) * Math.cos(6.2 * tau * Math.sqrt(k));
+        const ripple = 0.08 * Math.exp(-5.0 * tau) * Math.sin(26.0 * tau * Math.sqrt(k));
+        return base + ripple;
+      }
+      return 1.0;
+    }
+
+    /**
+     * Generate the morphing SVG Path for the stretching thread scoop
+     */
+    function buildScoopPath(w, h, stretch, wingWidth, mode, tau, pos) {
+      const halfW = w / 2;
+      const cx = halfW;
+      const currentH = Math.max(1, h * stretch);
+
+      // In Horizon Split mode (4), the width expands from center during stretch
+      let effW = w;
+      let leftX = 0;
+      let rightX = w;
+      if (mode === 4) {
+        const unroll = Math.min(1.0, tau * 1.85);
+        effW = Math.max(60, w * unroll);
+        leftX = cx - effW / 2;
+        rightX = cx + effW / 2;
+      }
+
+      const wing = Math.min(wingWidth, effW * 0.25);
+
+      // Acoustic ripple mode (5) adds standing wave curvature jitter
+      let rippleDy = 0;
+      if (mode === 5 && tau < 0.85) {
+        rippleDy = Math.sin(tau * 30.0) * Math.exp(-4.5 * tau) * 12.0;
+      }
+
+      if (pos === "top") {
+        // Top edge: starts at (leftX, 0), drops down to (cx, currentH), rises to (rightX, 0)
+        // Tangents at leftX and rightX stay strictly horizontal (dy/dx = 0)
+        const cp1x = leftX + wing;
+        const cp1y = 0;
+
+        const cp2x = cx - (effW / 2) * 0.52;
+        const cp2y = currentH + rippleDy;
+
+        const cp3x = cx + (effW / 2) * 0.52;
+        const cp3y = currentH - rippleDy;
+
+        const cp4x = rightX - wing;
+        const cp4y = 0;
+
+        const scoopCurve = `
+          M ${leftX},0
+          C ${cp1x},${cp1y} ${cp2x},${cp2y} ${cx},${currentH}
+          C ${cp3x},${cp3y} ${cp4x},${cp4y} ${rightX},0
+        `;
+
+        const closedPath = `${scoopCurve} Z`;
+        const rimPath = scoopCurve;
+
+        // Dedicated wing contact paths for specular highlights touching screen border
+        const wingLeftPath = `M ${leftX},0 C ${leftX + wing * 0.5},0 ${leftX + wing * 0.9},${currentH * 0.22} ${leftX + wing * 1.3},${currentH * 0.42}`;
+        const wingRightPath = `M ${rightX},0 C ${rightX - wing * 0.5},0 ${rightX - wing * 0.9},${currentH * 0.22} ${rightX - wing * 1.3},${currentH * 0.42}`;
+
+        return { closedPath, rimPath, wingLeftPath, wingRightPath, currentH, cx };
+      } else {
+        // Bottom edge: starts at (leftX, h), rises up to (cx, h - currentH), returns to (rightX, h)
+        const topY = h - currentH;
+
+        const cp1x = leftX + wing;
+        const cp1y = h;
+
+        const cp2x = cx - (effW / 2) * 0.52;
+        const cp2y = topY - rippleDy;
+
+        const cp3x = cx + (effW / 2) * 0.52;
+        const cp3y = topY + rippleDy;
+
+        const cp4x = rightX - wing;
+        const cp4y = h;
+
+        const scoopCurve = `
+          M ${leftX},${h}
+          C ${cp1x},${cp1y} ${cp2x},${cp2y} ${cx},${topY}
+          C ${cp3x},${cp3y} ${cp4x},${cp4y} ${rightX},${h}
+        `;
+
+        const closedPath = `${scoopCurve} Z`;
+        const rimPath = scoopCurve;
+
+        const wingLeftPath = `M ${leftX},${h} C ${leftX + wing * 0.5},${h} ${leftX + wing * 0.9},${h - currentH * 0.22} ${leftX + wing * 1.3},${h - currentH * 0.42}`;
+        const wingRightPath = `M ${rightX},${h} C ${rightX - wing * 0.5},${h} ${rightX - wing * 0.9},${h - currentH * 0.22} ${rightX - wing * 1.3},${h - currentH * 0.42}`;
+
+        return { closedPath, rimPath, wingLeftPath, wingRightPath, currentH, cx };
+      }
+    }
+
+    /**
+     * Render the state at a given progress tau (0.0 to 1.0)
+     */
+    function applyProgress(tau) {
+      const w = parseInt(rngWidth.value, 10);
+      const h = parseInt(rngHeight.value, 10);
+      const wingRimVal = parseInt(rngWingRim.value, 10) / 100;
+      const baseRimVal = parseInt(rngBaseRim.value, 10) / 100;
+      const wingGlowPx = parseInt(rngWingGlow.value, 10);
+
+      // HUD & Labels
+      valWidth.textContent = `${w}px`;
+      valHeight.textContent = `${h}px`;
+      valWingRim.textContent = `${rngWingRim.value}%`;
+      valBaseRim.textContent = `${rngBaseRim.value}%`;
+      valWingGlow.textContent = `${wingGlowPx}px`;
+      valStiffness.textContent = (stiffnessFactor).toFixed(2);
+      scrubberTimeLabel.textContent = `Progress: ${Math.round(tau * 100)}%`;
+      hudWingVal.textContent = `${rngWingRim.value}% Opacity`;
+
+      scoopContainer.style.width = `${w}px`;
+      scoopContainer.style.height = `${h}px`;
+      scoopSvg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+
+      if (currentView === "classic") {
+        scoopContainer.style.display = "none";
+        classicContainer.style.display = "flex";
+        classicContainer.style.width = `${w}px`;
+        classicContainer.style.height = `${h}px`;
+        return;
+      } else {
+        scoopContainer.style.display = "flex";
+        classicContainer.style.display = "none";
+      }
+
+      // Compute stretch factor
+      const stretch = computeStretchFactor(tau, currentWakeMode, stiffnessFactor);
+
+      // Determine dynamic flash boost for wing contact points during wakeup
+      let dynamicFlash = 0;
+      if (flashEnabled && tau > 0.05 && tau < 0.75) {
+        // Flash peaks around maximum stretch / overshoot
+        dynamicFlash = Math.sin((tau - 0.05) / 0.7 * Math.PI) * 0.35;
+      }
+
+      const activeWingOpacity = Math.min(1.0, wingRimVal + dynamicFlash);
+      const activeBaseOpacity = Math.min(1.0, baseRimVal + dynamicFlash * 0.4);
+
+      // Update SVG Gradient stops
+      gradWingLeft.setAttribute("stop-color", `rgba(255, 255, 255, ${activeWingOpacity})`);
+      gradWingRight.setAttribute("stop-color", `rgba(255, 255, 255, ${activeWingOpacity})`);
+      gradTransLeft.setAttribute("stop-color", `rgba(255, 255, 255, ${activeBaseOpacity})`);
+      gradTransRight.setAttribute("stop-color", `rgba(255, 255, 255, ${activeBaseOpacity})`);
+      gradApex.setAttribute("stop-color", `rgba(255, 255, 255, ${activeBaseOpacity * 1.3})`);
+
+      // Build paths
+      const paths = buildScoopPath(w, h, stretch, wingGlowPx, currentWakeMode, tau, currentPos);
+
+      svgFillPath.setAttribute("d", paths.closedPath);
+      svgRimPath.setAttribute("d", paths.rimPath);
+      svgRimPath.setAttribute("stroke-width", `${1.2 + dynamicFlash * 1.5}`);
+
+      // Update dedicated wing highlights (touching screen border)
+      svgWingLeft.setAttribute("d", paths.wingLeftPath);
+      svgWingRight.setAttribute("d", paths.wingRightPath);
+      svgWingLeft.setAttribute("opacity", activeWingOpacity);
+      svgWingRight.setAttribute("opacity", activeWingOpacity);
+      svgWingLeft.setAttribute("stroke-width", `${1.8 + dynamicFlash * 2.0}`);
+      svgWingRight.setAttribute("stroke-width", `${1.8 + dynamicFlash * 2.0}`);
+
+      // ─── Position the Voice Orb nestled INSIDE the stretched thread ───
+      // The orb circle descends snugly inside the scoop
+      const orbScale = Math.max(0.1, Math.min(1.0, tau * 1.3));
+      genesisValue = orbScale;
+
+      let orbY = 0;
+      if (currentPos === "top") {
+        // Center the orb vertically in the stretched pouch
+        // At full rest (stretch = 1), cradle sits at ~ (h / 2)
+        const pouchDepth = paths.currentH;
+        orbY = pouchDepth * 0.48 - 50; // offset for 100px canvas height
+      } else {
+        const topY = h - paths.currentH;
+        orbY = topY + paths.currentH * 0.48 - 50;
+      }
+
+      orbCradle.style.transform = `translateY(${orbY}px) scale(${orbScale})`;
+      orbCradle.style.opacity = Math.min(1.0, tau * 2.5);
+
+      // HUD Tension String
+      if (tau >= 0.98) {
+        hudTension.textContent = "Settled (Equilibrium)";
+        hudTension.style.color = "#38bdf8";
+      } else if (stretch > 1.05) {
+        hudTension.textContent = `Elastic Overshoot (+${Math.round((stretch - 1) * 100)}%)`;
+        hudTension.style.color = "#f43f5e";
+      } else {
+        hudTension.textContent = `Stretching (${Math.round(stretch * 100)}%)`;
+        hudTension.style.color = "#f59e0b";
+      }
+    }
+
+    // ─── Animation Timeline Loop Engine ───
+    let animRafId = null;
+    let animStartTime = null;
+    const ANIM_DURATION_MS = 750; // base duration
+
+    function triggerWakeupJump() {
+      if (animRafId) cancelAnimationFrame(animRafId);
+
+      // Reset to 0
+      applyProgress(0);
+      rngScrubber.value = 0;
+      animStartTime = performance.now();
+
+      function step(now) {
+        const elapsed = (now - animStartTime) * speedMultiplier;
+        const tau = Math.min(1.0, elapsed / ANIM_DURATION_MS);
+
+        rngScrubber.value = Math.round(tau * 1000);
+        applyProgress(tau);
+
+        if (tau < 1.0) {
+          animRafId = requestAnimationFrame(step);
+        } else {
+          animRafId = null;
+        }
+      }
+
+      animRafId = requestAnimationFrame(step);
+    }
+
+    // ─── UI Event Listeners ───
+
+    // Trigger Wakeup Button
+    document.getElementById("btn-trigger-wake").addEventListener("click", () => {
+      triggerWakeupJump();
+    });
+
+    // Replay Button
+    document.getElementById("btn-replay").addEventListener("click", () => {
+      triggerWakeupJump();
+    });
+
+    // Wakeup Mode selection
+    document.querySelectorAll("#wakeup-modes-list .mode-card").forEach((card) => {
+      card.addEventListener("click", () => {
+        document.querySelectorAll("#wakeup-modes-list .mode-card").forEach((c) => c.classList.remove("active"));
+        card.classList.add("active");
+        currentWakeMode = parseInt(card.dataset.mode, 10);
+        hudModeName.textContent = MODE_NAMES[currentWakeMode].split(". ")[1];
+        triggerWakeupJump();
+      });
+    });
+
+    // Orb Interior Genesis selection
+    document.querySelectorAll("#orb-genesis-group .btn-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#orb-genesis-group .btn-toggle").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        genesisMode = parseInt(btn.dataset.genesis, 10);
+        triggerWakeupJump();
+      });
+    });
+
+    // Dynamic Flash Toggle
+    document.querySelectorAll("#flash-toggle-group .btn-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#flash-toggle-group .btn-toggle").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        flashEnabled = btn.dataset.flash === "1";
+        valFlashStatus.textContent = flashEnabled ? "ON (+35%)" : "OFF";
+        applyProgress(parseInt(rngScrubber.value, 10) / 1000);
+      });
+    });
+
+    // Speed Controls
+    document.getElementById("spd-1x").addEventListener("click", function() {
+      setSpeed(1.0, this);
+    });
+    document.getElementById("spd-05x").addEventListener("click", function() {
+      setSpeed(0.5, this);
+    });
+    document.getElementById("spd-025x").addEventListener("click", function() {
+      setSpeed(0.25, this);
+    });
+
+    function setSpeed(spd, btnEl) {
+      speedMultiplier = spd;
+      [document.getElementById("spd-1x"), document.getElementById("spd-05x"), document.getElementById("spd-025x")].forEach((b) => b.classList.remove("active"));
+      btnEl.classList.add("active");
+    }
+
+    // Scrubber
+    rngScrubber.addEventListener("input", (e) => {
+      if (animRafId) {
+        cancelAnimationFrame(animRafId);
+        animRafId = null;
+      }
+      const tau = parseInt(e.target.value, 10) / 1000;
+      applyProgress(tau);
+    });
+
+    // Stiffness slider
+    rngStiffness.addEventListener("input", (e) => {
+      stiffnessFactor = parseInt(e.target.value, 10) / 100;
+      applyProgress(parseInt(rngScrubber.value, 10) / 1000);
+    });
+
+    // Dimension & Rim sliders
+    [rngWidth, rngHeight, rngWingRim, rngBaseRim, rngWingGlow].forEach((s) => {
+      s.addEventListener("input", () => {
+        applyProgress(parseInt(rngScrubber.value, 10) / 1000);
+      });
+    });
+
+    // Screen Position toggle
+    document.querySelectorAll("#pos-group .btn-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#pos-group .btn-toggle").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        currentPos = btn.dataset.pos;
+        anchorEl.className = `pebble-anchor pebble-anchor--${currentPos}`;
+        applyProgress(parseInt(rngScrubber.value, 10) / 1000);
+      });
+    });
+
+    // Comparison view toggle
+    document.querySelectorAll("#compare-group .btn-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#compare-group .btn-toggle").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        currentView = btn.dataset.view;
+        applyProgress(parseInt(rngScrubber.value, 10) / 1000);
+      });
+    });
+
+    // Initialize at full settled rest
+    applyProgress(1.0);
+  </script>
+
+</body>
+</html>

@@ -1,0 +1,123 @@
+/* ═══════════════════════════════════════════════════════════════
+   Unified Dynamic Sidebar — shell styles
+   ONE window hosts Assistant / Command Hub / Architect / PR List.
+   The window resizes per view (520 dock · 740 modal · 960 workspace);
+   this shell adapts fluidly to whatever width the HWND currently is.
+   No titlebar — dock controls live in each view's header row.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Command Hub theme (Liquid frosted glass for dark & light) ── */
+:root,
+[data-theme="dark"] {
+  --hub-bg: rgba(12, 12, 16, 0.72);
+  --hub-card: rgba(28, 28, 34, 0.60);
+  --hub-card-2: rgba(40, 40, 48, 0.70);
+  --hub-text: #ffffff;
+  --hub-text-dim: rgba(255, 255, 255, 0.70);
+  --hub-text-faint: rgba(255, 255, 255, 0.40);
+  --hub-accent: #0a84ff;
+  --hub-border: rgba(255, 255, 255, 0.12);
+  --hub-danger: #ff453a;
+}
+
+[data-theme="light"] {
+  --hub-bg: rgba(242, 242, 247, 0.75);
+  --hub-card: rgba(255, 255, 255, 0.65);
+  --hub-card-2: rgba(230, 230, 238, 0.70);
+  --hub-text: #111827;
+  --hub-text-dim: rgba(0, 0, 0, 0.65);
+  --hub-text-faint: rgba(0, 0, 0, 0.40);
+  --hub-accent: #007aff;
+  --hub-border: rgba(0, 0, 0, 0.08);
+  --hub-danger: #ff3b30;
+}
+
+/* ── Linux (WebKitGTK) ───────────────────────────────────────────────
+   The Linux build has no native window blur and no backdrop capture,
+   and WebKitGTK's backdrop-filter cannot composite against a
+   transparent window. The shell is the visible surface for the
+   Command Hub / Architect / PR List views, so paint it opaque here
+   instead of the translucent Windows glass.
+   body[data-platform] is set by platform.ts (sidebar/main.tsx). */
+body[data-platform="linux"] {
+  --hub-bg: #1e1e20;
+}
+html[data-theme="light"] body[data-platform="linux"] {
+  --hub-bg: #f2f2f6;
+}
+
+.unified-shell {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--hub-bg);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  overflow: hidden;
+  color: var(--hub-text);
+  border-left: 1px solid var(--hub-border);
+}
+
+/* Phone-width column for card-style views (Accounts carbon copy):
+   centers a max-380px column inside the wider sidebar window. */
+.hub-phone-col {
+  width: 100%;
+  max-width: 380px;
+  margin: 0 auto;
+}
+
+/* ── View host ───────────────────────────────────────────────────── */
+.unified-view-host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.unified-view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* Embedded view roots fill the host (they were written as 100vh
+   window roots; remap them inside the host). */
+.unified-view > #sidebar-app,
+.unified-view > .architect-app,
+.unified-view > .settings-container,
+.unified-view > .pr-list-container {
+  width: 100%;
+  height: 100%;
+  max-width: 100vw;
+  max-height: 100vh;
+}
+
+/* ── Shared dock buttons (embedded in each view's header row) ────── */
+.sidebar-dock-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 9px;
+  background: transparent;
+  backdrop-filter: blur(8px);
+  color: #ffffff;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: none;
+  transition: background 0.18s ease, transform 0.12s ease, border-color 0.18s ease;
+}
+
+.sidebar-dock-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.sidebar-dock-btn:active {
+  transform: scale(0.94);
+}
