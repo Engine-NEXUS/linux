@@ -58,9 +58,12 @@ checkPublicModules();
 function build() {
   // `cargo rustc` passes the flag to the lib crate only (deps are untouched),
   // so this reuses the dependency cache. --profile check = no codegen.
+  // --color=never: CI sets CARGO_TERM_COLOR=always (dtolnay/rust-toolchain),
+  // and ANSI codes around "warning:" made every finding unparseable, so the
+  // ratchet saw zero findings and passed blind.
   const r = spawnSync(
     "cargo",
-    ["rustc", "--lib", "--profile", "check", "--features", FEATURES, "--message-format=short", "--", "--force-warn", "dead_code"],
+    ["rustc", "--lib", "--profile", "check", "--features", FEATURES, "--message-format=short", "--color=never", "--", "--force-warn", "dead_code"],
     { cwd: join(ROOT, "src-tauri"), encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
   );
   const text = `${r.stdout ?? ""}\n${r.stderr ?? ""}`;
