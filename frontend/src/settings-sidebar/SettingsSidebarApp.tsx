@@ -140,7 +140,7 @@ interface Settings {
 
 // Orb box in physical px; matches window_manager::DEFAULT_ORB_SIZE in Rust
 // (smaller on Linux, where 200 px looked oversized on a 1080p laptop).
-const DEFAULT_ORB_SIZE = isLinuxRuntime() ? 160 : 200;
+const DEFAULT_ORB_SIZE = isLinuxRuntime() ? 80 : 200;
 
 const DEFAULT_SETTINGS: Settings = {
   autostart: true,

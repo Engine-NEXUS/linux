@@ -59,10 +59,10 @@ describe("wheelResize (±10px, per-target rails)", () => {
     expect(wheelResize("wakeup", 200, 100)).toBe(190);
   });
 
-  it("clamps Orb/Waves to 100–400", () => {
+  it("clamps Orb/Waves to 80–400", () => {
     expect(wheelResize("wakeup", 395, -100)).toBe(400);
-    expect(wheelResize("waves", 105, 100)).toBe(100);
-    expect(sizeClamp("waves")).toEqual([100, 400]);
+    expect(wheelResize("waves", 85, 100)).toBe(80);
+    expect(sizeClamp("waves")).toEqual([80, 400]);
   });
 
   it("clamps Loading to 40–160", () => {
@@ -74,23 +74,25 @@ describe("wheelResize (±10px, per-target rails)", () => {
 
 describe("sliderToPx / pxToSlider (plan 04 §2: 0–100 scale, px in background)", () => {
   it("maps rails exactly (0→min, 100→max)", () => {
-    expect(sliderToPx("wakeup", 0)).toBe(100);
+    expect(sliderToPx("wakeup", 0)).toBe(80);
     expect(sliderToPx("wakeup", 100)).toBe(400);
     expect(sliderToPx("loading", 0)).toBe(40);
     expect(sliderToPx("loading", 100)).toBe(160);
-    expect(pxToSlider("wakeup", 100)).toBe(0);
+    expect(pxToSlider("wakeup", 80)).toBe(0);
     expect(pxToSlider("wakeup", 400)).toBe(100);
   });
 
-  it("orb step is exactly 3px (no dead steps)", () => {
-    expect(sliderToPx("wakeup", 50)).toBe(250);
-    expect(sliderToPx("waves", 25)).toBe(175);
-    expect(pxToSlider("wakeup", 250)).toBe(50);
+  it("orb step is 3.2px (no dead steps)", () => {
+    expect(sliderToPx("wakeup", 50)).toBe(240);
+    expect(sliderToPx("waves", 25)).toBe(160);
+    expect(pxToSlider("wakeup", 240)).toBe(50);
+    const px = Array.from({ length: 101 }, (_, s) => sliderToPx("wakeup", s));
+    expect(new Set(px).size).toBe(101);
   });
 
-  it("round-trips stably for orb/waves (on-grid px only: 100+3k)", () => {
-    for (const px of [100, 160, 220, 280, 340, 400]) {
-      expect(sliderToPx("wakeup", pxToSlider("wakeup", px))).toBe(px);
+  it("round-trips stably for orb/waves (every slider step)", () => {
+    for (let s = 0; s <= 100; s++) {
+      expect(pxToSlider("wakeup", sliderToPx("wakeup", s))).toBe(s);
     }
   });
 
@@ -104,15 +106,15 @@ describe("sliderToPx / pxToSlider (plan 04 §2: 0–100 scale, px in background)
   });
 
   it("clamps out-of-range inputs", () => {
-    expect(sliderToPx("wakeup", -5)).toBe(100);
+    expect(sliderToPx("wakeup", -5)).toBe(80);
     expect(sliderToPx("wakeup", 150)).toBe(400);
     expect(pxToSlider("loading", 10)).toBe(0);
     expect(pxToSlider("loading", 999)).toBe(100);
   });
 
   it("current size seats the thumb (init-from-draft contract)", () => {
-    // A 250px orb opens the slider at exactly 50 (100–400 rails).
-    expect(pxToSlider("wakeup", 250)).toBe(50);
+    // A 240px orb opens the slider at exactly 50 (80–400 rails).
+    expect(pxToSlider("wakeup", 240)).toBe(50);
     // An 80px loader opens at 100*(80-40)/120 ≈ 33.
     expect(pxToSlider("loading", 80)).toBe(33);
   });

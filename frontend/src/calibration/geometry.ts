@@ -10,9 +10,12 @@
 
 export type CalibrationTarget = "wakeup" | "waves" | "loading";
 
-/** Per-target size clamp rails (task §4): Orb/Waves 100–400, Loading 40–160. */
+/**
+ * Per-target size clamp rails (task §4): Orb/Waves 80–400 (Rust
+ * `window_manager::ORB_SIZE_MIN`/`ORB_SIZE_MAX`), Loading 40–160.
+ */
 export function sizeClamp(target: CalibrationTarget): [number, number] {
-  return target === "loading" ? [40, 160] : [100, 400];
+  return target === "loading" ? [40, 160] : [80, 400];
 }
 
 /** Magnetic snap distance in logical px (task §3): 20px to center/bottom. */
@@ -81,7 +84,8 @@ export function wheelResize(
 /**
  * Size-slider scale (plan 04 §2): the HUD slider reads 0–100 for every
  * target; px is controlled in the background (Rust drafts, badges, save).
- * Orb/Waves map exactly (3px/step); Loading quantizes (1.2px/step —
+ * Orb/Waves move 3.2px/step, so every step lands on its own px and an
+ * on-grid size seats the thumb exactly; Loading quantizes (1.2px/step —
  * callers must guard on px change so duplicate steps never invoke).
  */
 export const SLIDER_MIN = 0;
